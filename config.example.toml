@@ -1,0 +1,43 @@
+[matrix]
+homeserver    = "https://matrix.example.org"
+user_id       = "@cleaningbot:example.org"
+access_token  = "syt_REPLACE_ME"
+device_id     = "REPLACE_ME"
+# recovery_key = "OPTIONAL RECOVERY KEY"
+
+[security]
+# Only these users may invite the bot to rooms.
+allowed_inviters = ["@admin:example.org"]
+# Only these users may run admin commands (!addfloor, !adduser, …).
+admin_users = ["@admin:example.org"]
+# encryption_strategy = "identity_based"  # AllDevices | IdentityBased (default) | OnlyTrusted
+
+[schedule]
+# Matrix room where all reminders and bot replies are posted.
+room_id = "!REPLACE_ME:example.org"
+
+# How often each floor must be cleaned (in weeks).  Default: 1 (every week).
+interval_weeks = 1
+
+# Day of week for the initial reminder: 0 = Monday … 6 = Sunday.
+reminder_weekday = 0          # Monday
+
+# Day of week for the final "not done yet" reminder.
+final_reminder_weekday = 6    # Sunday
+
+# IANA timezone used for weekday calculations.
+timezone = "Europe/Berlin"
+
+# Post a weekly stats summary on this weekday (0=Mon … 6=Sun).
+# Comment out to disable.
+summary_weekday = 0   # Monday
+
+# ── Floors and users ───────────────────────────────────────────────────────────
+# Floors and users are managed at runtime via bot commands — not in this file.
+#
+# To set up floors after starting the bot, use:
+#   !addfloor <name>              — create a floor
+#   !adduser @user:server <floor> — add a user to a floor
+#   !linkfloors <group> <f1> <f2> — group floors onto a shared schedule
+#
+# Run !help in the bot room for the full command reference.
