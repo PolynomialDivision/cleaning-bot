@@ -35,14 +35,18 @@ use config::Config;
 use state::State;
 
 /// Attach an `m.thread` relation to an already-built `RoomMessageEventContent`.
-fn add_thread_relation(content: &mut RoomMessageEventContent, root: OwnedEventId) {
-    content.relates_to = Some(Relation::Thread(Thread::reply(root.clone(), root)));
+/// `root`     — the thread root event (m.thread event_id).
+/// `reply_to` — the specific event being quoted (m.in_reply_to).
+fn add_thread_relation(content: &mut RoomMessageEventContent, root: OwnedEventId, reply_to: OwnedEventId) {
+    content.relates_to = Some(Relation::Thread(Thread::reply(root, reply_to)));
 }
 
 /// Wrap a plain-text reply in an `m.thread` relation, mentionifying any MXIDs.
-fn thread_reply(text: &str, root: OwnedEventId) -> RoomMessageEventContent {
+/// `root`     — the thread root event (m.thread event_id).
+/// `reply_to` — the specific event being quoted (m.in_reply_to).
+fn thread_reply(text: &str, root: OwnedEventId, reply_to: OwnedEventId) -> RoomMessageEventContent {
     let mut content = format::mentionify(text);
-    add_thread_relation(&mut content, root);
+    add_thread_relation(&mut content, root, reply_to);
     content
 }
 
@@ -208,7 +212,7 @@ async fn main() -> Result<()> {
                                 .join("\n\n");
                             format::mentionify(&joined)
                         };
-                        add_thread_relation(&mut content, thread_root);
+                        add_thread_relation(&mut content, thread_root, ev.event_id.clone());
                         r.send(content).await.ok();
                     }
                 }
@@ -284,7 +288,8 @@ async fn main() -> Result<()> {
                     drop(state);
                     if let Some(r) = client.get_room(&ctx.room_id) {
                         let msg = format!("«{unit_name}» is already marked as cleaned this week.");
-                        r.send(thread_reply(&msg, ev.content.relates_to.event_id)).await.ok();
+                        let reminder_id = ev.content.relates_to.event_id.clone();
+                        r.send(thread_reply(&msg, reminder_id.clone(), reminder_id)).await.ok();
                     }
                     return;
                 }
@@ -326,7 +331,7 @@ async fn main() -> Result<()> {
 
                 if let Some(r) = client.get_room(&ctx.room_id) {
                     let msg = format!("✅ {sender_str} marked «{unit_name}» as cleaned.");
-                    r.send(thread_reply(&msg, root_event_id)).await.ok();
+                    r.send(thread_reply(&msg, root_event_id.clone(), root_event_id)).await.ok();
                 }
             }
         }
