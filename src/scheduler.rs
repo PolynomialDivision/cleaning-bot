@@ -82,15 +82,14 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             continue;
         }
 
-        // Only the one user whose turn it is gets pinged.
-        let responsible: Vec<String> = state
-            .responsible_user(unit, year, week, interval)
-            .map(|u| vec![u])
-            .unwrap_or_default();
-        let users_text = if responsible.is_empty() {
-            "(nobody assigned)".to_owned()
-        } else {
-            responsible.join(", ")
+        // Only the one person whose turn it is gets pinged.
+        let responsible_person = state.responsible_user(unit, year, week, interval);
+        let responsible: Vec<String> = responsible_person.iter()
+            .filter_map(|p| p.matrix_id().map(str::to_owned))
+            .collect();
+        let users_text = match &responsible_person {
+            None    => "(nobody assigned)".to_owned(),
+            Some(p) => p.display().to_owned(),
         };
 
         let rooms_line = unit.rooms_text()
@@ -150,8 +149,8 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
 }
 
 /// Returns (message_text, users_to_mention).
-/// Only users responsible for still-uncleaned units are mentioned in the
-/// summary so people who already did their job don't get pinged.
+/// Only Matrix users responsible for still-uncleaned units are mentioned in
+/// the summary so people who already did their job don't get pinged.
 fn build_summary(
     state: &crate::state::State,
     year: i32,
@@ -183,14 +182,18 @@ fn build_summary(
             lines.push(format!("✅ **{}**{by}", unit.name));
         } else {
             let responsible_opt = state.responsible_user(unit, year, week, interval);
-            let responsible = responsible_opt.as_deref().unwrap_or("(nobody assigned)");
+            let responsible = responsible_opt.as_ref()
+                .map(|p| p.display())
+                .unwrap_or("(nobody assigned)");
             let rooms_str = unit.rooms_text()
                 .map(|r| format!("\n  {r}"))
                 .unwrap_or_default();
             lines.push(format!("❌ **{}** · {responsible}{rooms_str}", unit.name));
-            // Only ping the responsible user of uncleaned units
-            if let Some(u) = responsible_opt {
-                mention_users.push(u);
+            // Only ping the responsible Matrix user of uncleaned units
+            if let Some(p) = &responsible_opt {
+                if let Some(mxid) = p.matrix_id() {
+                    mention_users.push(mxid.to_owned());
+                }
             }
         }
 

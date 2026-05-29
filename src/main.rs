@@ -28,11 +28,12 @@ use tracing::{error, info, warn};
 mod commands;
 mod config;
 mod format;
+mod pdf;
 mod scheduler;
 mod state;
 
 use config::Config;
-use state::State;
+use state::{PersonRef, State};
 
 /// Attach an `m.thread` relation to an already-built `RoomMessageEventContent`.
 /// `root`     — the thread root event (m.thread event_id).
@@ -248,8 +249,8 @@ async fn main() -> Result<()> {
                                 let unit_name   = choice.unit_name.clone();
                                 for floor_name in &floor_names {
                                     if let Some(floor) = state.floors.iter_mut().find(|f| &f.name == floor_name) {
-                                        if !floor.users.contains(&sender_str) {
-                                            floor.users.push(sender_str.clone());
+                                        if !floor.members.iter().any(|p| p.matches_str(&sender_str)) {
+                                            floor.members.push(PersonRef::Matrix { mxid: sender_str.clone() });
                                         }
                                     }
                                 }
@@ -300,7 +301,7 @@ async fn main() -> Result<()> {
                     units.iter()
                         .find(|u| u.name == unit_name)
                         .and_then(|u| state.responsible_user(u, year, week, interval))
-                        .map(|u| vec![u])
+                        .map(|p| vec![p.display().to_owned()])
                         .unwrap_or_default()
                 };
                 state.completions.push(state::Completion {
@@ -447,12 +448,12 @@ async fn main() -> Result<()> {
 
                 for (i, unit) in units.iter().enumerate() {
                     let Some(emoji) = number_emojis.get(i) else { break };
-                    let users_text = if unit.users.is_empty() {
+                    let members_text = if unit.members.is_empty() {
                         String::new()
                     } else {
-                        format!(" — {}", unit.users.join(", "))
+                        format!(" — {}", unit.members.iter().map(|p| p.display()).collect::<Vec<_>>().join(", "))
                     };
-                    lines.push(format!("{emoji} **{}**{users_text}", unit.name));
+                    lines.push(format!("{emoji} **{}**{members_text}", unit.name));
                     choices.push(state::GreetingChoice {
                         emoji: emoji.to_string(),
                         unit_name: unit.name.clone(),

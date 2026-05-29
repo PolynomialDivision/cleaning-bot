@@ -7,6 +7,7 @@ edition = "2021"
 anyhow        = "1"
 chrono        = { version = "0.4", features = ["serde"] }
 chrono-tz     = "0.9"
+mime          = "0.3"
 mxbot-common  = { git = "https://github.com/PolynomialDivision/mxbot-common" }
 matrix-sdk    = { version = "0.17", features = ["e2e-encryption", "sqlite", "automatic-room-key-forwarding"] }
 serde         = { version = "1", features = ["derive"] }

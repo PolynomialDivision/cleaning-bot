@@ -3,6 +3,36 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, path::Path};
 
+// ── PersonRef ─────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PersonRef {
+    Matrix { mxid: String },
+    Named  { name: String },
+}
+
+impl PersonRef {
+    pub fn display(&self) -> &str {
+        match self {
+            PersonRef::Matrix { mxid } => mxid,
+            PersonRef::Named  { name } => name,
+        }
+    }
+    pub fn matrix_id(&self) -> Option<&str> {
+        match self {
+            PersonRef::Matrix { mxid } => Some(mxid.as_str()),
+            PersonRef::Named  { .. }   => None,
+        }
+    }
+    pub fn matches_str(&self, s: &str) -> bool {
+        match self {
+            PersonRef::Matrix { mxid } => mxid == s,
+            PersonRef::Named  { name } => name.eq_ignore_ascii_case(s),
+        }
+    }
+}
+
 // ── Persistent state ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -44,6 +74,10 @@ pub struct State {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Floor {
     pub name: String,
+    #[serde(default)]
+    pub members: Vec<PersonRef>,
+    /// Legacy Matrix-only field; migrated to `members` on load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<String>,
     /// Rooms on this floor that need to be cleaned (e.g. "Kitchen", "Bathroom").
     #[serde(default)]
@@ -164,7 +198,9 @@ impl State {
     pub async fn load(path: &Path) -> Result<Self> {
         if tokio::fs::metadata(path).await.is_ok() {
             let s = tokio::fs::read_to_string(path).await?;
-            Ok(serde_json::from_str(&s)?)
+            let mut st: Self = serde_json::from_str(&s)?;
+            st.migrate();
+            Ok(st)
         } else {
             Ok(Self::default())
         }
@@ -183,6 +219,17 @@ impl State {
         self.next_id += 1;
         id
     }
+
+    /// Migrate legacy `users: Vec<String>` fields to `members: Vec<PersonRef>`.
+    fn migrate(&mut self) {
+        for floor in &mut self.floors {
+            if floor.members.is_empty() && !floor.users.is_empty() {
+                floor.members = floor.users.drain(..)
+                    .map(|u| PersonRef::Matrix { mxid: u })
+                    .collect();
+            }
+        }
+    }
 }
 
 // ── Derived views ─────────────────────────────────────────────────────────────
@@ -192,7 +239,7 @@ impl State {
 pub struct CleaningUnit {
     pub name: String,
     pub floor_names: Vec<String>,
-    pub users: Vec<String>,
+    pub members: Vec<PersonRef>,
     /// Merged and deduplicated rooms from all constituent floors.
     pub rooms: Vec<String>,
     /// Per-floor room lists, preserving attribution for groups.
@@ -201,6 +248,16 @@ pub struct CleaningUnit {
 }
 
 impl CleaningUnit {
+    pub fn has_member(&self, s: &str) -> bool {
+        self.members.iter().any(|p| p.matches_str(s))
+    }
+    pub fn has_matrix_member(&self, mxid: &str) -> bool {
+        self.members.iter().any(|p| p.matrix_id() == Some(mxid))
+    }
+    pub fn matrix_ids(&self) -> Vec<&str> {
+        self.members.iter().filter_map(|p| p.matrix_id()).collect()
+    }
+
     /// Format rooms for display.
     /// Single floor: "Rooms: Kitchen, Bathroom"
     /// Group with multiple floors: "Rooms:\n  Floor3: …\n  Floor4: …"
@@ -240,7 +297,7 @@ impl State {
             .map(|f| CleaningUnit {
                 name: f.name.clone(),
                 floor_names: vec![f.name.clone()],
-                users: f.users.clone(),
+                members: f.members.clone(),
                 rooms: f.rooms.clone(),
                 floor_rooms: vec![(f.name.clone(), f.rooms.clone())],
             })
@@ -253,9 +310,17 @@ impl State {
                 .iter()
                 .filter_map(|fn_| self.floors.iter().find(|f| &f.name == fn_))
                 .collect();
-            let users: Vec<String> = floors.iter()
-                .flat_map(|f| f.users.iter().cloned())
-                .collect();
+            // Deduplicate members by display name across floors.
+            let mut seen_names: HashSet<String> = HashSet::new();
+            let mut members: Vec<PersonRef> = Vec::new();
+            for f in &floors {
+                for p in &f.members {
+                    let key = p.display().to_owned();
+                    if seen_names.insert(key) {
+                        members.push(p.clone());
+                    }
+                }
+            }
             // Merge rooms from all member floors, preserving order and deduplicating.
             let mut rooms: Vec<String> = Vec::new();
             for f in &floors {
@@ -271,7 +336,7 @@ impl State {
             units.push(CleaningUnit {
                 name: group.name.clone(),
                 floor_names,
-                users,
+                members,
                 rooms,
                 floor_rooms,
             });
@@ -282,7 +347,7 @@ impl State {
 
     /// Find the cleaning unit a user belongs to (first match).
     pub fn unit_for_user(&self, user: &str) -> Option<CleaningUnit> {
-        self.units().into_iter().find(|u| u.users.iter().any(|u2| u2 == user))
+        self.units().into_iter().find(|u| u.has_member(user))
     }
 
     pub fn is_completed(&self, unit: &str, year: i32, week: u32) -> bool {
@@ -302,7 +367,7 @@ impl State {
     /// given week.
     pub fn is_absent(&self, user_id: &str, floor_name: &str, year: i32, week: u32) -> bool {
         self.absences.iter().any(|a| {
-            if a.user_id != user_id || a.floor_name != floor_name {
+            if !a.user_id.eq_ignore_ascii_case(user_id) || a.floor_name != floor_name {
                 return false;
             }
             let end = add_weeks(a.from_year, a.from_week, a.duration_weeks as i64);
@@ -402,20 +467,20 @@ impl State {
         streak
     }
 
-    /// Which single user is responsible for cleaning `unit` in `(year, week)`.
+    /// Which single person is responsible for cleaning `unit` in `(year, week)`.
     ///
     /// An accepted swap for that unit/week overrides the rotation.  Otherwise
-    /// the responsible user is determined by round-robin through `unit.users`,
+    /// the responsible person is determined by round-robin through `unit.members`,
     /// indexed by the position of `(year, week)` in the sequence of due weeks
-    /// counted from `tracking_start`.  Returns `None` when the unit has no users.
+    /// counted from `tracking_start`.  Returns `None` when the unit has no members.
     pub fn responsible_user(
         &self,
         unit: &CleaningUnit,
         year: i32,
         week: u32,
         interval: u32,
-    ) -> Option<String> {
-        if unit.users.is_empty() {
+    ) -> Option<PersonRef> {
+        if unit.members.is_empty() {
             return None;
         }
         // An accepted swap overrides the rotation for this specific week.
@@ -425,13 +490,13 @@ impl State {
                 && s.iso_week == week
                 && s.status == SwapStatus::Accepted
         }) {
-            return Some(swap.target.clone());
+            return Some(PersonRef::Matrix { mxid: swap.target.clone() });
         }
         let start = self.tracking_start();
         // Number of due weeks from start up to and including (year, week).
         let n = all_due_weeks_in_range(start, (year, week), interval).len();
         let idx = n.saturating_sub(1); // 0-based index of this due week
-        unit.users.get(idx % unit.users.len()).cloned()
+        unit.members.get(idx % unit.members.len()).cloned()
     }
 
     /// Most recent completion for a unit, if any.

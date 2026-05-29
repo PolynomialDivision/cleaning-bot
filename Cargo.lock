@@ -441,6 +441,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "matrix-sdk",
+ "mime",
  "mxbot-common",
  "serde",
  "serde_json",
