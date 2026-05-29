@@ -22,8 +22,9 @@ pub async fn handle(
 
     // Commands that need direct room access return RoomMessageEventContent.
     match cmd {
-        "!cleanplan" => return cmd_cleanplan(ctx, sender, room, &args).await,
-        "!remind"    => return cmd_remind(ctx, sender, room, &args).await,
+        "!cleanplan"    => return cmd_cleanplan(ctx, sender, room, &args).await,
+        "!remind"       => return cmd_remind(ctx, sender, room, &args).await,
+        "!testnotify"   => return cmd_testnotify(room).await,
         _ => {}
     }
 
@@ -140,10 +141,10 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
     let mut lines = vec![];
     if !marked.is_empty() {
-        lines.push(format!("✅ Marked as cleaned: {}", marked.join(", ")));
+        lines.push(format!("✅ Cleaned: {}", marked.join(", ")));
     }
     if !already_done.is_empty() {
-        lines.push(format!("Already marked done this week: {}", already_done.join(", ")));
+        lines.push(format!("Already done: {}", already_done.join(", ")));
     }
     Ok(Some(lines.join("\n")))
 }
@@ -160,25 +161,25 @@ async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
         return Ok(Some("No floors configured yet.".into()));
     }
 
-    let mut lines = vec![format!("📋 Cleaning status — week {week} ({}):", week_dates(year, week))];
+    let mut lines = vec![format!("📋 **Cleaning status** · week {week} ({})", week_dates(year, week))];
     for unit in &units {
         let done = state.is_completed(&unit.name, year, week);
         let icon = if done { "✅" } else { "❌" };
         let who = if done {
             state.completions.iter()
                 .find(|c| c.unit_name == unit.name && c.iso_year == year && c.iso_week == week)
-                .map(|c| format!(" (by {})", c.completed_by))
+                .map(|c| format!(" · {}", c.completed_by))
                 .unwrap_or_default()
         } else {
             match state.responsible_user(&unit, year, week, interval) {
-                Some(u) => format!(" — responsible: {u}"),
-                None    => " — (nobody assigned)".into(),
+                Some(u) => format!(" · {u}"),
+                None    => " · (nobody assigned)".into(),
             }
         };
         let rooms_str = unit.rooms_text()
-            .map(|r| format!("\n      {r}"))
+            .map(|r| format!("\n  {r}"))
             .unwrap_or_default();
-        lines.push(format!("  {icon} **{}**{who}{rooms_str}", unit.name));
+        lines.push(format!("{icon} **{}**{who}{rooms_str}", unit.name));
     }
     Ok(Some(lines.join("\n")))
 }
@@ -197,7 +198,7 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
 
     // ── Global stats ──────────────────────────────────────────────────────────
     let mut lines = vec![
-        format!("📊 Cleaning statistics — tracking since week {start_w} ({}):", week_dates(start_y, start_w)),
+        format!("📊 **Cleaning stats** · since week {start_w} ({})", week_dates(start_y, start_w)),
     ];
 
     let units = state.units();
@@ -224,22 +225,22 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
         lines.push(String::new());
         lines.push(format!("🏢 {}", unit.name));
         lines.push(format!(
-            "   Completed: {n_done}/{n_due} ({pct}%)  │  Missed: {n_missed}"
+            "Completed: {n_done}/{n_due} ({pct}%) · Missed: {n_missed}"
         ));
         lines.push(format!(
-            "   Streak: {streak}  │  This week: {}",
+            "Streak: {streak} · This week: {}",
             if this_week { "✅" } else { "❌" }
         ));
 
         if let Some(last) = state.last_completed(&unit.name) {
             lines.push(format!(
-                "   Last cleaned: week {week} ({dates}) by {by}",
+                "Last cleaned: week {week} ({dates}) by {by}",
                 week = last.iso_week,
                 dates = week_dates(last.iso_year, last.iso_week),
                 by = last.completed_by,
             ));
         } else {
-            lines.push("   Never cleaned.".into());
+            lines.push("Never cleaned.".into());
         }
 
         // Per-user completion count
@@ -250,7 +251,7 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
         for u in &unit.users {
             let cnt = per_user.get(u.as_str()).copied().unwrap_or(0);
             let miss_u = if n_due > 0 { n_due - cnt.min(n_due) } else { 0 };
-            lines.push(format!("   {u}: {cnt} cleanings  ({miss_u} missed)"));
+            lines.push(format!("{u}: {cnt} cleanings · {miss_u} missed"));
         }
 
         // List missed weeks (cap at 10 to avoid wall of text)
@@ -264,7 +265,7 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
             } else {
                 String::new()
             };
-            lines.push(format!("   Missed weeks: {}{suffix}", shown.join(", ")));
+            lines.push(format!("Missed weeks: {}{suffix}", shown.join(", ")));
         }
     }
 
@@ -296,19 +297,15 @@ fn stats_for_user(state: &crate::state::State, user: &str, interval: u32) -> Str
         .unwrap_or(0);
 
     let mut lines = vec![
-        format!("📊 Stats for {user} — tracking since week {start_w} ({}):", week_dates(start_y, start_w)),
-        format!("   Unit:             {unit_name}"),
-        format!("   Total cleanings:  {n_done}"),
-        format!("   Due weeks so far: {n_due}"),
-        format!("   Missed:           {n_missed}  ({pct}% completion rate)"),
-        format!("   Current streak:   {streak} consecutive weeks"),
+        format!("📊 **Stats** · {user} · since week {start_w} ({})", week_dates(start_y, start_w)),
+        format!("Floor: {unit_name} · {n_done} cleanings · {pct}% completion"),
+        format!("Missed: {n_missed} · Streak: {streak}"),
     ];
 
     if let Some(last) = user_completions.iter().max_by_key(|c| c.completed_at) {
         lines.push(format!(
-            "   Last cleaned:     week {w} ({dates})",
-            w = last.iso_week,
-            dates = week_dates(last.iso_year, last.iso_week),
+            "Last: week {w} ({})",
+            week_dates(last.iso_year, last.iso_week), w = last.iso_week,
         ));
     }
 
@@ -316,10 +313,10 @@ fn stats_for_user(state: &crate::state::State, user: &str, interval: u32) -> Str
     let mut sorted = user_completions.clone();
     sorted.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
     if !sorted.is_empty() {
-        lines.push("   Recent:".into());
+        lines.push("Recent:".into());
         for c in sorted.iter().take(5) {
             lines.push(format!(
-                "     • {} — week {w} ({})",
+                "  • {} · week {w} ({})",
                 c.unit_name, week_dates(c.iso_year, c.iso_week), w = c.iso_week,
             ));
         }
@@ -346,7 +343,7 @@ async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
         let rooms_str = if floor.rooms.is_empty() {
             String::new()
         } else {
-            format!(" — Rooms: {}", floor.rooms.join(", "))
+            format!(" · {}", floor.rooms.join(", "))
         };
         lines.push(format!("  • **{}**: {users}{rooms_str}", floor.name));
 
@@ -452,8 +449,8 @@ async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     state.save(&ctx.state_path).await?;
 
     Ok(Some(format!(
-        "🔄 Swap request #{id} sent to {target_str} for «{unit_name}» (week {week}, {dates}).\n\
-         {target_str}: reply `!acceptswap {id}` or `!rejectswap {id}`.",
+        "🔄 Swap #{id} · «{unit_name}» week {week} ({dates})\n\
+         {target_str}: !acceptswap {id} or !rejectswap {id}",
         dates = week_dates(year, week),
     )))
 }
@@ -538,7 +535,7 @@ async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
     }
     floor.users.push(sender_str.to_owned());
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ You have joined floor «{floor_name}».")))
+    Ok(Some(format!("✅ Joined «{floor_name}».")))
 }
 
 // ── !leavefloor <floor> ───────────────────────────────────────────────────────
@@ -563,7 +560,7 @@ async fn cmd_leavefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
         return Ok(Some(format!("You are not on floor «{floor_name}».")));
     }
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ You have left floor «{floor_name}».")))
+    Ok(Some(format!("✅ Left «{floor_name}».")))
 }
 
 // ── Admin: !adduser @user floor ───────────────────────────────────────────────
@@ -823,7 +820,7 @@ async fn cmd_cleanplan(ctx: &BotContext, _sender: &OwnedUserId, room: &Room, arg
     let units    = state.units();
 
     let mut lines = vec![format!(
-        "📅 Cleaning plan — next {} due week{} (interval: every {} week{}):",
+        "📅 **Cleaning plan** · next {} week{} · every {} week{}",
         n,
         if n == 1 { "" } else { "s" },
         interval,
@@ -881,7 +878,7 @@ async fn cmd_cleanplan(ctx: &BotContext, _sender: &OwnedUserId, room: &Room, arg
                 }
             };
 
-            lines.push(format!("  {icon} {} — {detail}", unit.name));
+            lines.push(format!("  {icon} {} : {detail}", unit.name));
         }
     }
 
@@ -943,8 +940,8 @@ async fn cmd_undo(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     state.save(&ctx.state_path).await?;
 
     let mut lines = vec![];
-    if !undone.is_empty()  { lines.push(format!("↩️ Undone this week: {}", undone.join(", "))); }
-    if !absent.is_empty()  { lines.push(format!("Not marked done this week: {}", absent.join(", "))); }
+    if !undone.is_empty()  { lines.push(format!("↩️ Undone: {}", undone.join(", "))); }
+    if !absent.is_empty()  { lines.push(format!("Not done this week: {}", absent.join(", "))); }
     if !no_perm.is_empty() { lines.push(format!("❌ Not your floor: {}", no_perm.join(", "))); }
     Ok(Some(lines.join("\n")))
 }
@@ -986,7 +983,7 @@ async fn cmd_next(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     let suffix = if done { "  ✅ already done!" } else { "" };
 
     Ok(Some(format!(
-        "📅 Next due for {user}: **Week {dw} ({dates})** ({when}) — {}{}",
+        "📅 Next due for {user}: **Week {dw} ({dates})** ({when}) · {}{}",
         unit.name, suffix,
         dates = week_dates(dy, dw),
     )))
@@ -1038,10 +1035,10 @@ async fn cmd_skip(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
     let mut lines = vec![];
     if !skipped.is_empty() {
-        lines.push(format!("⏭️ Week skipped (won't count as missed): {}", skipped.join(", ")));
+        lines.push(format!("⏭️ Skipped (won't count as missed): {}", skipped.join(", ")));
     }
     if !already.is_empty() {
-        lines.push(format!("Already marked done this week: {}", already.join(", ")));
+        lines.push(format!("Already done: {}", already.join(", ")));
     }
     Ok(Some(lines.join("\n")))
 }
@@ -1103,9 +1100,9 @@ async fn cmd_remind(
             .map(|r| format!("\n{r}"))
             .unwrap_or_default();
         let msg = format!(
-            "🧹 Cleaning reminder — {unit_name} (week {week}, {dates})\n\
-             Responsible: {users_text}{rooms_line}\n\
-             React with ✅ or type !done when done.",
+            "🧹 **{unit_name}** · week {week} ({dates})\n\
+             {users_text}{rooms_line}\n\
+             ✅ React or type !done",
             dates = week_dates(year, week),
         );
 
@@ -1188,8 +1185,8 @@ async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
         let streak = if e.streak >= 2 { format!("  🔥{}", e.streak) } else { String::new() };
         let skip_s = if e.skips > 0 { format!("  ⏭️{}", e.skips) } else { String::new() };
         lines.push(format!(
-            "{medal} {:>2}. {} — {}/{} ({:>3}%){}{}",
-            i + 1, e.user, e.done, n_due, e.pct, streak, skip_s
+            "{medal} {}: {}/{} ({:>3}%){}{}",
+            e.user, e.done, n_due, e.pct, streak, skip_s
         ));
     }
     Ok(Some(lines.join("\n")))
@@ -1228,8 +1225,7 @@ async fn cmd_absent(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Re
 
     let end = add_weeks(from_year, from_week, weeks as i64);
     Ok(Some(format!(
-        "🌴 {user} is away from «{}» for {weeks} week{} (back week {ew}, {edates}). \
-         Use !back {user} to cancel early.",
+        "🌴 {user} away from «{}» for {weeks} week{} · back week {ew} ({edates})",
         unit.name,
         if weeks == 1 { "" } else { "s" },
         ew = end.1,
@@ -1254,7 +1250,7 @@ async fn cmd_back(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
         return Ok(Some(format!("{user} has no active absence.")));
     }
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ {user} is back — absence cancelled.")))
+    Ok(Some(format!("✅ {user} is back.")))
 }
 
 // ── !blame / !blame @user / !blame <floor> ────────────────────────────────────
@@ -1283,7 +1279,7 @@ fn blame_all(state: &crate::state::State, year: i32, week: u32, interval: u32) -
         return "✅ All due units are cleaned this week — nothing to blame!".into();
     }
 
-    let mut lines = vec![format!("😤 Blame — week {week} ({})", week_dates(year, week))];
+    let mut lines = vec![format!("😤 **Blame** · week {week} ({})", week_dates(year, week))];
     for unit in uncleaned {
         let users = if unit.users.is_empty() {
             "(nobody assigned)".into()
@@ -1295,8 +1291,8 @@ fn blame_all(state: &crate::state::State, year: i32, week: u32, interval: u32) -
         let streak   = state.streak_for(&unit.name, interval);
         lines.push(String::new());
         lines.push(format!("❌ {}", unit.name));
-        lines.push(format!("   Responsible: {users}"));
-        lines.push(format!("   Streak: {streak}  │  Missed: {n_missed} of {n_due} weeks"));
+        lines.push(format!("Responsible: {users}"));
+        lines.push(format!("Streak: {streak} · Missed: {n_missed} of {n_due}"));
     }
     lines.join("\n")
 }
@@ -1328,7 +1324,7 @@ fn blame_user(state: &crate::state::State, user: &str, interval: u32) -> String 
     let pct = if n_due > 0 { 100 * n_done_by_user / n_due } else { 100 };
     let streak = state.streak_for(&unit.name, interval);
 
-    let mut lines = vec![format!("😤 Blame for {user}")];
+    let mut lines = vec![format!("😤 **Blame** · {user}")];
     lines.push(String::new());
     lines.push(format!("Floor: {}", unit.name));
     lines.push(format!("Personally cleaned: {n_done_by_user}/{n_due} due weeks ({pct}%)"));
@@ -1392,11 +1388,11 @@ fn blame_unit(state: &crate::state::State, unit_name: &str, year: i32, week: u32
         unit.users.join(", ")
     };
 
-    let mut lines = vec![format!("😤 Blame for {}", unit.name)];
+    let mut lines = vec![format!("😤 **Blame** · {}", unit.name)];
     lines.push(String::new());
     lines.push(format!("Responsible: {users}"));
-    lines.push(format!("Completed: {n_done}/{n_due} ({pct}%)  │  Missed: {n_missed}"));
-    lines.push(format!("Streak: {streak}  │  This week: {}", if this_week { "✅" } else { "❌" }));
+    lines.push(format!("Completed: {n_done}/{n_due} ({pct}%) · Missed: {n_missed}"));
+    lines.push(format!("Streak: {streak} · This week: {}", if this_week { "✅" } else { "❌" }));
 
     if let Some(last) = state.last_completed(&unit.name) {
         lines.push(format!(
@@ -1448,38 +1444,63 @@ fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
 fn help_text() -> String {
     r#"🧹 Cleaning bot commands:
 
-  !help                        — show this help
-  !status                      — this week's cleaned / not-cleaned overview
-  !floors                      — list all floors, groups and their users
-  !done [floor_or_group]       — mark your cleaning as done for this week
-  !undo [floor_or_group]       — undo this week's done mark
-                                 (also fires automatically when you remove a ✅ reaction)
-  !next [@user]                — when is your (or @user's) next due week?
-  !stats [@user]               — completion statistics; add @user for one person
-  !leaderboard                 — overall cleaning leaderboard with streaks
-  !cleanplan [N]               — show the next N due cleaning weeks (default 6)
-  !blame                       — show all units due but not cleaned this week
-  !blame @user                 — cleaning record for one user
-  !blame <floor>               — cleaning record for a specific floor
-  !joinfloor <floor>           — add yourself to a floor
-  !leavefloor <floor>          — remove yourself from a floor
-  !swap @user [floor] [week <N>] — propose a cleaning swap; omit week for current,
-                                 or add e.g. `week 24` to swap a future week;
-                                 they must accept with !acceptswap
-  !acceptswap <id>             — accept a pending swap request
-  !rejectswap <id>             — reject a pending swap request
+  !help                        · show this help
+  !status                      · this week's cleaned / not-cleaned overview
+  !floors                      · list all floors, groups and their users
+  !done [floor_or_group]       · mark your cleaning as done for this week
+  !undo [floor_or_group]       · undo this week's done mark
+  !next [@user]                · when is your (or @user's) next due week?
+  !stats [@user]               · completion statistics; add @user for one person
+  !leaderboard                 · overall cleaning leaderboard with streaks
+  !cleanplan [N]               · show the next N due cleaning weeks (default 6)
+  !blame                       · all units due but not cleaned this week
+  !blame @user                 · cleaning record for one user
+  !blame <floor>               · cleaning record for a specific floor
+  !joinfloor <floor>           · add yourself to a floor
+  !leavefloor <floor>          · remove yourself from a floor
+  !swap @user [floor] [week N] · propose a swap; !acceptswap / !rejectswap to respond
+  !acceptswap <id>             · accept a pending swap request
+  !rejectswap <id>             · reject a pending swap request
 
 Admin commands:
-  !skip [floor]                         — excuse this week (won't count as missed)
-  !remind [floor]                       — manually fire the cleaning reminder now
-  !absent @user [weeks]                 — mark user away for N weeks (default 4)
-  !back @user                           — cancel an absence early
-  !addfloor <name>                      — create a new floor
-  !removefloor <name>                   — delete a floor
-  !adduser @user <floor>                — assign a user to a floor
-  !removeuser @user <floor>             — unassign a user from a floor
-  !addroom <floor> <room>               — add a room to clean on a floor
-  !removeroom <floor> <room>            — remove a room from a floor
-  !linkfloors <group> <floor1> [floor2…]— group floors onto one shared schedule
-  !unlinkfloors <group>                 — dissolve a floor group"#.to_owned()
+  !skip [floor]                         · excuse this week (won't count as missed)
+  !remind [floor]                       · manually fire the cleaning reminder now
+  !absent @user [weeks]                 · mark user away for N weeks (default 4)
+  !back @user                           · cancel an absence early
+  !addfloor <name>                      · create a new floor
+  !removefloor <name>                   · delete a floor
+  !adduser @user <floor>                · assign a user to a floor
+  !removeuser @user <floor>             · unassign a user from a floor
+  !addroom <floor> <room>               · add a room to clean on a floor
+  !removeroom <floor> <room>            · remove a room from a floor
+  !linkfloors <group> <floor1> [floor2…]· group floors onto one shared schedule
+  !unlinkfloors <group>                 · dissolve a floor group"#.to_owned()
+}
+
+// ── !testnotify ───────────────────────────────────────────────────────────────
+// Temporary test command: schedules an @room mention in 5 minutes to verify
+// that MSC3952 push notifications work in encrypted rooms.
+
+async fn cmd_testnotify(room: &Room) -> Result<Option<RoomMessageEventContent>> {
+    let room = room.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(5 * 60)).await;
+
+        use matrix_sdk::ruma::events::Mentions;
+        let mut msg = RoomMessageEventContent::text_html(
+            "🔔 @room · test notification (MSC3952 encrypted @room ping)",
+            "🔔 @room · test notification (MSC3952 encrypted @room ping)",
+        );
+        let mut mentions = Mentions::new();
+        mentions.room = true;
+        msg = msg.add_mentions(mentions);
+
+        if let Err(e) = room.send(msg).await {
+            tracing::error!("testnotify send failed: {e}");
+        }
+    });
+
+    Ok(Some(RoomMessageEventContent::text_plain(
+        "⏱ @room notification scheduled in 5 minutes.",
+    )))
 }

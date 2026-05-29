@@ -102,9 +102,9 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             && !state.reminder_sent(&unit.name, year, week, &ReminderKind::Initial)
         {
             let msg = format!(
-                "🧹 Cleaning reminder — {} (week {week}, {})\n\
-                 Responsible: {users_text}{rooms_line}\n\
-                 React with ✅ or type !done when done.",
+                "🧹 **{}** · week {week} ({})\n\
+                 {users_text}{rooms_line}\n\
+                 ✅ React or type !done",
                 unit.name, week_dates(year, week)
             );
             let resp = room.send(mention_message(&msg, &responsible, &room).await).await
@@ -119,9 +119,9 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             && !state.reminder_sent(&unit.name, year, week, &ReminderKind::Final)
         {
             let msg = format!(
-                "⚠️ Last chance! {} has not been marked as cleaned yet this week (week {week}, {}).\n\
-                 Responsible: {users_text}{rooms_line}\n\
-                 React with ✅ or type !done, or arrange a swap with !swap @user.",
+                "⚠️ **{}** still not cleaned · week {week} ({})\n\
+                 {users_text}{rooms_line}\n\
+                 ✅ React or type !done · swap: !swap @user",
                 unit.name, week_dates(year, week)
             );
             let resp = room.send(mention_message(&msg, &responsible, &room).await).await
@@ -159,7 +159,7 @@ fn build_summary(
     interval: u32,
 ) -> (String, Vec<String>) {
     let units = state.units();
-    let mut lines = vec![format!("📋 Weekly cleaning summary — week {week} ({})", week_dates(year, week))];
+    let mut lines = vec![format!("📋 **Cleaning summary** · week {week} ({})", week_dates(year, week))];
     lines.push(String::new());
 
     let mut done_count = 0usize;
@@ -178,16 +178,16 @@ fn build_summary(
             done_count += 1;
             let by = state.completions.iter()
                 .find(|c| c.unit_name == unit.name && c.iso_year == year && c.iso_week == week)
-                .map(|c| format!(" by {}", c.completed_by))
+                .map(|c| format!(" · {}", c.completed_by))
                 .unwrap_or_default();
-            lines.push(format!("✅ {}{by}", unit.name));
+            lines.push(format!("✅ **{}**{by}", unit.name));
         } else {
             let responsible_opt = state.responsible_user(unit, year, week, interval);
             let responsible = responsible_opt.as_deref().unwrap_or("(nobody assigned)");
             let rooms_str = unit.rooms_text()
                 .map(|r| format!("\n  {r}"))
                 .unwrap_or_default();
-            lines.push(format!("❌ {} — NOT cleaned  (responsible: {responsible}){rooms_str}", unit.name));
+            lines.push(format!("❌ **{}** · {responsible}{rooms_str}", unit.name));
             // Only ping the responsible user of uncleaned units
             if let Some(u) = responsible_opt {
                 mention_users.push(u);
@@ -202,7 +202,7 @@ fn build_summary(
 
     lines.push(String::new());
     if due_count > 0 {
-        lines.push(format!("Overall: {done_count}/{due_count} units cleaned this week."));
+        lines.push(format!("{done_count}/{due_count} cleaned this week"));
 
         let overdue: Vec<_> = units.iter()
             .filter(|u| state.missed_weeks_for(&u.name, interval).len() >= 2)
@@ -212,7 +212,7 @@ fn build_summary(
             lines.push("⚠️ Repeatedly missed (2+ weeks in a row):".into());
             for u in overdue {
                 let missed = state.missed_weeks_for(&u.name, interval);
-                lines.push(format!("   {} — missed {} weeks", u.name, missed.len()));
+                lines.push(format!("   {} : {} weeks missed", u.name, missed.len()));
             }
         }
     } else {
