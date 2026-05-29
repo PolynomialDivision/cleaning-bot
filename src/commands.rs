@@ -14,15 +14,37 @@ use crate::{
     },
 };
 
+/// Shell-like tokenizer: splits on whitespace but keeps "quoted strings" together.
+/// Quotes are stripped from the resulting tokens.
+/// Example: `!addroom "2. Stock" "Scharni Toilette"` → ["!addroom", "2. Stock", "Scharni Toilette"]
+fn tokenize(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' | '\'' => quoted = !quoted,
+            ' ' | '\t' if !quoted => {
+                if !cur.is_empty() { tokens.push(std::mem::take(&mut cur)); }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() { tokens.push(cur); }
+    tokens
+}
+
 pub async fn handle(
     ctx: &BotContext,
     sender: &OwnedUserId,
     room: &Room,
     body: &str,
 ) -> Result<Option<RoomMessageEventContent>> {
-    let mut parts = body.split_whitespace();
-    let cmd = parts.next().unwrap_or("");
-    let args: Vec<&str> = parts.collect();
+    let mut tokens = tokenize(body);
+    let cmd_owned  = if tokens.is_empty() { String::new() } else { tokens.remove(0) };
+    let cmd        = cmd_owned.as_str();
+    let arg_strings = tokens; // remaining tokens are the args
+    let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
 
     // Commands that need direct room access.
     match cmd {
@@ -39,10 +61,9 @@ pub async fn handle(
         "!done"         => cmd_done(ctx, sender, &args).await,
         "!status"       => cmd_status(ctx).await,
         "!stats"        => cmd_stats(ctx, &args).await,
-        "!floors"       => cmd_floors(ctx).await,
-        "!areas"        => cmd_floors(ctx).await,
-        "!joinfloor"    => cmd_joinfloor(ctx, sender, &args).await,
-        "!leavefloor"   => cmd_leavefloor(ctx, sender, &args).await,
+        "!groups"       => cmd_floors(ctx).await,
+        "!joingroup"    => cmd_joinfloor(ctx, sender, &args).await,
+        "!leavegroup"   => cmd_leavefloor(ctx, sender, &args).await,
         "!swap"         => cmd_swap(ctx, sender, &args).await,
         "!acceptswap"   => cmd_acceptswap(ctx, sender, &args).await,
         "!rejectswap"   => cmd_rejectswap(ctx, sender, &args).await,
@@ -50,8 +71,8 @@ pub async fn handle(
         "!removeuser"   => cmd_removeuser(ctx, sender, &args).await,
         "!addperson"    => cmd_addperson(ctx, sender, &args).await,
         "!removeperson" => cmd_removeperson(ctx, sender, &args).await,
-        "!addfloor"     => cmd_addfloor(ctx, sender, &args).await,
-        "!removefloor"  => cmd_removefloor(ctx, sender, &args).await,
+        "!addgroup"     => cmd_addfloor(ctx, sender, &args).await,
+        "!removegroup"  => cmd_removefloor(ctx, sender, &args).await,
         "!addroom"      => cmd_addroom(ctx, sender, &args).await,
         "!removeroom"   => cmd_removeroom(ctx, sender, &args).await,
         "!undo"         => cmd_undo(ctx, sender, &args).await,
@@ -154,9 +175,6 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
             iso_week:     week,
             completed_at: now,
             skipped:      false,
-            unit_name:    String::new(),
-            completed_by: String::new(),
-            responsible_users: Vec::new(),
         });
         marked.push(name);
     }
@@ -344,7 +362,7 @@ async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
 async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !joinfloor <group>".into())),
+        None    => return Ok(Some("Usage: !joingroup <group>".into())),
     };
     let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
@@ -382,7 +400,7 @@ async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
 async fn cmd_leavefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !leavefloor <group>".into())),
+        None    => return Ok(Some("Usage: !leavegroup <group>".into())),
     };
     let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
@@ -536,7 +554,7 @@ async fn cmd_addfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> 
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !addfloor <name>".into())),
+        None    => return Ok(Some("Usage: !addgroup <name>".into())),
     };
     let mut state = ctx.state.lock().await;
     if state.group_by_name(&name).is_some() {
@@ -553,7 +571,7 @@ async fn cmd_removefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) 
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !removefloor <name>".into())),
+        None    => return Ok(Some("Usage: !removegroup <name>".into())),
     };
     let mut state = ctx.state.lock().await;
     let before = state.cleaning_groups.len();
@@ -682,11 +700,10 @@ async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
         requester: sender_mxid.to_owned(),
         target:    target_mxid.to_owned(),
         group_id:  group_id.clone(),
-        iso_year:  year,
-        iso_week:  week,
+        iso_year:   year,
+        iso_week:   week,
         created_at: Utc::now(),
-        status:    SwapStatus::Pending,
-        unit_name: String::new(),
+        status:     SwapStatus::Pending,
     });
     state.save(&ctx.state_path).await?;
 
@@ -889,9 +906,6 @@ async fn cmd_skip(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
             iso_week:     week,
             completed_at: now,
             skipped:      true,
-            unit_name:    String::new(),
-            completed_by: String::new(),
-            responsible_users: Vec::new(),
         });
         skipped.push(name);
     }
@@ -1045,13 +1059,11 @@ async fn cmd_absent(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Re
     state.absences.retain(|a| a.person_id != person.id);
     for group_id in &groups {
         state.absences.push(Absence {
-            person_id: person.id.clone(),
-            group_id:  group_id.clone(),
-            from_year: from_y,
-            from_week: from_w,
+            person_id:      person.id.clone(),
+            group_id:       group_id.clone(),
+            from_year:      from_y,
+            from_week:      from_w,
             duration_weeks: weeks,
-            user_id:    String::new(),
-            floor_name: String::new(),
         });
     }
     state.save(&ctx.state_path).await?;
@@ -1523,8 +1535,8 @@ fn help_text() -> String {
   !blame                       · all due but uncleaned groups this week
   !blame @user                 · cleaning record for one person
   !blame <group>               · cleaning record for a specific group
-  !joinfloor <group>           · add yourself to a cleaning group
-  !leavefloor <group>          · remove yourself from a cleaning group
+  !joingroup <group>            · add yourself to a cleaning group
+  !leavegroup <group>           · remove yourself from a cleaning group
   !swap @user [group] [week N] · propose a swap; !acceptswap / !rejectswap to respond
   !acceptswap <id>             · accept a pending swap request
   !rejectswap <id>             · reject a pending swap request
@@ -1537,8 +1549,8 @@ Admin commands:
   !pdf [N]                              · generate printable HTML schedule (default 8 weeks)
   !absent <person> [weeks]              · mark person away (default 4 weeks)
   !back <person>                        · cancel an absence early
-  !addfloor <name>                      · create a new cleaning group
-  !removefloor <name>                   · delete a cleaning group
+  !addgroup <name>                      · create a new cleaning group
+  !removegroup <name>                   · delete a cleaning group
   !adduser @user <group>                · assign a Matrix user to a group
   !removeuser @user <group>             · unassign a Matrix user from a group
   !addperson <name> <group>             · add a non-Matrix person to a group

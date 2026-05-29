@@ -321,19 +321,14 @@ async fn main() -> Result<()> {
                     iso_week:     week,
                     completed_at: chrono::Utc::now(),
                     skipped:      false,
-                    unit_name:    String::new(),
-                    completed_by: String::new(),
-                    responsible_users: Vec::new(),
                 });
                 state.reaction_dones.insert(
                     ev.event_id.to_string(),
                     ReactionDone {
                         group_id:        group_id.clone(),
                         completed_by_id: sender_person_id,
-                        iso_year:  year,
-                        iso_week:  week,
-                        unit_name:    String::new(),
-                        completed_by: String::new(),
+                        iso_year:        year,
+                        iso_week:        week,
                     },
                 );
                 if let Err(e) = state.save(&ctx.state_path).await {

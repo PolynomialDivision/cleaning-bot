@@ -154,15 +154,7 @@ pub fn validate_state(state: &State) -> ValidationReport {
         }
     }
 
-    // ── 8. Legacy data still present ─────────────────────────────────────────
-    if !state.floors.is_empty() {
-        warnings.push(format!("{} legacy floor(s) still in state — migration may be incomplete", state.floors.len()));
-    }
-    if !state.groups.is_empty() {
-        warnings.push(format!("{} legacy floor-group(s) still in state — migration may be incomplete", state.groups.len()));
-    }
-
-    // ── 9. Persons without any group ─────────────────────────────────────────
+    // ── 8. Persons without any group ─────────────────────────────────────────
     let assigned_persons: HashSet<&str> = state.cleaning_groups.iter()
         .flat_map(|g| g.member_ids.iter().map(|id| id.as_str()))
         .collect();
