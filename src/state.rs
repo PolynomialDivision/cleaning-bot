@@ -3,196 +3,201 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, path::Path};
 
-// ── PersonRef ─────────────────────────────────────────────────────────────────
+use crate::domain::{CleaningGroup, GroupId, Person, PersonId};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PersonRef {
-    Matrix { mxid: String },
-    Named  { name: String },
-}
-
-impl PersonRef {
-    pub fn display(&self) -> &str {
-        match self {
-            PersonRef::Matrix { mxid } => mxid,
-            PersonRef::Named  { name } => name,
-        }
-    }
-    pub fn matrix_id(&self) -> Option<&str> {
-        match self {
-            PersonRef::Matrix { mxid } => Some(mxid.as_str()),
-            PersonRef::Named  { .. }   => None,
-        }
-    }
-    pub fn matches_str(&self, s: &str) -> bool {
-        match self {
-            PersonRef::Matrix { mxid } => mxid == s,
-            PersonRef::Named  { name } => name.eq_ignore_ascii_case(s),
-        }
-    }
-}
-
-// ── Persistent state ──────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct State {
-    pub floors: Vec<Floor>,
-    /// Groups of floors that clean together.  Users from all member floors are
-    /// jointly responsible for the group's cleaning period.
-    pub groups: Vec<FloorGroup>,
-    pub completions: Vec<Completion>,
-    pub swap_requests: Vec<SwapRequest>,
-    /// Tracks which reminder messages have already been sent so we never
-    /// double-post after a reboot or re-sync.
-    pub sent_reminders: Vec<SentReminder>,
-    /// Monotonically increasing ID counter for swap requests.
-    pub next_id: u64,
-    /// Set once on first run; used as the baseline for statistics.
-    pub created_at: Option<DateTime<Utc>>,
-    /// Maps event IDs of bot reminder messages to the unit name they belong to.
-    /// Used to treat a ✅ reaction on a reminder as an implicit !done.
-    #[serde(default)]
-    pub reminder_event_ids: HashMap<String, String>,
-    /// Maps reaction event IDs to the completion they created.
-    /// When a ✅ reaction is removed (redacted), we look up the matching
-    /// completion here and remove it — auto-undo.
-    #[serde(default)]
-    pub reaction_dones: HashMap<String, ReactionDone>,
-    /// Temporary absences: users marked away from their floor for N weeks.
-    #[serde(default)]
-    pub absences: Vec<Absence>,
-    /// Maps the event ID of a greeting message to the floor choices embedded in it.
-    /// Used so a ✅-numbered reaction on a greeting triggers !joinfloor automatically.
-    #[serde(default)]
-    pub greeting_event_ids: HashMap<String, GreetingInfo>,
-    /// Tracks which users have already been greeted so we don't spam them.
-    #[serde(default)]
-    pub greeted_users: HashSet<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Floor {
-    pub name: String,
-    #[serde(default)]
-    pub members: Vec<PersonRef>,
-    /// Legacy Matrix-only field; migrated to `members` on load.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub users: Vec<String>,
-    /// Rooms on this floor that need to be cleaned (e.g. "Kitchen", "Bathroom").
-    #[serde(default)]
-    pub rooms: Vec<String>,
-}
-
-/// Multiple floors sharing one cleaning schedule.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct FloorGroup {
-    pub name: String,
-    pub floor_names: Vec<String>,
-}
+// ── Scheduling records ────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Completion {
-    /// Name of the cleaning unit (floor or group) that was completed.
-    pub unit_name: String,
-    pub iso_year: i32,
-    pub iso_week: u32,
-    pub completed_at: DateTime<Utc>,
-    pub completed_by: String,
-    /// Users who were responsible for this unit at the time of completion.
-    /// Stored so stats remain accurate even if the floor's user list changes later.
+    // ── New stable fields ────────────────────────────────────────────────────
     #[serde(default)]
-    pub responsible_users: Vec<String>,
-    /// When true this week was deliberately skipped (e.g. everyone on holiday).
-    /// It counts as "not due" for scheduling but is excluded from completion stats.
+    pub group_id: GroupId,
+    #[serde(default)]
+    pub completed_by_id: PersonId,
+    #[serde(default)]
+    pub responsible_person_ids: Vec<PersonId>,
+
+    pub iso_year:     i32,
+    pub iso_week:     u32,
+    pub completed_at: DateTime<Utc>,
     #[serde(default)]
     pub skipped: bool,
+
+    // ── Legacy (read from old JSON; empty after migration + save) ────────────
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit_name:         String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub completed_by:      String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub responsible_users: Vec<String>,
 }
 
-/// Tracks which reaction event created a particular completion so we can
-/// undo it automatically when the user removes their ✅.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReactionDone {
-    pub unit_name: String,
-    pub iso_year: i32,
-    pub iso_week: u32,
+    #[serde(default)]
+    pub group_id:        GroupId,
+    #[serde(default)]
+    pub completed_by_id: PersonId,
+    pub iso_year:  i32,
+    pub iso_week:  u32,
+
+    // Legacy
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit_name:    String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub completed_by: String,
 }
 
-/// One floor/group option in a greeting message, bound to a numbered emoji.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct GreetingChoice {
-    /// The emoji reaction key (e.g. "1️⃣").
-    pub emoji: String,
-    /// The cleaning unit name (floor or group) to join.
-    pub unit_name: String,
-    /// The actual floor names whose user list should be extended.
-    pub floor_names: Vec<String>,
-}
-
-/// Everything we need to remember about a pending greeting message.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct GreetingInfo {
-    /// MXID of the newly joined user this greeting was sent for.
-    pub for_user: String,
-    /// Ordered list of emoji → floor choices shown in the message.
-    pub choices: Vec<GreetingChoice>,
-}
-
-/// A user is temporarily absent from their floor for `duration_weeks` weeks
-/// starting from `(from_year, from_week)`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Absence {
-    pub user_id: String,
-    pub floor_name: String,
-    pub from_year: i32,
-    pub from_week: u32,
+    #[serde(default)]
+    pub person_id: PersonId,
+    #[serde(default)]
+    pub group_id:  GroupId,
+    pub from_year:      i32,
+    pub from_week:      u32,
     pub duration_weeks: u32,
+
+    // Legacy
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_id:    String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub floor_name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SwapRequest {
-    pub id: u64,
+    pub id:        u64,
+    /// Requester / target are Matrix MXIDs — swaps are Matrix-only.
     pub requester: String,
-    pub target: String,
-    pub unit_name: String,
-    pub iso_year: i32,
-    pub iso_week: u32,
+    pub target:    String,
+    #[serde(default)]
+    pub group_id:  GroupId,
+    pub iso_year:  i32,
+    pub iso_week:  u32,
     pub created_at: DateTime<Utc>,
-    pub status: SwapStatus,
+    pub status:     SwapStatus,
+
+    // Legacy
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit_name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum SwapStatus {
-    Pending,
-    Accepted,
-    Rejected,
-    Cancelled,
-}
+pub enum SwapStatus { Pending, Accepted, Rejected, Cancelled }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum ReminderKind {
-    Initial,
-    Final,
-    /// Sent once per week by the summary scheduler.
-    WeeklySummary,
-}
+pub enum ReminderKind { Initial, Final, WeeklySummary }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SentReminder {
-    /// Empty string for WeeklySummary (not unit-specific).
-    pub unit_name: String,
+    #[serde(default)]
+    pub group_id: GroupId,
     pub iso_year: i32,
     pub iso_week: u32,
-    pub kind: ReminderKind,
-    /// When the reminder was actually sent. Allows computing response time later.
+    pub kind:     ReminderKind,
     #[serde(default)]
-    pub sent_at: Option<DateTime<Utc>>,
+    pub sent_at:  Option<DateTime<Utc>>,
+
+    // Legacy
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit_name: String,
 }
 
-// ── I/O ───────────────────────────────────────────────────────────────────────
+// ── Greeting ──────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GreetingChoice {
+    pub emoji:      String,
+    pub group_id:   GroupId,
+    pub group_name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GreetingInfo {
+    pub for_user: String,
+    pub choices:  Vec<GreetingChoice>,
+}
+
+// Re-export CalendarToken so it lives next to State.
+pub use crate::domain::CalendarToken;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct State {
+    // ── New domain model ─────────────────────────────────────────────────────
+    #[serde(default)]
+    pub persons:         Vec<Person>,
+    #[serde(default)]
+    pub cleaning_groups: Vec<CleaningGroup>,
+    #[serde(default)]
+    pub calendar_tokens: Vec<CalendarToken>,
+
+    // ── Scheduling records ────────────────────────────────────────────────────
+    #[serde(default)]
+    pub completions:    Vec<Completion>,
+    #[serde(default)]
+    pub swap_requests:  Vec<SwapRequest>,
+    #[serde(default)]
+    pub absences:       Vec<Absence>,
+    #[serde(default)]
+    pub sent_reminders: Vec<SentReminder>,
+
+    // ── Bot bookkeeping ───────────────────────────────────────────────────────
+    #[serde(default)]
+    pub next_id:    u64,
+    pub created_at:    Option<DateTime<Utc>>,
+    /// Timestamp of the last successful `save()` call.
+    /// Used by the schedule pipeline as a deterministic DTSTAMP for ICS events.
+    #[serde(default)]
+    pub last_modified: Option<DateTime<Utc>>,
+    /// event_id → group_id  (was unit_name before migration)
+    #[serde(default)]
+    pub reminder_event_ids: HashMap<String, String>,
+    #[serde(default)]
+    pub reaction_dones:     HashMap<String, ReactionDone>,
+    #[serde(default)]
+    pub greeting_event_ids: HashMap<String, GreetingInfo>,
+    #[serde(default)]
+    pub greeted_users:      HashSet<String>,
+
+    // ── Legacy (Floor/FloorGroup) — read-only for migration ──────────────────
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floors: Vec<LegacyFloor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<LegacyFloorGroup>,
+}
+
+// ── Legacy types (deserialization only) ──────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct LegacyFloor {
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<LegacyPersonRef>,
+    #[serde(default)]
+    pub users: Vec<String>,
+    #[serde(default)]
+    pub rooms: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LegacyPersonRef {
+    Matrix { mxid: String },
+    Named  { name: String },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LegacyFloorGroup {
+    pub name:        String,
+    pub floor_names: Vec<String>,
+}
+
+// ── Load / Save / Migrate ─────────────────────────────────────────────────────
 
 impl State {
     pub async fn load(path: &Path) -> Result<Self> {
@@ -206,8 +211,9 @@ impl State {
         }
     }
 
-    /// Atomic write: write to a .tmp file and rename.
-    pub async fn save(&self, path: &Path) -> Result<()> {
+    /// Atomically persist state to disk, updating `last_modified` automatically.
+    pub async fn save(&mut self, path: &Path) -> Result<()> {
+        self.last_modified = Some(Utc::now());
         let tmp = path.with_extension("tmp");
         tokio::fs::write(&tmp, serde_json::to_string_pretty(self)?).await?;
         tokio::fs::rename(&tmp, path).await?;
@@ -220,197 +226,206 @@ impl State {
         id
     }
 
-    /// Migrate legacy `users: Vec<String>` fields to `members: Vec<PersonRef>`.
     fn migrate(&mut self) {
+        // Step 1: normalise legacy Floor.users → Floor.members.
         for floor in &mut self.floors {
             if floor.members.is_empty() && !floor.users.is_empty() {
                 floor.members = floor.users.drain(..)
-                    .map(|u| PersonRef::Matrix { mxid: u })
+                    .map(|u| LegacyPersonRef::Matrix { mxid: u })
                     .collect();
             }
         }
-    }
-}
 
-// ── Derived views ─────────────────────────────────────────────────────────────
+        // Step 2: floors + floor-groups → Person + CleaningGroup.
+        if self.persons.is_empty() && !self.floors.is_empty() {
+            // Create Person records for every unique member ref.
+            for floor in self.floors.clone().iter() {
+                for r in &floor.members {
+                    let already = match r {
+                        LegacyPersonRef::Matrix { mxid } =>
+                            self.persons.iter().any(|p| p.matrix_id.as_deref() == Some(mxid)),
+                        LegacyPersonRef::Named { name } =>
+                            self.persons.iter().any(|p| p.display_name.eq_ignore_ascii_case(name)),
+                    };
+                    if !already {
+                        let person = match r {
+                            LegacyPersonRef::Matrix { mxid } => Person::new_matrix(mxid),
+                            LegacyPersonRef::Named  { name  } => Person::new_named(name),
+                        };
+                        self.persons.push(person);
+                    }
+                }
+            }
 
-/// A cleaning unit is either a stand-alone floor or a floor group.
-#[derive(Clone, Debug)]
-pub struct CleaningUnit {
-    pub name: String,
-    pub floor_names: Vec<String>,
-    pub members: Vec<PersonRef>,
-    /// Merged and deduplicated rooms from all constituent floors.
-    pub rooms: Vec<String>,
-    /// Per-floor room lists, preserving attribution for groups.
-    /// Each entry is (floor_name, rooms).  Single-floor units have one entry.
-    pub floor_rooms: Vec<(String, Vec<String>)>,
-}
-
-impl CleaningUnit {
-    pub fn has_member(&self, s: &str) -> bool {
-        self.members.iter().any(|p| p.matches_str(s))
-    }
-    pub fn has_matrix_member(&self, mxid: &str) -> bool {
-        self.members.iter().any(|p| p.matrix_id() == Some(mxid))
-    }
-    pub fn matrix_ids(&self) -> Vec<&str> {
-        self.members.iter().filter_map(|p| p.matrix_id()).collect()
-    }
-
-    /// Format rooms for display.
-    /// Single floor: "Rooms: Kitchen, Bathroom"
-    /// Group with multiple floors: "Rooms:\n  Floor3: …\n  Floor4: …"
-    /// Returns None when no rooms are configured.
-    pub fn rooms_text(&self) -> Option<String> {
-        let has_rooms = self.floor_rooms.iter().any(|(_, r)| !r.is_empty());
-        if !has_rooms {
-            return None;
-        }
-        if self.floor_rooms.len() == 1 {
-            let rooms = &self.floor_rooms[0].1;
-            Some(format!("Rooms: {}", rooms.join(", ")))
-        } else {
-            let lines: Vec<String> = self.floor_rooms.iter()
-                .filter(|(_, r)| !r.is_empty())
-                .map(|(floor, rooms)| format!("  {floor}: {}", rooms.join(", ")))
+            let grouped: HashSet<String> = self.groups.iter()
+                .flat_map(|g| g.floor_names.iter().cloned())
                 .collect();
-            Some(format!("Rooms:\n{}", lines.join("\n")))
+
+            // Stand-alone floors → one CleaningGroup each.
+            for floor in self.floors.clone().iter().filter(|f| !grouped.contains(&f.name)) {
+                let mut cg = CleaningGroup::new(&floor.name);
+                cg.room_names = floor.rooms.clone();
+                cg.member_ids = floor.members.iter()
+                    .filter_map(|r| self.person_by_legacy_ref(r).map(|p| p.id.clone()))
+                    .collect();
+                self.cleaning_groups.push(cg);
+            }
+
+            // FloorGroups → one merged CleaningGroup.
+            for lg in self.groups.clone().iter() {
+                let mut cg = CleaningGroup::new(&lg.name);
+                let mut seen: HashSet<String> = HashSet::new();
+                for floor_name in &lg.floor_names {
+                    if let Some(floor) = self.floors.iter().find(|f| &f.name == floor_name) {
+                        for room in &floor.rooms {
+                            if !cg.room_names.contains(room) { cg.room_names.push(room.clone()); }
+                        }
+                        for r in &floor.members {
+                            if let Some(p) = self.person_by_legacy_ref(r) {
+                                if seen.insert(p.id.clone()) { cg.member_ids.push(p.id.clone()); }
+                            }
+                        }
+                    }
+                }
+                self.cleaning_groups.push(cg);
+            }
+
+            self.floors.clear();
+            self.groups.clear();
+        }
+
+        // Step 3–8: migrate string-keyed records to UUID-keyed records.
+        // Clone groups/persons vecs to avoid borrow conflict inside loops.
+        let grps = self.cleaning_groups.clone();
+        let prs  = self.persons.clone();
+
+        let find_group  = |name: &str| grps.iter().find(|g| g.name == name).map(|g| g.id.clone());
+        let find_person = |s: &str| prs.iter().find(|p| p.matrix_id.as_deref() == Some(s) || p.display_name.eq_ignore_ascii_case(s)).map(|p| p.id.clone());
+
+        for c in &mut self.completions {
+            if c.group_id.is_empty()        { if let Some(id) = find_group(&c.unit_name)       { c.group_id        = id; c.unit_name.clear(); } }
+            if c.completed_by_id.is_empty() { if let Some(id) = find_person(&c.completed_by)   { c.completed_by_id = id; c.completed_by.clear(); } }
+            if c.responsible_person_ids.is_empty() {
+                c.responsible_person_ids = c.responsible_users.iter().filter_map(|s| find_person(s)).collect();
+                if !c.responsible_person_ids.is_empty() { c.responsible_users.clear(); }
+            }
+        }
+        for s in &mut self.swap_requests {
+            if s.group_id.is_empty() { if let Some(id) = find_group(&s.unit_name) { s.group_id = id; s.unit_name.clear(); } }
+        }
+        for a in &mut self.absences {
+            if a.person_id.is_empty() { if let Some(id) = find_person(&a.user_id)    { a.person_id = id; a.user_id.clear(); } }
+            if a.group_id.is_empty()  { if let Some(id) = find_group(&a.floor_name)  { a.group_id  = id; a.floor_name.clear(); } }
+        }
+        for r in &mut self.sent_reminders {
+            if r.group_id.is_empty() { if let Some(id) = find_group(&r.unit_name) { r.group_id = id; r.unit_name.clear(); } }
+        }
+        for val in self.reminder_event_ids.values_mut() {
+            // Heuristic: if value doesn't look like a UUID, it's a group name.
+            if !val.contains('-') || val.len() < 32 {
+                if let Some(id) = find_group(val) { *val = id; }
+            }
+        }
+        for rd in self.reaction_dones.values_mut() {
+            if rd.group_id.is_empty()        { if let Some(id) = find_group(&rd.unit_name)      { rd.group_id        = id; rd.unit_name.clear(); } }
+            if rd.completed_by_id.is_empty() { if let Some(id) = find_person(&rd.completed_by)  { rd.completed_by_id = id; rd.completed_by.clear(); } }
+        }
+    }
+
+    fn person_by_legacy_ref(&self, r: &LegacyPersonRef) -> Option<&Person> {
+        match r {
+            LegacyPersonRef::Matrix { mxid } =>
+                self.persons.iter().find(|p| p.matrix_id.as_deref() == Some(mxid)),
+            LegacyPersonRef::Named { name } =>
+                self.persons.iter().find(|p| p.display_name.eq_ignore_ascii_case(name)),
         }
     }
 }
+
+// ── Domain lookups ────────────────────────────────────────────────────────────
 
 impl State {
-    /// All cleaning units derived from current floor/group configuration.
-    /// Floors that are part of a group are not listed individually.
-    pub fn units(&self) -> Vec<CleaningUnit> {
-        let grouped: std::collections::HashSet<&str> = self
-            .groups
-            .iter()
-            .flat_map(|g| g.floor_names.iter().map(String::as_str))
-            .collect();
-
-        let mut units: Vec<CleaningUnit> = self
-            .floors
-            .iter()
-            .filter(|f| !grouped.contains(f.name.as_str()))
-            .map(|f| CleaningUnit {
-                name: f.name.clone(),
-                floor_names: vec![f.name.clone()],
-                members: f.members.clone(),
-                rooms: f.rooms.clone(),
-                floor_rooms: vec![(f.name.clone(), f.rooms.clone())],
-            })
-            .collect();
-
-        for group in &self.groups {
-            let floor_names = group.floor_names.clone();
-            let floors: Vec<&Floor> = group
-                .floor_names
-                .iter()
-                .filter_map(|fn_| self.floors.iter().find(|f| &f.name == fn_))
-                .collect();
-            // Deduplicate members by display name across floors.
-            let mut seen_names: HashSet<String> = HashSet::new();
-            let mut members: Vec<PersonRef> = Vec::new();
-            for f in &floors {
-                for p in &f.members {
-                    let key = p.display().to_owned();
-                    if seen_names.insert(key) {
-                        members.push(p.clone());
-                    }
-                }
-            }
-            // Merge rooms from all member floors, preserving order and deduplicating.
-            let mut rooms: Vec<String> = Vec::new();
-            for f in &floors {
-                for r in &f.rooms {
-                    if !rooms.contains(r) {
-                        rooms.push(r.clone());
-                    }
-                }
-            }
-            let floor_rooms: Vec<(String, Vec<String>)> = floors.iter()
-                .map(|f| (f.name.clone(), f.rooms.clone()))
-                .collect();
-            units.push(CleaningUnit {
-                name: group.name.clone(),
-                floor_names,
-                members,
-                rooms,
-                floor_rooms,
-            });
-        }
-
-        units
+    pub fn person_by_matrix_id(&self, mxid: &str) -> Option<&Person> {
+        self.persons.iter().find(|p| p.matrix_id.as_deref() == Some(mxid))
     }
-
-    /// Find the cleaning unit a user belongs to (first match).
-    pub fn unit_for_user(&self, user: &str) -> Option<CleaningUnit> {
-        self.units().into_iter().find(|u| u.has_member(user))
+    pub fn person_by_id(&self, id: &PersonId) -> Option<&Person> {
+        self.persons.iter().find(|p| &p.id == id)
     }
-
-    pub fn is_completed(&self, unit: &str, year: i32, week: u32) -> bool {
-        self.completions
-            .iter()
-            .any(|c| c.unit_name == unit && c.iso_year == year && c.iso_week == week)
+    /// Find by PersonId, MXID, or display name.
+    pub fn find_person(&self, query: &str) -> Option<&Person> {
+        self.persons.iter().find(|p| p.id == query || p.matches(query))
     }
-
-    /// True if the unit was actually cleaned this week (not just skipped).
-    pub fn is_cleaned(&self, unit: &str, year: i32, week: u32) -> bool {
-        self.completions.iter().any(|c| {
-            c.unit_name == unit && c.iso_year == year && c.iso_week == week && !c.skipped
-        })
+    pub fn group_by_name(&self, name: &str) -> Option<&CleaningGroup> {
+        self.cleaning_groups.iter().find(|g| g.name.eq_ignore_ascii_case(name))
     }
-
-    /// True if `user_id` is currently marked absent from `floor_name` in the
-    /// given week.
-    pub fn is_absent(&self, user_id: &str, floor_name: &str, year: i32, week: u32) -> bool {
-        self.absences.iter().any(|a| {
-            if !a.user_id.eq_ignore_ascii_case(user_id) || a.floor_name != floor_name {
-                return false;
-            }
-            let end = add_weeks(a.from_year, a.from_week, a.duration_weeks as i64);
-            let start = (a.from_year, a.from_week);
-            (year, week) >= start && (year, week) < end
-        })
+    pub fn group_by_name_mut(&mut self, name: &str) -> Option<&mut CleaningGroup> {
+        self.cleaning_groups.iter_mut().find(|g| g.name.eq_ignore_ascii_case(name))
     }
+    pub fn group_by_id(&self, id: &GroupId) -> Option<&CleaningGroup> {
+        self.cleaning_groups.iter().find(|g| &g.id == id)
+    }
+    pub fn groups_for_person(&self, person_id: &PersonId) -> Vec<&CleaningGroup> {
+        self.cleaning_groups.iter().filter(|g| g.member_ids.contains(person_id)).collect()
+    }
+    pub fn members_of<'a>(&'a self, group: &CleaningGroup) -> Vec<&'a Person> {
+        group.member_ids.iter().filter_map(|id| self.person_by_id(id)).collect()
+    }
+}
 
-    /// True if the unit is due for cleaning considering interval_weeks.
-    /// Due = no completion in the window [current_week - interval_weeks + 1 … current_week].
-    pub fn is_due(&self, unit: &str, year: i32, week: u32, interval_weeks: u32) -> bool {
-        for w in 0..interval_weeks {
+// ── Scheduling queries ────────────────────────────────────────────────────────
+
+impl State {
+    pub fn is_completed(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
+        self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week)
+    }
+    pub fn is_cleaned(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
+        self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week && !c.skipped)
+    }
+    pub fn is_due(&self, group_id: &GroupId, year: i32, week: u32, interval: u32) -> bool {
+        (0..interval).all(|w| {
             let (y, wk) = weeks_ago(year, week, w);
-            if self.is_completed(unit, y, wk) {
-                return false;
-            }
-        }
-        true
-    }
-
-    pub fn reminder_sent(&self, unit: &str, year: i32, week: u32, kind: &ReminderKind) -> bool {
-        self.sent_reminders.iter().any(|r| {
-            r.unit_name == unit && r.iso_year == year && r.iso_week == week && &r.kind == kind
+            !self.is_completed(group_id, y, wk)
         })
     }
-
-    pub fn mark_reminder_sent(&mut self, unit: &str, year: i32, week: u32, kind: ReminderKind) {
+    pub fn is_absent(&self, person_id: &PersonId, group_id: &GroupId, year: i32, week: u32) -> bool {
+        self.absences.iter().any(|a| {
+            if &a.person_id != person_id || &a.group_id != group_id { return false; }
+            let end = add_weeks(a.from_year, a.from_week, a.duration_weeks as i64);
+            (year, week) >= (a.from_year, a.from_week) && (year, week) < end
+        })
+    }
+    pub fn reminder_sent(&self, group_id: &str, year: i32, week: u32, kind: &ReminderKind) -> bool {
+        self.sent_reminders.iter().any(|r| r.group_id == group_id && r.iso_year == year && r.iso_week == week && &r.kind == kind)
+    }
+    pub fn mark_reminder_sent(&mut self, group_id: &str, year: i32, week: u32, kind: ReminderKind) {
         self.sent_reminders.push(SentReminder {
-            unit_name: unit.to_owned(),
-            iso_year: year,
-            iso_week: week,
-            kind,
-            sent_at: Some(chrono::Utc::now()),
+            group_id: group_id.to_owned(), iso_year: year, iso_week: week,
+            kind, sent_at: Some(Utc::now()), unit_name: String::new(),
         });
     }
+
+    /// Round-robin responsible person. Accepted swaps override the rotation.
+    pub fn responsible_person(&self, group: &CleaningGroup, year: i32, week: u32, interval: u32) -> Option<&Person> {
+        if group.member_ids.is_empty() { return None; }
+        if let Some(swap) = self.swap_requests.iter().find(|s| {
+            s.group_id == group.id && s.iso_year == year && s.iso_week == week && s.status == SwapStatus::Accepted
+        }) {
+            return self.person_by_matrix_id(&swap.target);
+        }
+        let start = self.tracking_start();
+        let n = all_due_weeks_in_range(start, (year, week), interval).len();
+        let idx = n.saturating_sub(1) % group.member_ids.len();
+        self.person_by_id(&group.member_ids[idx])
+    }
+
+    pub fn last_completion(&self, group_id: &GroupId) -> Option<&Completion> {
+        self.completions.iter().filter(|c| &c.group_id == group_id).max_by_key(|c| c.completed_at)
+    }
 }
 
-// ── Statistics helpers ────────────────────────────────────────────────────────
+// ── Statistics ────────────────────────────────────────────────────────────────
 
 impl State {
-    /// The (ISO year, ISO week) from which statistics are measured.
-    /// Uses `created_at` if set, falls back to the earliest completion, then
-    /// current week.
     pub fn tracking_start(&self) -> (i32, u32) {
         if let Some(dt) = self.created_at {
             let d = dt.date_naive();
@@ -422,154 +437,64 @@ impl State {
         }
         current_iso_week()
     }
-
-    /// Every (year, week) pair that is a "due week" for a unit with the given
-    /// interval, from `tracking_start` up to and including `(end_year, end_week)`.
-    pub fn all_due_weeks(&self, interval_weeks: u32, end: (i32, u32)) -> Vec<(i32, u32)> {
-        let start = self.tracking_start();
-        all_due_weeks_in_range(start, end, interval_weeks)
+    pub fn all_due_weeks(&self, interval: u32, end: (i32, u32)) -> Vec<(i32, u32)> {
+        all_due_weeks_in_range(self.tracking_start(), end, interval)
     }
-
-    /// Due weeks that have already ended (strictly before the current week) and
-    /// have no completion recorded — i.e. the unit was skipped.
-    pub fn missed_weeks_for(&self, unit: &str, interval_weeks: u32) -> Vec<(i32, u32)> {
-        let current = current_iso_week();
-        self.all_due_weeks(interval_weeks, current)
-            .into_iter()
-            .filter(|&(y, w)| {
-                // Exclude the current (still ongoing) week and skipped weeks
-                (y, w) != current && !self.is_completed(unit, y, w)
-            })
+    pub fn missed_weeks_for(&self, group_id: &GroupId, interval: u32) -> Vec<(i32, u32)> {
+        let cur = current_iso_week();
+        self.all_due_weeks(interval, cur).into_iter()
+            .filter(|&(y, w)| (y, w) != cur && !self.is_completed(group_id, y, w))
             .collect()
     }
-
-    /// Number of consecutive completed due-weeks ending at the most recent one.
-    /// Ignores the current week if not yet completed (still ongoing).
-    pub fn streak_for(&self, unit: &str, interval_weeks: u32) -> u32 {
-        let current = current_iso_week();
-        let due = self.all_due_weeks(interval_weeks, current);
+    pub fn streak_for(&self, group_id: &GroupId, interval: u32) -> u32 {
+        let cur = current_iso_week();
         let mut streak = 0u32;
-        for &(y, w) in due.iter().rev() {
-            // Current week is still open — skip if not yet cleaned
-            if (y, w) == current && !self.is_cleaned(unit, y, w) {
-                continue;
-            }
-            // Skipped weeks don't break the streak but don't extend it either
-            if self.is_completed(unit, y, w) && !self.is_cleaned(unit, y, w) {
-                continue; // skipped — neutral
-            }
-            if self.is_cleaned(unit, y, w) {
-                streak += 1;
-            } else {
-                break;
-            }
+        for &(y, w) in self.all_due_weeks(interval, cur).iter().rev() {
+            if (y, w) == cur && !self.is_cleaned(group_id, y, w) { continue; }
+            if self.is_completed(group_id, y, w) && !self.is_cleaned(group_id, y, w) { continue; }
+            if self.is_cleaned(group_id, y, w) { streak += 1; } else { break; }
         }
         streak
-    }
-
-    /// Which single person is responsible for cleaning `unit` in `(year, week)`.
-    ///
-    /// An accepted swap for that unit/week overrides the rotation.  Otherwise
-    /// the responsible person is determined by round-robin through `unit.members`,
-    /// indexed by the position of `(year, week)` in the sequence of due weeks
-    /// counted from `tracking_start`.  Returns `None` when the unit has no members.
-    pub fn responsible_user(
-        &self,
-        unit: &CleaningUnit,
-        year: i32,
-        week: u32,
-        interval: u32,
-    ) -> Option<PersonRef> {
-        if unit.members.is_empty() {
-            return None;
-        }
-        // An accepted swap overrides the rotation for this specific week.
-        if let Some(swap) = self.swap_requests.iter().find(|s| {
-            s.unit_name == unit.name
-                && s.iso_year == year
-                && s.iso_week == week
-                && s.status == SwapStatus::Accepted
-        }) {
-            return Some(PersonRef::Matrix { mxid: swap.target.clone() });
-        }
-        let start = self.tracking_start();
-        // Number of due weeks from start up to and including (year, week).
-        let n = all_due_weeks_in_range(start, (year, week), interval).len();
-        let idx = n.saturating_sub(1); // 0-based index of this due week
-        unit.members.get(idx % unit.members.len()).cloned()
-    }
-
-    /// Most recent completion for a unit, if any.
-    pub fn last_completed(&self, unit: &str) -> Option<&Completion> {
-        self.completions
-            .iter()
-            .filter(|c| c.unit_name == unit)
-            .max_by_key(|c| c.completed_at)
     }
 }
 
 // ── Week arithmetic ───────────────────────────────────────────────────────────
 
-/// Return the (ISO year, ISO week) that is `n` weeks before (year, week).
 pub fn weeks_ago(year: i32, week: u32, n: u32) -> (i32, u32) {
-    if n == 0 {
-        return (year, week);
-    }
-    let monday = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
+    if n == 0 { return (year, week); }
+    let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
-    let earlier = monday - chrono::Duration::weeks(n as i64);
-    (earlier.iso_week().year(), earlier.iso_week().week())
+    let d = mon - chrono::Duration::weeks(n as i64);
+    (d.iso_week().year(), d.iso_week().week())
 }
-
-/// Add `n` weeks to (year, week).
 pub fn add_weeks(year: i32, week: u32, n: i64) -> (i32, u32) {
-    let monday = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
+    let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
-    let later = monday + chrono::Duration::weeks(n);
-    (later.iso_week().year(), later.iso_week().week())
+    let d = mon + chrono::Duration::weeks(n);
+    (d.iso_week().year(), d.iso_week().week())
 }
-
-/// Number of weeks between two (year, week) pairs (signed; negative if from > to).
 pub fn weeks_between(from: (i32, u32), to: (i32, u32)) -> i64 {
-    let from_d = NaiveDate::from_isoywd_opt(from.0, from.1, Weekday::Mon)
+    let a = NaiveDate::from_isoywd_opt(from.0, from.1, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(from.0, 1, 4).unwrap());
-    let to_d = NaiveDate::from_isoywd_opt(to.0, to.1, Weekday::Mon)
+    let b = NaiveDate::from_isoywd_opt(to.0, to.1, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(to.0, 1, 4).unwrap());
-    (to_d - from_d).num_weeks()
+    (b - a).num_weeks()
 }
-
-/// Every due-week in [start … end] inclusive, stepping by interval_weeks.
-fn all_due_weeks_in_range(
-    start: (i32, u32),
-    end: (i32, u32),
-    interval_weeks: u32,
-) -> Vec<(i32, u32)> {
+pub fn all_due_weeks_in_range(start: (i32, u32), end: (i32, u32), interval: u32) -> Vec<(i32, u32)> {
     let total = weeks_between(start, end);
-    if total < 0 {
-        return vec![];
-    }
-    let mut result = Vec::new();
-    let mut n = 0i64;
-    while n <= total {
-        result.push(add_weeks(start.0, start.1, n));
-        n += interval_weeks as i64;
-    }
-    result
+    if total < 0 { return vec![]; }
+    (0..).map(|n| add_weeks(start.0, start.1, n * interval as i64))
+         .take_while(|&w| weeks_between(start, w) <= total)
+         .collect()
 }
-
-/// Return the current (ISO year, ISO week) in UTC.
 pub fn current_iso_week() -> (i32, u32) {
-    let now = Utc::now().date_naive();
-    (now.iso_week().year(), now.iso_week().week())
+    let d = Utc::now().date_naive();
+    (d.iso_week().year(), d.iso_week().week())
 }
-
-/// Format an ISO week as a human-readable date span, e.g. "26 May – 1 Jun".
-/// Useful so users don't have to look up what "week 22/2025" means.
 pub fn week_dates(year: i32, week: u32) -> String {
     let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
     let sun = mon + chrono::Duration::days(6);
-    // Cross-month: show month on both sides; same-month: abbreviate.
     if mon.month() == sun.month() {
         format!("{} – {} {}", mon.format("%-d"), sun.format("%-d"), mon.format("%b"))
     } else {

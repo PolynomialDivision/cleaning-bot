@@ -1,11 +1,15 @@
 use anyhow::Result;
 use chrono::Utc;
 use matrix_sdk::{Room, ruma::{events::room::message::RoomMessageEventContent, OwnedUserId}};
+use uuid::Uuid;
 
 use crate::{
     BotContext, format,
+    domain::{new_calendar_token, CalendarToken, CleaningGroup, Person},
+    schedule::build_schedule,
     state::{
-        Absence, Completion, Floor, FloorGroup, PersonRef, SwapRequest, SwapStatus,
+        Absence, Completion,
+        SwapRequest, SwapStatus,
         add_weeks, current_iso_week, week_dates, weeks_between,
     },
 };
@@ -20,22 +24,23 @@ pub async fn handle(
     let cmd = parts.next().unwrap_or("");
     let args: Vec<&str> = parts.collect();
 
-    // Commands that need direct room access return RoomMessageEventContent.
+    // Commands that need direct room access.
     match cmd {
-        "!cleanplan"    => return cmd_cleanplan(ctx, sender, room, &args).await,
-        "!remind"       => return cmd_remind(ctx, sender, room, &args).await,
-        "!testnotify"   => return cmd_testnotify(room).await,
-        "!pdf"          => return cmd_pdf(ctx, sender, room, &args).await,
-        "!ical"         => return cmd_ical(ctx, sender, room, &args).await,
+        "!cleanplan"  => return cmd_cleanplan(ctx, sender, room, &args).await,
+        "!remind"     => return cmd_remind(ctx, sender, room, &args).await,
+        "!testnotify" => return cmd_testnotify(room).await,
+        "!pdf"        => return cmd_pdf(ctx, sender, room, &args).await,
+        "!ical"       => return cmd_ical(ctx, sender, room, &args).await,
+        "!icalreset"  => return cmd_icalreset(ctx, sender, room, &args).await,
         _ => {}
     }
 
-    // All other commands return plain strings; wrap them in display-name pills.
     let reply: Option<String> = match cmd {
         "!done"         => cmd_done(ctx, sender, &args).await,
         "!status"       => cmd_status(ctx).await,
         "!stats"        => cmd_stats(ctx, &args).await,
         "!floors"       => cmd_floors(ctx).await,
+        "!areas"        => cmd_floors(ctx).await,
         "!joinfloor"    => cmd_joinfloor(ctx, sender, &args).await,
         "!leavefloor"   => cmd_leavefloor(ctx, sender, &args).await,
         "!swap"         => cmd_swap(ctx, sender, &args).await,
@@ -49,12 +54,11 @@ pub async fn handle(
         "!removefloor"  => cmd_removefloor(ctx, sender, &args).await,
         "!addroom"      => cmd_addroom(ctx, sender, &args).await,
         "!removeroom"   => cmd_removeroom(ctx, sender, &args).await,
-        "!linkfloors"   => cmd_linkfloors(ctx, sender, &args).await,
-        "!unlinkfloors" => cmd_unlinkfloors(ctx, sender, &args).await,
         "!undo"         => cmd_undo(ctx, sender, &args).await,
         "!next"         => cmd_next(ctx, sender, &args).await,
         "!skip"         => cmd_skip(ctx, sender, &args).await,
         "!leaderboard"  => cmd_leaderboard(ctx).await,
+        "!validate"     => cmd_validate(ctx, sender).await,
         "!absent"       => cmd_absent(ctx, sender, &args).await,
         "!back"         => cmd_back(ctx, sender, &args).await,
         "!blame"        => cmd_blame(ctx, &args).await,
@@ -68,88 +72,101 @@ pub async fn handle(
     }
 }
 
-// ── !done [floor_or_group] ────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
+    if ctx.admin_users.contains(sender) { Ok(()) }
+    else { Err(anyhow::anyhow!("__not_admin__")) }
+}
+
+/// Returns the MXID or display_name depending on whether the person has Matrix.
+fn person_key(p: &Person) -> &str {
+    p.matrix_id.as_deref().unwrap_or(&p.display_name)
+}
+
+// ── !done [group] ─────────────────────────────────────────────────────────────
 
 async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    let (year, week) = current_iso_week();
-    let sender_str = sender.as_str();
-    let mut state = ctx.state.lock().await;
+    let (year, week)  = current_iso_week();
+    let sender_mxid   = sender.as_str();
+    let mut state     = ctx.state.lock().await;
 
-    // Determine target unit(s): explicit arg, or all units this user belongs to.
-    let target_units: Vec<String> = if let Some(name) = args.first() {
-        vec![name.to_string()]
-    } else {
-        state.units()
-            .iter()
-            .filter(|u| u.has_matrix_member(sender_str))
-            .map(|u| u.name.clone())
-            .collect()
+    // Resolve sender to a Person.
+    let sender_person_id = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+        Some(id) => id,
+        None => return Ok(Some(format!(
+            "You are not registered. Ask an admin to run !adduser {sender_mxid} <group>."
+        ))),
     };
 
-    if target_units.is_empty() {
-        return Ok(Some("You are not assigned to any floor or group.".into()));
+    // Determine target group(s).
+    let target_group_ids: Vec<String> = if let Some(name) = args.first() {
+        match state.group_by_name(name) {
+            Some(g) => vec![g.id.clone()],
+            None    => return Ok(Some(format!("Group «{name}» not found."))),
+        }
+    } else {
+        state.groups_for_person(&sender_person_id).iter().map(|g| g.id.clone()).collect()
+    };
+
+    if target_group_ids.is_empty() {
+        return Ok(Some("You are not assigned to any cleaning group.".into()));
     }
 
-    // Also accept if the user was swapped in
+    let interval = ctx.config.schedule.interval_weeks;
+    let now = Utc::now();
     let mut marked = vec![];
     let mut already_done = vec![];
-    let now = Utc::now();
 
-    for unit_name in &target_units {
-        // Check if this user is allowed: assigned or swap-accepted
-        let units = state.units();
-        let unit = units.iter().find(|u| &u.name == unit_name);
-        let is_member = unit.map(|u| u.has_matrix_member(sender_str)).unwrap_or(false);
+    for group_id in &target_group_ids {
+        // Check membership or accepted swap.
+        let is_member = state.cleaning_groups.iter()
+            .find(|g| &g.id == group_id)
+            .map(|g| g.member_ids.contains(&sender_person_id))
+            .unwrap_or(false);
         let swapped_in = state.swap_requests.iter().any(|s| {
-            s.unit_name == *unit_name
-                && s.iso_year == year
-                && s.iso_week == week
-                && s.status == SwapStatus::Accepted
-                && s.target == sender_str
+            s.group_id == *group_id && s.iso_year == year && s.iso_week == week
+                && s.status == SwapStatus::Accepted && s.target == sender_mxid
         });
-
         if !is_member && !swapped_in {
-            return Ok(Some(format!(
-                "You are not responsible for «{}» this week.",
-                unit_name
-            )));
+            let name = state.group_by_id(group_id).map(|g| g.name.as_str()).unwrap_or("?");
+            return Ok(Some(format!("You are not a member of «{name}».")));
         }
 
-        if state.is_completed(unit_name, year, week) {
-            already_done.push(unit_name.clone());
+        if state.is_completed(group_id, year, week) {
+            let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
+            already_done.push(name);
             continue;
         }
 
-        let responsible_users = {
-            let units = state.units();
-            let unit = units.iter().find(|u| u.name == *unit_name);
-            let interval = ctx.config.schedule.interval_weeks;
-            unit.and_then(|u| state.responsible_user(u, year, week, interval))
-                .map(|p| vec![p.display().to_owned()])
-                .unwrap_or_default()
-        };
+        let responsible_id = state.cleaning_groups.iter()
+            .find(|g| &g.id == group_id)
+            .and_then(|g| state.responsible_person(g, year, week, interval))
+            .map(|p| p.id.clone());
+        let responsible_ids = responsible_id.map(|id| vec![id]).unwrap_or_default();
+
+        let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
         state.completions.push(Completion {
-            unit_name: unit_name.clone(),
-            iso_year: year,
-            iso_week: week,
+            group_id:               group_id.clone(),
+            completed_by_id:        sender_person_id.clone(),
+            responsible_person_ids: responsible_ids,
+            iso_year:     year,
+            iso_week:     week,
             completed_at: now,
-            completed_by: sender_str.to_owned(),
-            responsible_users,
-            skipped: false,
+            skipped:      false,
+            unit_name:    String::new(),
+            completed_by: String::new(),
+            responsible_users: Vec::new(),
         });
-        marked.push(unit_name.clone());
+        marked.push(name);
     }
 
     state.save(&ctx.state_path).await?;
     drop(state);
 
     let mut lines = vec![];
-    if !marked.is_empty() {
-        lines.push(format!("✅ Cleaned: {}", marked.join(", ")));
-    }
-    if !already_done.is_empty() {
-        lines.push(format!("Already done: {}", already_done.join(", ")));
-    }
+    if !marked.is_empty()      { lines.push(format!("✅ Cleaned: {}", marked.join(", "))); }
+    if !already_done.is_empty(){ lines.push(format!("Already done: {}", already_done.join(", "))); }
     Ok(Some(lines.join("\n")))
 }
 
@@ -157,33 +174,31 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
 async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
     let (year, week) = current_iso_week();
-    let state = ctx.state.lock().await;
+    let state    = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
-    let units = state.units();
 
-    if units.is_empty() {
-        return Ok(Some("No floors configured yet.".into()));
+    if state.cleaning_groups.is_empty() {
+        return Ok(Some("No cleaning groups configured yet.".into()));
     }
 
     let mut lines = vec![format!("📋 **Cleaning status** · week {week} ({})", week_dates(year, week))];
-    for unit in &units {
-        let done = state.is_completed(&unit.name, year, week);
+    for group in &state.cleaning_groups {
+        let done = state.is_completed(&group.id, year, week);
         let icon = if done { "✅" } else { "❌" };
         let who = if done {
             state.completions.iter()
-                .find(|c| c.unit_name == unit.name && c.iso_year == year && c.iso_week == week)
-                .map(|c| format!(" · {}", c.completed_by))
+                .find(|c| c.group_id == group.id && c.iso_year == year && c.iso_week == week)
+                .and_then(|c| state.person_by_id(&c.completed_by_id))
+                .map(|p| format!(" · {}", p.display_name))
                 .unwrap_or_default()
         } else {
-            match state.responsible_user(&unit, year, week, interval) {
-                Some(p) => format!(" · {}", p.display()),
+            match state.responsible_person(group, year, week, interval) {
+                Some(p) => format!(" · {}", person_key(p)),
                 None    => " · (nobody assigned)".into(),
             }
         };
-        let rooms_str = unit.rooms_text()
-            .map(|r| format!("\n  {r}"))
-            .unwrap_or_default();
-        lines.push(format!("{icon} **{}**{who}{rooms_str}", unit.name));
+        let rooms_str = group.rooms_text().map(|r| format!("\n  {r}")).unwrap_or_default();
+        lines.push(format!("{icon} **{}**{who}{rooms_str}", group.name));
     }
     Ok(Some(lines.join("\n")))
 }
@@ -191,283 +206,493 @@ async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
 // ── !stats [@user] ────────────────────────────────────────────────────────────
 
 async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
-    let state = ctx.state.lock().await;
+    let state    = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
     let (start_y, start_w) = state.tracking_start();
-    let (cur_y, cur_w) = current_iso_week();
+    let (cur_y, cur_w)     = current_iso_week();
 
-    if let Some(user) = args.first().copied() {
-        return Ok(Some(stats_for_user(&state, user, interval)));
+    if let Some(query) = args.first().copied() {
+        let person = match state.find_person(query) {
+            Some(p) => p.clone(),
+            None    => return Ok(Some(format!("Person «{query}» not found."))),
+        };
+        return Ok(Some(stats_for_person(&state, &person, interval)));
     }
 
-    // ── Global stats ──────────────────────────────────────────────────────────
-    let mut lines = vec![
-        format!("📊 **Cleaning stats** · since week {start_w} ({})", week_dates(start_y, start_w)),
-    ];
+    let mut lines = vec![format!("📊 **Cleaning stats** · since week {start_w} ({})", week_dates(start_y, start_w))];
 
-    let units = state.units();
-    if units.is_empty() {
-        lines.push("  No floors configured yet.".into());
+    if state.cleaning_groups.is_empty() {
+        lines.push("  No cleaning groups configured yet.".into());
         return Ok(Some(lines.join("\n")));
     }
 
-    for unit in &units {
-        let due_weeks = state.all_due_weeks(interval, (cur_y, cur_w));
-        // Exclude the current (ongoing) week from "due so far" for fairness
-        let closed_due: Vec<_> = due_weeks.iter()
-            .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
-            .collect();
-        let n_due = closed_due.len();
-        let n_done = closed_due.iter()
-            .filter(|(y, w)| state.is_completed(&unit.name, *y, *w))
-            .count();
+    for group in &state.cleaning_groups {
+        let due_weeks    = state.all_due_weeks(interval, (cur_y, cur_w));
+        let closed_due: Vec<_> = due_weeks.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).collect();
+        let n_due    = closed_due.len();
+        let n_done   = closed_due.iter().filter(|(y,w)| state.is_completed(&group.id, *y, *w)).count();
         let n_missed = n_due - n_done;
-        let pct = if n_due > 0 { 100 * n_done / n_due } else { 100 };
-        let streak = state.streak_for(&unit.name, interval);
-        let this_week = state.is_completed(&unit.name, cur_y, cur_w);
+        let pct      = if n_due > 0 { 100 * n_done / n_due } else { 100 };
+        let streak   = state.streak_for(&group.id, interval);
+        let this_week = state.is_completed(&group.id, cur_y, cur_w);
 
         lines.push(String::new());
-        lines.push(format!("🏢 {}", unit.name));
-        lines.push(format!(
-            "Completed: {n_done}/{n_due} ({pct}%) · Missed: {n_missed}"
-        ));
-        lines.push(format!(
-            "Streak: {streak} · This week: {}",
-            if this_week { "✅" } else { "❌" }
-        ));
+        lines.push(format!("🏢 {}", group.name));
+        lines.push(format!("Completed: {n_done}/{n_due} ({pct}%) · Missed: {n_missed}"));
+        lines.push(format!("Streak: {streak} · This week: {}", if this_week { "✅" } else { "❌" }));
 
-        if let Some(last) = state.last_completed(&unit.name) {
-            lines.push(format!(
-                "Last cleaned: week {week} ({dates}) by {by}",
-                week = last.iso_week,
-                dates = week_dates(last.iso_year, last.iso_week),
-                by = last.completed_by,
-            ));
+        if let Some(last) = state.last_completion(&group.id) {
+            let by = state.person_by_id(&last.completed_by_id)
+                .map(|p| p.display_name.as_str()).unwrap_or("?");
+            lines.push(format!("Last cleaned: week {} ({}) by {by}", last.iso_week, week_dates(last.iso_year, last.iso_week)));
         } else {
             lines.push("Never cleaned.".into());
         }
 
-        // Per-member completion count
-        let mut per_user: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for c in state.completions.iter().filter(|c| c.unit_name == unit.name) {
-            *per_user.entry(c.completed_by.as_str()).or_default() += 1;
-        }
-        for p in &unit.members {
-            let display = p.display();
-            // For Matrix users, match by MXID in completed_by; for Named, match by name.
-            let cnt = match p {
-                PersonRef::Matrix { mxid } => per_user.get(mxid.as_str()).copied().unwrap_or(0),
-                PersonRef::Named  { name  } => per_user.get(name.as_str()).copied().unwrap_or(0),
-            };
-            let miss_u = if n_due > 0 { n_due - cnt.min(n_due) } else { 0 };
-            lines.push(format!("{display}: {cnt} cleanings · {miss_u} missed"));
+        for person_id in &group.member_ids {
+            if let Some(p) = state.person_by_id(person_id) {
+                let cnt = state.completions.iter()
+                    .filter(|c| c.group_id == group.id && c.completed_by_id == p.id)
+                    .count();
+                lines.push(format!("{}: {cnt} cleanings", p.display_name));
+            }
         }
 
-        // List missed weeks (cap at 10 to avoid wall of text)
-        let missed = state.missed_weeks_for(&unit.name, interval);
+        let missed = state.missed_weeks_for(&group.id, interval);
         if !missed.is_empty() {
-            let shown: Vec<String> = missed.iter().take(10)
-                .map(|(y, w)| format!("w{w} ({})", week_dates(*y, *w)))
-                .collect();
-            let suffix = if missed.len() > 10 {
-                format!(" (+{})", missed.len() - 10)
-            } else {
-                String::new()
-            };
-            lines.push(format!("Missed weeks: {}{suffix}", shown.join(", ")));
+            let shown: Vec<_> = missed.iter().take(10).map(|(y,w)| format!("w{w} ({})", week_dates(*y,*w))).collect();
+            let suffix = if missed.len() > 10 { format!(" (+{})", missed.len()-10) } else { String::new() };
+            lines.push(format!("Missed: {}{suffix}", shown.join(", ")));
         }
     }
 
     Ok(Some(lines.join("\n")))
 }
 
-fn stats_for_user(state: &crate::state::State, user: &str, interval: u32) -> String {
+fn stats_for_person(state: &crate::state::State, person: &Person, interval: u32) -> String {
     let (cur_y, cur_w) = current_iso_week();
     let (start_y, start_w) = state.tracking_start();
 
-    let unit_opt = state.unit_for_user(user);
-    let unit_name = unit_opt.as_ref().map(|u| u.name.as_str()).unwrap_or("(unassigned)");
+    let groups = state.groups_for_person(&person.id);
+    let group_names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+    let group_name = if group_names.is_empty() { "(unassigned)" } else { &group_names.join(", ") };
 
-    let due_weeks = state.all_due_weeks(interval, (cur_y, cur_w));
-    let closed_due: Vec<_> = due_weeks.iter()
-        .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
-        .collect();
+    let due_weeks  = state.all_due_weeks(interval, (cur_y, cur_w));
+    let closed_due: Vec<_> = due_weeks.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).collect();
     let n_due = closed_due.len();
-
-    let user_completions: Vec<_> = state.completions.iter()
-        .filter(|c| c.completed_by == user)
-        .collect();
-    let n_done = user_completions.len();
+    let n_done = state.completions.iter().filter(|c| c.completed_by_id == person.id).count();
     let n_missed = n_due.saturating_sub(n_done);
-    let pct = if n_due > 0 { 100 * n_done / n_due } else { 100 };
-
-    let streak = unit_opt.as_ref()
-        .map(|u| state.streak_for(&u.name, interval))
-        .unwrap_or(0);
+    let pct = if n_due > 0 { 100 * n_done.min(n_due) / n_due } else { 100 };
+    let streak = groups.first().map(|g| state.streak_for(&g.id, interval)).unwrap_or(0);
 
     let mut lines = vec![
-        format!("📊 **Stats** · {user} · since week {start_w} ({})", week_dates(start_y, start_w)),
-        format!("Floor: {unit_name} · {n_done} cleanings · {pct}% completion"),
+        format!("📊 **Stats** · {} · since week {start_w} ({})", person.display_name, week_dates(start_y, start_w)),
+        format!("Group: {group_name} · {n_done} cleanings · {pct}% completion"),
         format!("Missed: {n_missed} · Streak: {streak}"),
     ];
 
-    if let Some(last) = user_completions.iter().max_by_key(|c| c.completed_at) {
-        lines.push(format!(
-            "Last: week {w} ({})",
-            week_dates(last.iso_year, last.iso_week), w = last.iso_week,
-        ));
+    let mut completions: Vec<_> = state.completions.iter()
+        .filter(|c| c.completed_by_id == person.id)
+        .collect();
+    completions.sort_by(|a,b| b.completed_at.cmp(&a.completed_at));
+    if let Some(last) = completions.first() {
+        lines.push(format!("Last: week {} ({})", last.iso_week, week_dates(last.iso_year, last.iso_week)));
     }
-
-    // Most recent 5 completions
-    let mut sorted = user_completions.clone();
-    sorted.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
-    if !sorted.is_empty() {
+    if !completions.is_empty() {
         lines.push("Recent:".into());
-        for c in sorted.iter().take(5) {
-            lines.push(format!(
-                "  • {} · week {w} ({})",
-                c.unit_name, week_dates(c.iso_year, c.iso_week), w = c.iso_week,
-            ));
+        for c in completions.iter().take(5) {
+            let gname = state.group_by_id(&c.group_id).map(|g| g.name.as_str()).unwrap_or("?");
+            lines.push(format!("  • {gname} · week {} ({})", c.iso_week, week_dates(c.iso_year, c.iso_week)));
         }
     }
-
     lines.join("\n")
 }
 
-// ── !floors ───────────────────────────────────────────────────────────────────
+// ── !floors / !areas ─────────────────────────────────────────────────────────
 
 async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    if state.floors.is_empty() {
-        return Ok(Some("No floors configured.".into()));
+    if state.cleaning_groups.is_empty() {
+        return Ok(Some("No cleaning groups configured.".into()));
     }
-
-    let mut lines = vec!["🏢 Floors:".to_owned()];
-    for floor in &state.floors {
-        let members_text = if floor.members.is_empty() {
+    let mut lines = vec!["🏢 Cleaning areas:".to_owned()];
+    for group in &state.cleaning_groups {
+        let members_text = if group.member_ids.is_empty() {
             "(no members)".to_owned()
         } else {
-            floor.members.iter().map(|p| match p {
-                PersonRef::Matrix { .. } => p.display().to_owned(),
-                PersonRef::Named { name } => format!("{name} (no Matrix)"),
-            }).collect::<Vec<_>>().join(", ")
+            group.member_ids.iter()
+                .filter_map(|id| state.person_by_id(id))
+                .map(|p| {
+                    if p.matrix_id.is_some() { p.display_name.clone() }
+                    else { format!("{} (no Matrix)", p.display_name) }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         };
-        let rooms_str = if floor.rooms.is_empty() {
+        let rooms_str = if group.room_names.is_empty() {
             String::new()
         } else {
-            format!(" · {}", floor.rooms.join(", "))
+            format!(" · {}", group.room_names.join(", "))
         };
-        lines.push(format!("  • **{}**: {members_text}{rooms_str}", floor.name));
-    }
-
-    if !state.groups.is_empty() {
-        lines.push("Groups:".into());
-        for g in &state.groups {
-            lines.push(format!("  • **{}**: floors {}", g.name, g.floor_names.join(", ")));
-        }
+        lines.push(format!("  • **{}**: {members_text}{rooms_str}", group.name));
     }
     Ok(Some(lines.join("\n")))
 }
 
-// ── !swap @target [floor] [week <N>] ─────────────────────────────────────────
+// ── !joinfloor <group> ────────────────────────────────────────────────────────
 
-async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    let target_str = match args.first() {
-        Some(t) => *t,
-        None => return Ok(Some("Usage: !swap @user [floor_or_group] [week <N>]".into())),
+async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    let group_name = match args.first() {
+        Some(n) => n.to_string(),
+        None    => return Ok(Some("Usage: !joinfloor <group>".into())),
     };
+    let mxid = sender.as_str();
+    let mut state = ctx.state.lock().await;
 
-    // Validate that the swap target looks like an MXID.
-    if !target_str.starts_with('@') || !target_str.contains(':') {
-        return Ok(Some("Swap targets must be Matrix users (@user:server).".into()));
+    // Verify group exists before creating the person.
+    if state.group_by_name(&group_name).is_none() {
+        return Ok(Some(format!("Group «{group_name}» not found.")));
     }
 
-    let sender_str = sender.as_str();
-    let (cur_year, cur_week) = current_iso_week();
-
-    // Parse optional `week <N>` from the tail of the args.
-    // Any tokens before the `week` keyword are treated as the floor name.
-    let remaining = &args[1..]; // everything after @user
-    let (floor_args, (year, week)) = if let Some(pos) = remaining.iter().position(|a| a.eq_ignore_ascii_case("week")) {
-        let n_str = remaining.get(pos + 1).copied().unwrap_or("");
-        match n_str.parse::<u32>() {
-            Ok(n) if n >= 1 && n <= 53 => {
-                // If the requested week is already past this year, assume next year.
-                let y = if n < cur_week { cur_year + 1 } else { cur_year };
-                (&remaining[..pos], (y, n))
+    // Find or create person for this MXID.
+    let person_id = {
+        let existing = state.persons.iter().find(|p| p.matrix_id.as_deref() == Some(mxid));
+        match existing {
+            Some(p) => p.id.clone(),
+            None    => {
+                let p = Person::new_matrix(mxid);
+                let id = p.id.clone();
+                state.persons.push(p);
+                id
             }
-            _ => return Ok(Some("Usage: !swap @user [floor] [week <1-53>]".into())),
         }
-    } else {
-        (remaining, (cur_year, cur_week))
     };
 
-    // Can't swap weeks that have already passed.
-    if (year, week) < (cur_year, cur_week) {
-        return Ok(Some(format!(
-            "Week {week} ({}) is already in the past.",
-            week_dates(year, week)
-        )));
+    let group = state.group_by_name_mut(&group_name).unwrap();
+    if group.member_ids.contains(&person_id) {
+        return Ok(Some(format!("You are already in «{group_name}».")));
+    }
+    group.member_ids.push(person_id);
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Joined «{group_name}».")))
+}
+
+// ── !leavefloor <group> ───────────────────────────────────────────────────────
+
+async fn cmd_leavefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    let group_name = match args.first() {
+        Some(n) => n.to_string(),
+        None    => return Ok(Some("Usage: !leavefloor <group>".into())),
+    };
+    let mxid = sender.as_str();
+    let mut state = ctx.state.lock().await;
+
+    let person_id = match state.person_by_matrix_id(mxid).map(|p| p.id.clone()) {
+        Some(id) => id,
+        None     => return Ok(Some("You are not in any group.".into())),
+    };
+
+    let group = match state.group_by_name_mut(&group_name) {
+        Some(g) => g,
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+
+    let before = group.member_ids.len();
+    group.member_ids.retain(|id| id != &person_id);
+    if group.member_ids.len() == before {
+        return Ok(Some(format!("You are not in «{group_name}».")));
+    }
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Left «{group_name}».")))
+}
+
+// ── Admin: !adduser @mxid <group> ────────────────────────────────────────────
+
+async fn cmd_adduser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (mxid, group_name) = match (args.first(), args.get(1)) {
+        (Some(u), Some(f)) => (*u, f.to_string()),
+        _ => return Ok(Some("Usage: !adduser @user <group>".into())),
+    };
+
+    let mut state = ctx.state.lock().await;
+
+    if state.group_by_name(&group_name).is_none() {
+        return Ok(Some(format!("Group «{group_name}» not found.")));
+    }
+
+    let person_id = {
+        let existing = state.persons.iter().find(|p| p.matrix_id.as_deref() == Some(mxid) || p.display_name == mxid);
+        match existing {
+            Some(p) => p.id.clone(),
+            None    => {
+                let p = Person::new_matrix(mxid);
+                let id = p.id.clone();
+                state.persons.push(p);
+                id
+            }
+        }
+    };
+
+    let group = state.group_by_name_mut(&group_name).unwrap();
+    if group.member_ids.contains(&person_id) {
+        return Ok(Some(format!("{mxid} is already in «{group_name}».")));
+    }
+    group.member_ids.push(person_id);
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Added {mxid} to «{group_name}».")))
+}
+
+// ── Admin: !removeuser @mxid <group> ─────────────────────────────────────────
+
+async fn cmd_removeuser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (query, group_name) = match (args.first(), args.get(1)) {
+        (Some(u), Some(f)) => (u.to_string(), f.to_string()),
+        _ => return Ok(Some("Usage: !removeuser @user <group>".into())),
+    };
+
+    let mut state = ctx.state.lock().await;
+    let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
+        Some(id) => id,
+        None     => return Ok(Some(format!("Person «{query}» not found."))),
+    };
+    let group = match state.group_by_name_mut(&group_name) {
+        Some(g) => g,
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    let before = group.member_ids.len();
+    group.member_ids.retain(|id| id != &person_id);
+    if group.member_ids.len() == before {
+        return Ok(Some(format!("{query} is not in «{group_name}».")));
+    }
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Removed {query} from «{group_name}».")))
+}
+
+// ── Admin: !addperson <name> <group> ─────────────────────────────────────────
+
+async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (name, group_name) = match (args.first(), args.get(1)) {
+        (Some(n), Some(f)) => (n.to_string(), f.to_string()),
+        _ => return Ok(Some("Usage: !addperson <display_name> <group>".into())),
+    };
+
+    let mut state = ctx.state.lock().await;
+    if state.group_by_name(&group_name).is_none() {
+        return Ok(Some(format!("Group «{group_name}» not found.")));
+    }
+
+    let already_exists = state.persons.iter().any(|p| p.display_name.eq_ignore_ascii_case(&name));
+    let person_id = if already_exists {
+        state.persons.iter().find(|p| p.display_name.eq_ignore_ascii_case(&name)).unwrap().id.clone()
+    } else {
+        let p = Person::new_named(&name);
+        let id = p.id.clone();
+        state.persons.push(p);
+        id
+    };
+
+    let group = state.group_by_name_mut(&group_name).unwrap();
+    if group.member_ids.contains(&person_id) {
+        return Ok(Some(format!("{name} is already in «{group_name}».")));
+    }
+    group.member_ids.push(person_id);
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Added {name} (no Matrix) to «{group_name}».")))
+}
+
+// ── Admin: !removeperson <name> <group> ──────────────────────────────────────
+
+async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (query, group_name) = match (args.first(), args.get(1)) {
+        (Some(n), Some(f)) => (n.to_string(), f.to_string()),
+        _ => return Ok(Some("Usage: !removeperson <name> <group>".into())),
+    };
+
+    let mut state = ctx.state.lock().await;
+    let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
+        Some(id) => id,
+        None     => return Ok(Some(format!("Person «{query}» not found."))),
+    };
+    let group = match state.group_by_name_mut(&group_name) {
+        Some(g) => g,
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    let before = group.member_ids.len();
+    group.member_ids.retain(|id| id != &person_id);
+    if group.member_ids.len() == before {
+        return Ok(Some(format!("{query} is not in «{group_name}».")));
+    }
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Removed {query} from «{group_name}».")))
+}
+
+// ── Admin: !addfloor <name> ───────────────────────────────────────────────────
+
+async fn cmd_addfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let name = match args.first() {
+        Some(n) => n.to_string(),
+        None    => return Ok(Some("Usage: !addfloor <name>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    if state.group_by_name(&name).is_some() {
+        return Ok(Some(format!("Group «{name}» already exists.")));
+    }
+    state.cleaning_groups.push(CleaningGroup::new(&name));
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Created cleaning group «{name}».")))
+}
+
+// ── Admin: !removefloor <name> ────────────────────────────────────────────────
+
+async fn cmd_removefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let name = match args.first() {
+        Some(n) => n.to_string(),
+        None    => return Ok(Some("Usage: !removefloor <name>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let before = state.cleaning_groups.len();
+    state.cleaning_groups.retain(|g| !g.name.eq_ignore_ascii_case(&name));
+    if state.cleaning_groups.len() == before {
+        return Ok(Some(format!("Group «{name}» not found.")));
+    }
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Removed group «{name}».")))
+}
+
+// ── Admin: !addroom <group> <room> ───────────────────────────────────────────
+
+async fn cmd_addroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (group_name, room_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
+        (Some(f), Some(r)) if !r.is_empty() => (f.to_string(), r),
+        _ => return Ok(Some("Usage: !addroom <group> <room name>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let group = match state.group_by_name_mut(&group_name) {
+        Some(g) => g,
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    if group.room_names.iter().any(|r| r.eq_ignore_ascii_case(&room_name)) {
+        return Ok(Some(format!("Room «{room_name}» already in «{group_name}».")));
+    }
+    group.room_names.push(room_name.clone());
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Added room «{room_name}» to «{group_name}».")))
+}
+
+// ── Admin: !removeroom <group> <room> ────────────────────────────────────────
+
+async fn cmd_removeroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (group_name, room_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
+        (Some(f), Some(r)) if !r.is_empty() => (f.to_string(), r),
+        _ => return Ok(Some("Usage: !removeroom <group> <room name>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let group = match state.group_by_name_mut(&group_name) {
+        Some(g) => g,
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    let before = group.room_names.len();
+    group.room_names.retain(|r| !r.eq_ignore_ascii_case(&room_name));
+    if group.room_names.len() == before {
+        return Ok(Some(format!("Room «{room_name}» not in «{group_name}».")));
+    }
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Removed room «{room_name}» from «{group_name}».")))
+}
+
+// ── !swap @target [group] [week N] ───────────────────────────────────────────
+
+async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    let target_mxid = match args.first() {
+        Some(t) => *t,
+        None    => return Ok(Some("Usage: !swap @user [group] [week <N>]".into())),
+    };
+    if !target_mxid.starts_with('@') {
+        return Ok(Some("Swap targets must be Matrix users (@user:server).".into()));
+    }
+    let sender_mxid  = sender.as_str();
+    let (cur_y, cur_w) = current_iso_week();
+
+    let remaining = &args[1..];
+    let (group_args, (year, week)) = if let Some(pos) = remaining.iter().position(|a| a.eq_ignore_ascii_case("week")) {
+        let n: u32 = match remaining.get(pos+1).and_then(|s| s.parse().ok()) {
+            Some(n) if (1..=53).contains(&n) => n,
+            _ => return Ok(Some("Usage: !swap @user [group] [week <1-53>]".into())),
+        };
+        let y = if n < cur_w { cur_y + 1 } else { cur_y };
+        (&remaining[..pos], (y, n))
+    } else {
+        (remaining, (cur_y, cur_w))
+    };
+
+    if (year, week) < (cur_y, cur_w) {
+        return Ok(Some(format!("Week {week} ({}) is in the past.", week_dates(year, week))));
+    }
+    if sender_mxid == target_mxid {
+        return Ok(Some("You cannot swap with yourself.".into()));
     }
 
     let mut state = ctx.state.lock().await;
 
-    // Determine which unit the sender belongs to (or explicit override).
-    let unit_name = if let Some(name) = floor_args.first() {
-        name.to_string()
+    let sender_person_id = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+        Some(id) => id,
+        None     => return Ok(Some(format!("You ({sender_mxid}) are not registered."))),
+    };
+
+    let group_id = if let Some(name) = group_args.first() {
+        match state.group_by_name(name) {
+            Some(g) => g.id.clone(),
+            None    => return Ok(Some(format!("Group «{name}» not found."))),
+        }
     } else {
-        match state.unit_for_user(sender_str) {
-            Some(u) => u.name.clone(),
-            None => return Ok(Some("You are not assigned to any floor. Specify: !swap @user floor_name".into())),
+        match state.groups_for_person(&sender_person_id).first().map(|g| g.id.clone()) {
+            Some(id) => id,
+            None     => return Ok(Some("You are not in any group. Specify: !swap @user <group>".into())),
         }
     };
 
-    // Sender must be assigned to the unit; target can be anyone.
-    let units = state.units();
-    let unit = match units.iter().find(|u| u.name == unit_name) {
-        Some(u) => u,
-        None => return Ok(Some(format!("Unknown unit «{unit_name}»"))),
+    let group = match state.group_by_id(&group_id) {
+        Some(g) => g.clone(),
+        None    => return Ok(Some("Group not found.".into())),
     };
 
-    if !unit.has_matrix_member(sender_str) {
-        return Ok(Some(format!("You are not assigned to «{unit_name}».")));
-    }
-    if sender_str == target_str {
-        return Ok(Some("You cannot swap with yourself.".into()));
+    if !group.member_ids.contains(&sender_person_id) {
+        return Ok(Some(format!("You are not a member of «{}».", group.name)));
     }
 
-    // Avoid duplicate pending requests for the same unit/week.
     let dupe = state.swap_requests.iter().any(|s| {
-        s.unit_name == unit_name
-            && s.iso_year == year
-            && s.iso_week == week
-            && s.status == SwapStatus::Pending
-            && s.requester == sender_str
+        s.group_id == group_id && s.iso_year == year && s.iso_week == week
+            && s.status == SwapStatus::Pending && s.requester == sender_mxid
     });
     if dupe {
-        return Ok(Some(format!(
-            "You already have a pending swap request for «{unit_name}» week {week} ({}).",
-            week_dates(year, week)
-        )));
+        return Ok(Some(format!("You already have a pending swap for «{}» week {week}.", group.name)));
     }
 
     let id = state.alloc_id();
     state.swap_requests.push(SwapRequest {
         id,
-        requester: sender_str.to_owned(),
-        target: target_str.to_owned(),
-        unit_name: unit_name.clone(),
-        iso_year: year,
-        iso_week: week,
+        requester: sender_mxid.to_owned(),
+        target:    target_mxid.to_owned(),
+        group_id:  group_id.clone(),
+        iso_year:  year,
+        iso_week:  week,
         created_at: Utc::now(),
-        status: SwapStatus::Pending,
+        status:    SwapStatus::Pending,
+        unit_name: String::new(),
     });
     state.save(&ctx.state_path).await?;
 
     Ok(Some(format!(
-        "🔄 Swap #{id} · «{unit_name}» week {week} ({dates})\n\
-         {target_str}: !acceptswap {id} or !rejectswap {id}",
-        dates = week_dates(year, week),
+        "🔄 Swap #{id} · «{}» week {week} ({})\n{target_mxid}: !acceptswap {id} or !rejectswap {id}",
+        group.name, week_dates(year, week)
     )))
 }
 
@@ -476,31 +701,25 @@ async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 async fn cmd_acceptswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None => return Ok(Some("Usage: !acceptswap <id>".into())),
+        None    => return Ok(Some("Usage: !acceptswap <id>".into())),
     };
-    let sender_str = sender.as_str();
-    let mut state = ctx.state.lock().await;
+    let sender_mxid = sender.as_str();
+    let mut state   = ctx.state.lock().await;
 
     let req = match state.swap_requests.iter_mut().find(|r| r.id == id) {
         Some(r) => r,
-        None => return Ok(Some(format!("Swap request #{id} not found."))),
+        None    => return Ok(Some(format!("Swap request #{id} not found."))),
     };
-
-    if req.target != sender_str {
-        return Ok(Some("This swap request is not addressed to you.".into()));
-    }
-    if req.status != SwapStatus::Pending {
-        return Ok(Some(format!("Request #{id} is already {:?}.", req.status)));
-    }
+    if req.target != sender_mxid { return Ok(Some("This swap is not addressed to you.".into())); }
+    if req.status != SwapStatus::Pending { return Ok(Some(format!("Request #{id} is already {:?}.", req.status))); }
 
     let requester = req.requester.clone();
-    let unit = req.unit_name.clone();
+    let group_id  = req.group_id.clone();
     req.status = SwapStatus::Accepted;
     state.save(&ctx.state_path).await?;
 
-    Ok(Some(format!(
-        "✅ Swap #{id} accepted. {sender_str} will clean «{unit}» this week instead of {requester}."
-    )))
+    let group_name = state.group_by_id(&group_id).map(|g| g.name.clone()).unwrap_or_default();
+    Ok(Some(format!("✅ Swap #{id} accepted. {sender_mxid} will clean «{group_name}» instead of {requester}.")))
 }
 
 // ── !rejectswap <id> ─────────────────────────────────────────────────────────
@@ -508,478 +727,83 @@ async fn cmd_acceptswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
 async fn cmd_rejectswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None => return Ok(Some("Usage: !rejectswap <id>".into())),
+        None    => return Ok(Some("Usage: !rejectswap <id>".into())),
     };
-    let sender_str = sender.as_str();
-    let mut state = ctx.state.lock().await;
+    let sender_mxid = sender.as_str();
+    let mut state   = ctx.state.lock().await;
 
     let req = match state.swap_requests.iter_mut().find(|r| r.id == id) {
         Some(r) => r,
-        None => return Ok(Some(format!("Swap request #{id} not found."))),
+        None    => return Ok(Some(format!("Swap #{id} not found."))),
     };
-
-    if req.target != sender_str {
-        return Ok(Some("This swap request is not addressed to you.".into()));
-    }
-    if req.status != SwapStatus::Pending {
-        return Ok(Some(format!("Request #{id} is already {:?}.", req.status)));
-    }
+    if req.target != sender_mxid { return Ok(Some("This swap is not addressed to you.".into())); }
+    if req.status != SwapStatus::Pending { return Ok(Some(format!("Request #{id} is already {:?}.", req.status))); }
 
     req.status = SwapStatus::Rejected;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("❌ Swap #{id} rejected.")))
 }
 
-// ── !joinfloor <floor> ────────────────────────────────────────────────────────
-
-async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    let floor_name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !joinfloor <floor_name>".into())),
-    };
-
-    let sender_str = sender.as_str();
-    let mut state = ctx.state.lock().await;
-
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Floor «{floor_name}» not found.  Use !floors to see available floors."))),
-    };
-
-    if floor.members.iter().any(|p| p.matches_str(sender_str)) {
-        return Ok(Some(format!("You are already on floor «{floor_name}».")));
-    }
-    floor.members.push(PersonRef::Matrix { mxid: sender_str.to_owned() });
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Joined «{floor_name}».")))
-}
-
-// ── !leavefloor <floor> ───────────────────────────────────────────────────────
-
-async fn cmd_leavefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    let floor_name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !leavefloor <floor_name>".into())),
-    };
-
-    let sender_str = sender.as_str();
-    let mut state = ctx.state.lock().await;
-
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Floor «{floor_name}» not found."))),
-    };
-
-    let before = floor.members.len();
-    floor.members.retain(|p| !p.matches_str(sender_str));
-    if floor.members.len() == before {
-        return Ok(Some(format!("You are not on floor «{floor_name}».")));
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Left «{floor_name}».")))
-}
-
-// ── Admin: !adduser @user floor ───────────────────────────────────────────────
-
-async fn cmd_adduser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let (user, floor_name) = match (args.first(), args.get(1)) {
-        (Some(u), Some(f)) => (*u, f.to_string()),
-        _ => return Ok(Some("Usage: !adduser @user floor_name".into())),
-    };
-
-    let mut state = ctx.state.lock().await;
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Floor «{floor_name}» not found."))),
-    };
-
-    if floor.members.iter().any(|p| p.matches_str(user)) {
-        return Ok(Some(format!("{user} is already on floor «{floor_name}».")));
-    }
-    floor.members.push(PersonRef::Matrix { mxid: user.to_owned() });
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Added {user} to floor «{floor_name}».")))
-}
-
-// ── Admin: !removeuser @user floor ───────────────────────────────────────────
-
-async fn cmd_removeuser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let (user, floor_name) = match (args.first(), args.get(1)) {
-        (Some(u), Some(f)) => (*u, f.to_string()),
-        _ => return Ok(Some("Usage: !removeuser @user floor_name".into())),
-    };
-
-    let mut state = ctx.state.lock().await;
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Floor «{floor_name}» not found."))),
-    };
-
-    let before = floor.members.len();
-    floor.members.retain(|p| !p.matches_str(user));
-    if floor.members.len() == before {
-        return Ok(Some(format!("{user} is not on floor «{floor_name}».")));
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed {user} from floor «{floor_name}».")))
-}
-
-// ── Admin: !addperson <display_name> <area> ───────────────────────────────────
-
-async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let (name, floor_name) = match (args.first(), args.get(1)) {
-        (Some(n), Some(f)) => (n.to_string(), f.to_string()),
-        _ => return Ok(Some("Usage: !addperson <display_name> <area>".into())),
-    };
-    let mut state = ctx.state.lock().await;
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Area «{floor_name}» not found."))),
-    };
-    if floor.members.iter().any(|p| p.matches_str(&name)) {
-        return Ok(Some(format!("{name} is already on «{floor_name}».")));
-    }
-    floor.members.push(PersonRef::Named { name: name.clone() });
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Added {name} (no Matrix) to «{floor_name}».")))
-}
-
-// ── Admin: !removeperson <display_name> <area> ────────────────────────────────
-
-async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let (name, floor_name) = match (args.first(), args.get(1)) {
-        (Some(n), Some(f)) => (n.to_string(), f.to_string()),
-        _ => return Ok(Some("Usage: !removeperson <display_name> <area>".into())),
-    };
-    let mut state = ctx.state.lock().await;
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Area «{floor_name}» not found."))),
-    };
-    let before = floor.members.len();
-    floor.members.retain(|p| !p.matches_str(&name));
-    if floor.members.len() == before {
-        return Ok(Some(format!("{name} not found on «{floor_name}».")));
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed {name} from «{floor_name}».")))
-}
-
-// ── Admin: !addfloor name ─────────────────────────────────────────────────────
-
-async fn cmd_addfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !addfloor floor_name".into())),
-    };
-
-    let mut state = ctx.state.lock().await;
-    if state.floors.iter().any(|f| f.name == name) {
-        return Ok(Some(format!("Floor «{name}» already exists.")));
-    }
-    state.floors.push(Floor { name: name.clone(), members: vec![], users: vec![], rooms: vec![] });
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Added floor «{name}».")))
-}
-
-// ── Admin: !removefloor name ──────────────────────────────────────────────────
-
-async fn cmd_removefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !removefloor floor_name".into())),
-    };
-
-    let mut state = ctx.state.lock().await;
-    let before = state.floors.len();
-    state.floors.retain(|f| f.name != name);
-    state.groups.iter_mut().for_each(|g| g.floor_names.retain(|fn_| fn_ != &name));
-    if state.floors.len() == before {
-        return Ok(Some(format!("Floor «{name}» not found.")));
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed floor «{name}».")))
-}
-
-// ── Admin: !addroom <floor> <room> ───────────────────────────────────────────
-
-async fn cmd_addroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let (floor_name, room_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
-        (Some(f), Some(r)) if !r.is_empty() => (f.to_string(), r),
-        _ => return Ok(Some("Usage: !addroom <floor> <room name>".into())),
-    };
-
-    let mut state = ctx.state.lock().await;
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Floor «{floor_name}» not found."))),
-    };
-
-    if floor.rooms.iter().any(|r| r.eq_ignore_ascii_case(&room_name)) {
-        return Ok(Some(format!("Room «{room_name}» already exists on floor «{floor_name}».")));
-    }
-    floor.rooms.push(room_name.clone());
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Added room «{room_name}» to floor «{floor_name}».")))
-}
-
-// ── Admin: !removeroom <floor> <room> ────────────────────────────────────────
-
-async fn cmd_removeroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let (floor_name, room_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
-        (Some(f), Some(r)) if !r.is_empty() => (f.to_string(), r),
-        _ => return Ok(Some("Usage: !removeroom <floor> <room name>".into())),
-    };
-
-    let mut state = ctx.state.lock().await;
-    let floor = match state.floors.iter_mut().find(|f| f.name == floor_name) {
-        Some(f) => f,
-        None => return Ok(Some(format!("Floor «{floor_name}» not found."))),
-    };
-
-    let before = floor.rooms.len();
-    floor.rooms.retain(|r| !r.eq_ignore_ascii_case(&room_name));
-    if floor.rooms.len() == before {
-        return Ok(Some(format!("Room «{room_name}» not found on floor «{floor_name}».")));
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed room «{room_name}» from floor «{floor_name}».")))
-}
-
-// ── Admin: !linkfloors group_name floor1 floor2 … ────────────────────────────
-
-async fn cmd_linkfloors(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    if args.len() < 2 {
-        return Ok(Some("Usage: !linkfloors group_name floor1 [floor2 …]".into()));
-    }
-    let group_name = args[0].to_string();
-    let floor_names: Vec<String> = args[1..].iter().map(|s| s.to_string()).collect();
-
-    let mut state = ctx.state.lock().await;
-    for fn_ in &floor_names {
-        if !state.floors.iter().any(|f| &f.name == fn_) {
-            return Ok(Some(format!("Floor «{fn_}» not found.")));
-        }
-    }
-
-    if let Some(g) = state.groups.iter_mut().find(|g| g.name == group_name) {
-        g.floor_names = floor_names.clone();
-    } else {
-        state.groups.push(FloorGroup { name: group_name.clone(), floor_names: floor_names.clone() });
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Group «{group_name}» now covers: {}.", floor_names.join(", "))))
-}
-
-// ── Admin: !unlinkfloors group_name ──────────────────────────────────────────
-
-async fn cmd_unlinkfloors(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    require_admin(ctx, sender)?;
-    let name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !unlinkfloors group_name".into())),
-    };
-
-    let mut state = ctx.state.lock().await;
-    let before = state.groups.len();
-    state.groups.retain(|g| g.name != name);
-    if state.groups.len() == before {
-        return Ok(Some(format!("Group «{name}» not found.")));
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed group «{name}».")))
-}
-
-// ── !cleanplan [N] ────────────────────────────────────────────────────────────
-
-async fn cmd_cleanplan(ctx: &BotContext, _sender: &OwnedUserId, room: &Room, args: &[&str]) -> Result<Option<RoomMessageEventContent>> {
-    let n: usize = args
-        .first()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(6)
-        .clamp(1, 20);
-
-    let state    = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
-    let units    = state.units();
-
-    if units.is_empty() {
-        return Ok(Some(format::mentionify("No floors configured yet.")));
-    }
-
-    let (cur_y, cur_w) = current_iso_week();
-    let (start_y, start_w) = state.tracking_start();
-    let iv = interval as i64;
-
-    // Find the first due week that is >= the current week.
-    let weeks_elapsed = weeks_between((start_y, start_w), (cur_y, cur_w));
-    let first_due = if weeks_elapsed < 0 {
-        (start_y, start_w)
-    } else {
-        let past_intervals = weeks_elapsed / iv;
-        if weeks_elapsed % iv == 0 {
-            (cur_y, cur_w)
-        } else {
-            add_weeks(start_y, start_w, (past_intervals + 1) * iv)
-        }
-    };
-
-    // Collect every MXID that will appear in the output.
-    let mut all_user_ids: Vec<String> = Vec::new();
-    for i in 0..(n as i64) {
-        let (dy, dw) = add_weeks(first_due.0, first_due.1, i * iv);
-        for unit in &units {
-            if let Some(p) = state.responsible_user(unit, dy, dw, interval) {
-                if let Some(mxid) = p.matrix_id() {
-                    if !all_user_ids.iter().any(|x| x == mxid) {
-                        all_user_ids.push(mxid.to_owned());
-                    }
-                }
-            }
-        }
-    }
-    for c in &state.completions {
-        if !all_user_ids.iter().any(|x| x == &c.completed_by) {
-            all_user_ids.push(c.completed_by.clone());
-        }
-    }
-    // Release the state lock before the async room calls.
-    drop(state);
-
-    let uid_refs: Vec<&str> = all_user_ids.iter().map(String::as_str).collect();
-    let names = format::fetch_names(room, &uid_refs).await;
-
-    // Re-acquire state to build the output.
-    let state    = ctx.state.lock().await;
-    let units    = state.units();
-
-    let mut lines = vec![format!(
-        "📅 **Cleaning plan** · next {} week{} · every {} week{}",
-        n,
-        if n == 1 { "" } else { "s" },
-        interval,
-        if interval == 1 { "" } else { "s" },
-    )];
-
-    for i in 0..(n as i64) {
-        let (dy, dw) = add_weeks(first_due.0, first_due.1, i * iv);
-        let is_current = (dy, dw) == (cur_y, cur_w);
-
-        lines.push(String::new());
-        if is_current {
-            lines.push(format!("📆 **Week {dw} ({})** ← this week", week_dates(dy, dw)));
-        } else {
-            lines.push(format!("📆 Week {dw} ({})", week_dates(dy, dw)));
-        }
-
-        for unit in &units {
-            let done = state.is_completed(&unit.name, dy, dw);
-            let icon = if done {
-                "✅"
-            } else if is_current {
-                "🔲"
-            } else {
-                "🗓"
-            };
-
-            let detail = if done {
-                let c = state.completions.iter()
-                    .find(|c| c.unit_name == unit.name && c.iso_year == dy && c.iso_week == dw);
-                match c {
-                    Some(c) if c.skipped => "skipped ⏭️".to_owned(),
-                    Some(c) => format!("done by {}", c.completed_by),
-                    None    => "done".to_owned(),
-                }
-            } else {
-                match state.responsible_user(unit, dy, dw, interval) {
-                    None => "nobody assigned yet".to_owned(),
-                    Some(p) => {
-                        let floor_name = unit.floor_names.first()
-                            .map(String::as_str)
-                            .unwrap_or(&unit.name);
-                        if state.is_absent(p.display(), floor_name, dy, dw) {
-                            format!("{} (away)", p.display())
-                        } else {
-                            p.display().to_owned()
-                        }
-                    }
-                }
-            };
-
-            lines.push(format!("  {icon} {} : {detail}", unit.name));
-        }
-    }
-
-    Ok(Some(format::mentionify_with_names(&lines.join("\n"), &names)))
-}
-
-// ── !undo [floor] ─────────────────────────────────────────────────────────────
+// ── !undo [group] ─────────────────────────────────────────────────────────────
 
 async fn cmd_undo(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     let (year, week) = current_iso_week();
-    let sender_str   = sender.as_str();
+    let sender_mxid  = sender.as_str();
     let is_admin     = ctx.admin_users.contains(sender);
     let mut state    = ctx.state.lock().await;
 
-    let target_units: Vec<String> = if let Some(name) = args.first() {
-        vec![name.to_string()]
+    let sender_pid = state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone());
+
+    let target_group_ids: Vec<String> = if let Some(name) = args.first() {
+        match state.group_by_name(name) {
+            Some(g) => vec![g.id.clone()],
+            None    => return Ok(Some(format!("Group «{name}» not found."))),
+        }
     } else {
-        state.units().iter()
-            .filter(|u| u.has_matrix_member(sender_str))
-            .map(|u| u.name.clone())
-            .collect()
+        match &sender_pid {
+            Some(pid) => state.groups_for_person(pid).iter().map(|g| g.id.clone()).collect(),
+            None      => return Ok(Some("You are not assigned to any group.".into())),
+        }
     };
 
-    if target_units.is_empty() {
-        return Ok(Some("You are not assigned to any floor.".into()));
+    if target_group_ids.is_empty() {
+        return Ok(Some("You are not assigned to any group.".into()));
     }
 
-    let mut undone  = vec![];
-    let mut absent  = vec![];
-    let mut no_perm = vec![];
+    let mut undone   = vec![];
+    let mut not_done = vec![];
+    let mut no_perm  = vec![];
 
-    for unit_name in &target_units {
-        let units    = state.units();
-        let assigned = units.iter()
-            .find(|u| u.name == *unit_name)
-            .map(|u| u.has_matrix_member(sender_str))
-            .unwrap_or(false);
+    for group_id in &target_group_ids {
+        let is_member = sender_pid.as_ref().map(|pid| {
+            state.cleaning_groups.iter()
+                .find(|g| &g.id == group_id)
+                .map(|g| g.member_ids.contains(pid))
+                .unwrap_or(false)
+        }).unwrap_or(false);
 
-        if !assigned && !is_admin {
-            no_perm.push(unit_name.clone());
+        if !is_member && !is_admin {
+            let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
+            no_perm.push(name);
             continue;
         }
 
         let before = state.completions.len();
-        state.completions.retain(|c| {
-            !(c.unit_name == *unit_name && c.iso_year == year && c.iso_week == week)
-        });
+        state.completions.retain(|c| !(c.group_id == *group_id && c.iso_year == year && c.iso_week == week));
+        let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
         if state.completions.len() < before {
-            undone.push(unit_name.clone());
-            // Also clean up any stale reaction_done entries for this week.
-            state.reaction_dones.retain(|_, rd| {
-                !(rd.unit_name == *unit_name && rd.iso_year == year && rd.iso_week == week)
-            });
+            state.reaction_dones.retain(|_, rd| !(rd.group_id == *group_id && rd.iso_year == year && rd.iso_week == week));
+            undone.push(name);
         } else {
-            absent.push(unit_name.clone());
+            not_done.push(name);
         }
     }
 
     state.save(&ctx.state_path).await?;
-
     let mut lines = vec![];
-    if !undone.is_empty()  { lines.push(format!("↩️ Undone: {}", undone.join(", "))); }
-    if !absent.is_empty()  { lines.push(format!("Not done this week: {}", absent.join(", "))); }
-    if !no_perm.is_empty() { lines.push(format!("❌ Not your floor: {}", no_perm.join(", "))); }
+    if !undone.is_empty()   { lines.push(format!("↩️ Undone: {}", undone.join(", "))); }
+    if !not_done.is_empty() { lines.push(format!("Not done this week: {}", not_done.join(", "))); }
+    if !no_perm.is_empty()  { lines.push(format!("❌ Not your group: {}", no_perm.join(", "))); }
     Ok(Some(lines.join("\n")))
 }
 
@@ -992,41 +816,39 @@ async fn cmd_next(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     let (start_y, start_w) = state.tracking_start();
     let iv = interval as i64;
 
-    let user = args.first().copied().unwrap_or_else(|| sender.as_str());
-
-    let unit = match state.unit_for_user(user) {
-        Some(u) => u,
-        None => return Ok(Some(format!("{user} is not assigned to any floor."))),
+    let query = args.first().copied().unwrap_or_else(|| sender.as_str());
+    let person = match state.find_person(query) {
+        Some(p) => p.clone(),
+        None    => return Ok(Some(format!("{query} is not registered."))),
     };
+    let groups = state.groups_for_person(&person.id);
+    if groups.is_empty() {
+        return Ok(Some(format!("{} is not in any cleaning group.", person.display_name)));
+    }
 
-    // First due week >= current week (same logic as !cleanplan).
     let elapsed = weeks_between((start_y, start_w), (cur_y, cur_w));
-    let first_due = if elapsed < 0 {
-        (start_y, start_w)
-    } else {
-        let past = elapsed / iv;
-        if elapsed % iv == 0 { (cur_y, cur_w) }
-        else { add_weeks(start_y, start_w, (past + 1) * iv) }
-    };
+    let first_due = if elapsed < 0 { (start_y, start_w) }
+        else {
+            let past = elapsed / iv;
+            if elapsed % iv == 0 { (cur_y, cur_w) } else { add_weeks(start_y, start_w, (past+1)*iv) }
+        };
 
     let (dy, dw) = first_due;
     let away = weeks_between((cur_y, cur_w), (dy, dw));
-    let when = match away {
-        0 => "this week ⚠️".to_owned(),
-        1 => "next week".to_owned(),
-        n => format!("in {n} weeks"),
-    };
-    let done = state.is_cleaned(&unit.name, dy, dw);
+    let when = match away { 0 => "this week ⚠️".into(), 1 => "next week".into(), n => format!("in {n} weeks") };
+    let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+    let done = groups.iter().any(|g| state.is_cleaned(&g.id, dy, dw));
     let suffix = if done { "  ✅ already done!" } else { "" };
 
     Ok(Some(format!(
-        "📅 Next due for {user}: **Week {dw} ({dates})** ({when}) · {}{}",
-        unit.name, suffix,
-        dates = week_dates(dy, dw),
+        "📅 Next due for {name}: **Week {dw} ({dates})** ({when}) · {groups}{suffix}",
+        name   = person.display_name,
+        dates  = week_dates(dy, dw),
+        groups = group_names.join(", "),
     )))
 }
 
-// ── !skip [floor] ─────────────────────────────────────────────────────────────
+// ── Admin: !skip [group] ─────────────────────────────────────────────────────
 
 async fn cmd_skip(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
@@ -1035,52 +857,53 @@ async fn cmd_skip(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     let now          = Utc::now();
     let mut state    = ctx.state.lock().await;
 
-    let target_units: Vec<String> = if let Some(name) = args.first() {
-        vec![name.to_string()]
+    let target_ids: Vec<String> = if let Some(name) = args.first() {
+        match state.group_by_name(name) {
+            Some(g) => vec![g.id.clone()],
+            None    => return Ok(Some(format!("Group «{name}» not found."))),
+        }
     } else {
-        state.units().iter()
-            .filter(|u| state.is_due(&u.name, year, week, interval))
-            .map(|u| u.name.clone())
+        state.cleaning_groups.iter()
+            .filter(|g| state.is_due(&g.id, year, week, interval))
+            .map(|g| g.id.clone())
             .collect()
     };
 
     let mut skipped = vec![];
     let mut already = vec![];
+    let sender_mxid = sender.as_str();
+    let sender_pid  = state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone())
+        .unwrap_or_else(|| sender_mxid.to_owned());
 
-    for unit_name in &target_units {
-        if state.is_completed(unit_name, year, week) {
-            already.push(unit_name.clone());
+    for group_id in &target_ids {
+        let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
+        if state.is_completed(group_id, year, week) {
+            already.push(name);
             continue;
         }
-        let responsible_users = state.units().into_iter()
-            .find(|u| u.name == *unit_name)
-            .map(|u| u.members.iter().map(|p| p.display().to_owned()).collect())
-            .unwrap_or_default();
         state.completions.push(Completion {
-            unit_name: unit_name.clone(),
-            iso_year: year,
-            iso_week: week,
+            group_id:               group_id.clone(),
+            completed_by_id:        sender_pid.clone(),
+            responsible_person_ids: Vec::new(),
+            iso_year:     year,
+            iso_week:     week,
             completed_at: now,
-            completed_by: sender.as_str().to_owned(),
-            responsible_users,
-            skipped: true,
+            skipped:      true,
+            unit_name:    String::new(),
+            completed_by: String::new(),
+            responsible_users: Vec::new(),
         });
-        skipped.push(unit_name.clone());
+        skipped.push(name);
     }
 
     state.save(&ctx.state_path).await?;
-
     let mut lines = vec![];
-    if !skipped.is_empty() {
-        lines.push(format!("⏭️ Skipped (won't count as missed): {}", skipped.join(", ")));
-    }
-    if !already.is_empty() {
-        lines.push(format!("Already done: {}", already.join(", ")));
-    }
+    if !skipped.is_empty() { lines.push(format!("⏭️ Skipped: {}", skipped.join(", "))); }
+    if !already.is_empty() { lines.push(format!("Already done: {}", already.join(", "))); }
     Ok(Some(lines.join("\n")))
 }
 
-// ── !remind [floor] ───────────────────────────────────────────────────────────
+// ── Admin: !remind [group] ────────────────────────────────────────────────────
 
 async fn cmd_remind(
     ctx: &BotContext,
@@ -1093,127 +916,94 @@ async fn cmd_remind(
     let (year, week) = current_iso_week();
     let interval     = ctx.config.schedule.interval_weeks;
 
-    // Collect what we need from state, then release the lock for async sends.
-    // tuple: (unit_name, responsible_person_opt, rooms_text)
-    let reminder_data: Vec<(String, Option<PersonRef>, Option<String>)> = {
+    let reminder_data: Vec<(String, String, Option<String>, Vec<String>)> = {
         let state = ctx.state.lock().await;
-        let units = state.units();
-        if let Some(name) = args.first() {
-            units.iter()
-                .filter(|u| u.name.eq_ignore_ascii_case(name))
-                .map(|u| {
-                    let resp = state.responsible_user(u, year, week, interval);
-                    (u.name.clone(), resp, u.rooms_text())
-                })
-                .collect()
+        let groups = if let Some(name) = args.first() {
+            state.cleaning_groups.iter()
+                .filter(|g| g.name.eq_ignore_ascii_case(name))
+                .cloned().collect::<Vec<_>>()
         } else {
-            units.iter()
-                .filter(|u| {
-                    state.is_due(&u.name, year, week, interval)
-                        && !state.is_completed(&u.name, year, week)
-                })
-                .map(|u| {
-                    let resp = state.responsible_user(u, year, week, interval);
-                    (u.name.clone(), resp, u.rooms_text())
-                })
-                .collect()
-        }
+            state.cleaning_groups.iter()
+                .filter(|g| state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
+                .cloned().collect()
+        };
+
+        groups.iter().map(|g| {
+            let resp = state.responsible_person(g, year, week, interval);
+            let mxids = resp.and_then(|p| p.matrix_id.as_ref().map(|m| vec![m.clone()])).unwrap_or_default();
+            let _text = resp.map(|p| person_key(p).to_owned()).unwrap_or_else(|| "(nobody assigned)".into());
+            (g.id.clone(), g.name.clone(), g.rooms_text(), mxids)
+        }).collect()
     };
 
     if reminder_data.is_empty() {
-        return Ok(Some(format::mentionify(
-            "✅ Nothing due and uncleaned right now.",
-        )));
+        return Ok(Some(format::mentionify("✅ Nothing due and uncleaned right now.")));
     }
 
     let mut sent = vec![];
-    for (unit_name, responsible_person, rooms_text) in &reminder_data {
-        let mention_ids: Vec<String> = responsible_person.iter()
-            .filter_map(|p| p.matrix_id().map(str::to_owned))
-            .collect();
-        let users_text = responsible_person.as_ref()
-            .map(|p| p.display().to_owned())
-            .unwrap_or_else(|| "(nobody assigned)".to_owned());
-        let rooms_line = rooms_text.as_ref()
-            .map(|r| format!("\n{r}"))
-            .unwrap_or_default();
+    for (group_id, group_name, rooms_text, mxids) in &reminder_data {
+        let users_text = if mxids.is_empty() { "(nobody assigned)".into() } else { mxids.join(", ") };
+        let rooms_line = rooms_text.as_ref().map(|r| format!("\n{r}")).unwrap_or_default();
         let msg = format!(
-            "🧹 **{unit_name}** · week {week} ({dates})\n\
-             {users_text}{rooms_line}\n\
-             ✅ React or type !done",
-            dates = week_dates(year, week),
+            "🧹 **{group_name}** · week {week} ({})\n{users_text}{rooms_line}\n✅ React or type !done",
+            week_dates(year, week)
         );
 
-        // Build with display names + push-notification mentions.
-        let uid_refs: Vec<&str> = mention_ids.iter().map(String::as_str).collect();
+        let uid_refs: Vec<&str> = mxids.iter().map(String::as_str).collect();
         let names   = format::fetch_names(room, &uid_refs).await;
-        let parsed: Vec<matrix_sdk::ruma::OwnedUserId> =
-            mention_ids.iter().filter_map(|s| s.parse().ok()).collect();
+        let parsed: Vec<matrix_sdk::ruma::OwnedUserId> = mxids.iter().filter_map(|s| s.parse().ok()).collect();
         let content = format::mentionify_with_names(&msg, &names)
             .add_mentions(matrix_sdk::ruma::events::Mentions::with_user_ids(parsed));
 
         match room.send(content).await {
             Ok(resp) => {
                 let mut state = ctx.state.lock().await;
-                state.reminder_event_ids
-                    .insert(resp.response.event_id.to_string(), unit_name.clone());
+                state.reminder_event_ids.insert(resp.response.event_id.to_string(), group_id.clone());
                 state.save(&ctx.state_path).await?;
-                sent.push(unit_name.clone());
+                sent.push(group_name.clone());
             }
-            Err(e) => tracing::warn!("!remind send failed for {unit_name}: {e}"),
+            Err(e) => tracing::warn!("!remind send failed for {group_name}: {e}"),
         }
     }
 
-    Ok(Some(format::mentionify(&format!(
-        "✅ Reminder sent for: {}",
-        sent.join(", ")
-    ))))
+    Ok(Some(format::mentionify(&format!("✅ Reminder sent for: {}", sent.join(", ")))))
 }
 
-// ── !leaderboard ──────────────────────────────────────────────────────────────
+// ── !leaderboard ─────────────────────────────────────────────────────────────
 
 async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
     let state    = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
     let (cur_y, cur_w) = current_iso_week();
 
-    let units = state.units();
-    if units.is_empty() {
-        return Ok(Some("No floors configured yet.".into()));
-    }
-
-    // Collect every unique person across all floors.
-    let mut all_users: Vec<String> = Vec::new();
-    for unit in &units {
-        for p in &unit.members {
-            let display = p.display().to_owned();
-            if !all_users.contains(&display) { all_users.push(display); }
+    let all_person_ids: Vec<String> = {
+        let mut ids = vec![];
+        for g in &state.cleaning_groups {
+            for id in &g.member_ids {
+                if !ids.contains(id) { ids.push(id.clone()); }
+            }
         }
-    }
-    if all_users.is_empty() {
-        return Ok(Some("No users assigned to any floor.".into()));
+        ids
+    };
+
+    if all_person_ids.is_empty() {
+        return Ok(Some("No members assigned to any group yet.".into()));
     }
 
     let due_weeks  = state.all_due_weeks(interval, (cur_y, cur_w));
-    let closed_due: Vec<_> = due_weeks.iter()
-        .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
-        .collect();
+    let closed_due: Vec<_> = due_weeks.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).collect();
     let n_due = closed_due.len();
 
-    struct Entry { user: String, done: usize, skips: usize, streak: u32, pct: usize }
+    struct Entry { name: String, done: usize, skips: usize, streak: u32, pct: usize }
 
-    let mut board: Vec<Entry> = all_users.into_iter().map(|user| {
-        let done = state.completions.iter()
-            .filter(|c| c.completed_by == user && !c.skipped)
-            .count();
-        let skips = state.completions.iter()
-            .filter(|c| c.completed_by == user && c.skipped)
-            .count();
-        let streak = state.unit_for_user(&user)
-            .map(|u| state.streak_for(&u.name, interval))
-            .unwrap_or(0);
+    let mut board: Vec<Entry> = all_person_ids.iter().filter_map(|pid| {
+        let person = state.person_by_id(pid)?;
+        let done  = state.completions.iter().filter(|c| c.completed_by_id == *pid && !c.skipped).count();
+        let skips = state.completions.iter().filter(|c| c.completed_by_id == *pid && c.skipped).count();
+        let streak = state.groups_for_person(pid).first()
+            .map(|g| state.streak_for(&g.id, interval)).unwrap_or(0);
         let pct = if n_due > 0 { 100 * done.min(n_due) / n_due } else { 100 };
-        Entry { user, done, skips, streak, pct }
+        Some(Entry { name: person.display_name.clone(), done, skips, streak, pct })
     }).collect();
 
     board.sort_by(|a, b| b.pct.cmp(&a.pct).then(b.streak.cmp(&a.streak)));
@@ -1223,261 +1013,258 @@ async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
         let medal  = match i { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => "  " };
         let streak = if e.streak >= 2 { format!("  🔥{}", e.streak) } else { String::new() };
         let skip_s = if e.skips > 0 { format!("  ⏭️{}", e.skips) } else { String::new() };
-        lines.push(format!(
-            "{medal} {}: {}/{} ({:>3}%){}{}",
-            e.user, e.done, n_due, e.pct, streak, skip_s
-        ));
+        lines.push(format!("{medal} {}: {}/{} ({:>3}%){streak}{skip_s}", e.name, e.done, n_due, e.pct));
     }
     Ok(Some(lines.join("\n")))
 }
 
-// ── !absent @user [weeks] ─────────────────────────────────────────────────────
+// ── Admin: !absent <person> [group] [weeks] ───────────────────────────────────
 
 async fn cmd_absent(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-
-    let user = match args.first() {
+    let person_query = match args.first() {
         Some(u) => u.to_string(),
-        None    => return Ok(Some("Usage: !absent @user [weeks]  (default 4 weeks; use !back @user to cancel early)".into())),
+        None    => return Ok(Some("Usage: !absent <person> [weeks]  (default 4)".into())),
     };
-    let weeks: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
 
     let mut state = ctx.state.lock().await;
-
-    let unit = match state.unit_for_user(&user) {
-        Some(u) => u,
-        None    => return Ok(Some(format!("{user} is not assigned to any floor."))),
+    let person = match state.find_person(&person_query).cloned() {
+        Some(p) => p,
+        None    => return Ok(Some(format!("{person_query} not found."))),
     };
 
-    // Get canonical identifier for the person.
-    let canonical_id = unit.members.iter()
-        .find(|p| p.matches_str(&user))
-        .map(|p| p.display().to_owned())
-        .unwrap_or_else(|| user.clone());
+    // Parse optional weeks (last numeric arg).
+    let weeks: u32 = args.iter().rev().find_map(|s| s.parse().ok()).unwrap_or(4);
 
-    // Replace any existing absence for this user/floor.
-    state.absences.retain(|a| !a.user_id.eq_ignore_ascii_case(&canonical_id) || a.floor_name != unit.name);
+    let groups = state.groups_for_person(&person.id).iter().map(|g| g.id.clone()).collect::<Vec<_>>();
+    if groups.is_empty() {
+        return Ok(Some(format!("{} is not in any group.", person.display_name)));
+    }
 
-    let (from_year, from_week) = current_iso_week();
-    let unit_name = unit.name.clone();
-    state.absences.push(Absence {
-        user_id:        canonical_id.clone(),
-        floor_name:     unit_name.clone(),
-        from_year,
-        from_week,
-        duration_weeks: weeks,
-    });
+    let (from_y, from_w) = current_iso_week();
+    state.absences.retain(|a| a.person_id != person.id);
+    for group_id in &groups {
+        state.absences.push(Absence {
+            person_id: person.id.clone(),
+            group_id:  group_id.clone(),
+            from_year: from_y,
+            from_week: from_w,
+            duration_weeks: weeks,
+            user_id:    String::new(),
+            floor_name: String::new(),
+        });
+    }
     state.save(&ctx.state_path).await?;
 
-    let end = add_weeks(from_year, from_week, weeks as i64);
+    let end = add_weeks(from_y, from_w, weeks as i64);
     Ok(Some(format!(
-        "🌴 {canonical_id} away from «{unit_name}» for {weeks} week{} · back week {ew} ({edates})",
+        "🌴 {} away for {weeks} week{} · back week {} ({})",
+        person.display_name,
         if weeks == 1 { "" } else { "s" },
-        ew = end.1,
-        edates = week_dates(end.0, end.1),
+        end.1, week_dates(end.0, end.1)
     )))
 }
 
-// ── !back @user ───────────────────────────────────────────────────────────────
+// ── Admin: !back <person> ─────────────────────────────────────────────────────
 
 async fn cmd_back(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-
-    let user = match args.first() {
+    let query = match args.first() {
         Some(u) => u.to_string(),
-        None    => return Ok(Some("Usage: !back @user".into())),
+        None    => return Ok(Some("Usage: !back <person>".into())),
     };
-
     let mut state = ctx.state.lock().await;
+    let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
+        Some(id) => id,
+        None     => return Ok(Some(format!("{query} not found."))),
+    };
     let before = state.absences.len();
-    state.absences.retain(|a| !a.user_id.eq_ignore_ascii_case(&user));
+    state.absences.retain(|a| a.person_id != person_id);
     if state.absences.len() == before {
-        return Ok(Some(format!("{user} has no active absence.")));
+        return Ok(Some(format!("{query} has no active absence.")));
     }
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ {user} is back.")))
+    Ok(Some(format!("✅ {query} is back.")))
 }
 
-// ── !blame / !blame @user / !blame <floor> ────────────────────────────────────
+// ── !blame [group / @user] ────────────────────────────────────────────────────
 
 async fn cmd_blame(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     let (cur_y, cur_w) = current_iso_week();
-    let state = ctx.state.lock().await;
+    let state    = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
 
     Ok(Some(match args.first() {
-        None          => blame_all(&state, cur_y, cur_w, interval),
-        Some(arg) if arg.starts_with('@') => blame_user(&state, arg, interval),
-        Some(arg)     => blame_unit(&state, arg, cur_y, cur_w, interval),
+        None      => blame_all(&state, cur_y, cur_w, interval),
+        Some(arg) => {
+            if let Some(group) = state.group_by_name(arg) {
+                blame_group(&state, &group.clone(), cur_y, cur_w, interval)
+            } else if let Some(person) = state.find_person(arg).cloned() {
+                blame_person(&state, &person, interval)
+            } else {
+                format!("«{arg}» not found.")
+            }
+        }
     }))
 }
 
-/// !blame — all units due this week but not yet cleaned.
 fn blame_all(state: &crate::state::State, year: i32, week: u32, interval: u32) -> String {
-    let units = state.units();
-    let uncleaned: Vec<_> = units.iter()
-        .filter(|u| state.is_due(&u.name, year, week, interval)
-                 && !state.is_completed(&u.name, year, week))
+    let uncleaned: Vec<_> = state.cleaning_groups.iter()
+        .filter(|g| state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
         .collect();
-
     if uncleaned.is_empty() {
-        return "✅ All due units are cleaned this week — nothing to blame!".into();
+        return "✅ All due groups are cleaned this week!".into();
     }
-
     let mut lines = vec![format!("😤 **Blame** · week {week} ({})", week_dates(year, week))];
-    for unit in uncleaned {
-        let responsible = if unit.members.is_empty() {
-            "(nobody assigned)".into()
-        } else {
-            unit.members.iter().map(|p| p.display()).collect::<Vec<_>>().join(", ")
-        };
+    for g in uncleaned {
+        let members_text = state.members_of(g).iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>().join(", ");
         let n_due    = state.all_due_weeks(interval, (year, week)).len();
-        let n_missed = state.missed_weeks_for(&unit.name, interval).len();
-        let streak   = state.streak_for(&unit.name, interval);
+        let n_missed = state.missed_weeks_for(&g.id, interval).len();
         lines.push(String::new());
-        lines.push(format!("❌ {}", unit.name));
-        lines.push(format!("Responsible: {responsible}"));
-        lines.push(format!("Streak: {streak} · Missed: {n_missed} of {n_due}"));
+        lines.push(format!("❌ {}", g.name));
+        lines.push(format!("Members: {members_text}"));
+        lines.push(format!("Missed: {n_missed} of {n_due}"));
     }
     lines.join("\n")
 }
 
-/// !blame @user — personal cleaning record for one user.
-fn blame_user(state: &crate::state::State, user: &str, interval: u32) -> String {
+fn blame_group(state: &crate::state::State, group: &CleaningGroup, year: i32, week: u32, interval: u32) -> String {
+    let due    = state.all_due_weeks(interval, (year, week));
+    let closed: Vec<_> = due.iter().filter(|&&(y,w)| (y,w) != (year,week)).collect();
+    let n_due  = closed.len();
+    let n_done = closed.iter().filter(|(y,w)| state.is_completed(&group.id, *y, *w)).count();
+    let pct    = if n_due > 0 { 100 * n_done / n_due } else { 100 };
+    let streak = state.streak_for(&group.id, interval);
+    let this   = state.is_completed(&group.id, year, week);
+    let members_text = state.members_of(group).iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>().join(", ");
+
+    let mut lines = vec![format!("😤 **Blame** · {}", group.name), String::new()];
+    lines.push(format!("Members: {members_text}"));
+    lines.push(format!("Completed: {n_done}/{n_due} ({pct}%) · Streak: {streak} · This week: {}", if this { "✅" } else { "❌" }));
+    if let Some(last) = state.last_completion(&group.id) {
+        let by = state.person_by_id(&last.completed_by_id).map(|p| p.display_name.as_str()).unwrap_or("?");
+        lines.push(format!("Last: week {} ({}) by {by}", last.iso_week, week_dates(last.iso_year, last.iso_week)));
+    }
+    let missed = state.missed_weeks_for(&group.id, interval);
+    if !missed.is_empty() {
+        let shown: Vec<_> = missed.iter().take(5).map(|(y,w)| format!("w{w} ({})", week_dates(*y,*w))).collect();
+        lines.push(format!("Missed: {}{}", shown.join(", "), if missed.len() > 5 { format!(" (+{})", missed.len()-5) } else { String::new() }));
+    }
+    lines.join("\n")
+}
+
+fn blame_person(state: &crate::state::State, person: &Person, interval: u32) -> String {
     let (cur_y, cur_w) = current_iso_week();
+    let groups = state.groups_for_person(&person.id);
+    let group_name = groups.first().map(|g| g.name.as_str()).unwrap_or("(unassigned)");
 
-    let unit = match state.unit_for_user(user) {
-        Some(u) => u,
-        None    => return format!("{user} is not assigned to any floor."),
-    };
+    let due    = state.all_due_weeks(interval, (cur_y, cur_w));
+    let closed: Vec<_> = due.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).collect();
+    let n_due  = closed.len();
+    let n_done_by_person = state.completions.iter().filter(|c| c.completed_by_id == person.id).count().min(n_due);
+    let pct    = if n_due > 0 { 100 * n_done_by_person / n_due } else { 100 };
+    let streak = groups.first().map(|g| state.streak_for(&g.id, interval)).unwrap_or(0);
 
-    let due_weeks   = state.all_due_weeks(interval, (cur_y, cur_w));
-    let closed_due: Vec<_> = due_weeks.iter()
-        .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
-        .collect();
-    let n_due = closed_due.len();
-
-    let n_done_by_user = state.completions.iter()
-        .filter(|c| c.unit_name == unit.name && c.completed_by == user)
-        .count()
-        .min(n_due);
-    let n_done_by_anyone = closed_due.iter()
-        .filter(|(y, w)| state.is_completed(&unit.name, *y, *w))
-        .count();
-    let n_missed        = n_due - n_done_by_anyone;
-    let n_someone_else  = n_done_by_anyone.saturating_sub(n_done_by_user);
-    let pct = if n_due > 0 { 100 * n_done_by_user / n_due } else { 100 };
-    let streak = state.streak_for(&unit.name, interval);
-
-    let mut lines = vec![format!("😤 **Blame** · {user}")];
-    lines.push(String::new());
-    lines.push(format!("Floor: {}", unit.name));
-    lines.push(format!("Personally cleaned: {n_done_by_user}/{n_due} due weeks ({pct}%)"));
-    if n_someone_else > 0 {
-        lines.push(format!("Covered by others: {n_someone_else}"));
-    }
-    if n_missed > 0 {
-        lines.push(format!("Not cleaned at all: {n_missed}"));
-    }
-    lines.push(format!("Streak: {streak}"));
-
+    let mut lines = vec![format!("😤 **Blame** · {}", person.display_name), String::new()];
+    lines.push(format!("Group: {group_name}"));
+    lines.push(format!("Personally cleaned: {n_done_by_person}/{n_due} ({pct}%) · Streak: {streak}"));
     if let Some(last) = state.completions.iter()
-        .filter(|c| c.unit_name == unit.name && c.completed_by == user)
+        .filter(|c| c.completed_by_id == person.id)
         .max_by_key(|c| c.completed_at)
     {
-        lines.push(format!(
-            "Last cleaned by them: week {w} ({})",
-            week_dates(last.iso_year, last.iso_week), w = last.iso_week,
-        ));
+        lines.push(format!("Last: week {} ({})", last.iso_week, week_dates(last.iso_year, last.iso_week)));
     }
-
-    let missed = state.missed_weeks_for(&unit.name, interval);
-    if !missed.is_empty() {
-        let shown: Vec<String> = missed.iter().take(5)
-            .map(|(y, w)| format!("w{w} ({})", week_dates(*y, *w))).collect();
-        let suffix = if missed.len() > 5 {
-            format!(" (+{})", missed.len() - 5)
-        } else {
-            String::new()
-        };
-        lines.push(String::new());
-        lines.push(format!("Weeks nobody cleaned: {}{suffix}", shown.join(", ")));
-    }
-
     lines.join("\n")
 }
 
-/// !blame <floor> — cleaning record for a specific unit.
-fn blame_unit(state: &crate::state::State, unit_name: &str, year: i32, week: u32, interval: u32) -> String {
-    let units = state.units();
-    let unit  = match units.iter().find(|u| u.name.eq_ignore_ascii_case(unit_name)) {
-        Some(u) => u,
-        None    => return format!("Unit «{unit_name}» not found."),
+// ── !cleanplan [N] ────────────────────────────────────────────────────────────
+
+async fn cmd_cleanplan(
+    ctx: &BotContext,
+    _sender: &OwnedUserId,
+    room: &Room,
+    args: &[&str],
+) -> Result<Option<RoomMessageEventContent>> {
+    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(6).clamp(1, 20);
+
+    let (snapshot, is_empty) = {
+        let state    = ctx.state.lock().await;
+        let interval = ctx.config.schedule.interval_weeks;
+        let empty    = state.cleaning_groups.is_empty();
+        (build_schedule(&state, interval, n), empty)
     };
 
-    let due_weeks  = state.all_due_weeks(interval, (year, week));
-    let closed_due: Vec<_> = due_weeks.iter()
-        .filter(|&&(y, w)| (y, w) != (year, week))
-        .collect();
-    let n_due    = closed_due.len();
-    let n_done   = closed_due.iter()
-        .filter(|(y, w)| state.is_completed(&unit.name, *y, *w))
-        .count();
-    let n_missed = n_due - n_done;
-    let pct      = if n_due > 0 { 100 * n_done / n_due } else { 100 };
-    let streak   = state.streak_for(&unit.name, interval);
-    let this_week = state.is_completed(&unit.name, year, week);
-    let responsible = if unit.members.is_empty() {
-        "(nobody assigned)".into()
-    } else {
-        unit.members.iter().map(|p| p.display()).collect::<Vec<_>>().join(", ")
-    };
-
-    let mut lines = vec![format!("😤 **Blame** · {}", unit.name)];
-    lines.push(String::new());
-    lines.push(format!("Responsible: {responsible}"));
-    lines.push(format!("Completed: {n_done}/{n_due} ({pct}%) · Missed: {n_missed}"));
-    lines.push(format!("Streak: {streak} · This week: {}", if this_week { "✅" } else { "❌" }));
-
-    if let Some(last) = state.last_completed(&unit.name) {
-        lines.push(format!(
-            "Last cleaned: week {w} ({dates}) by {by}",
-            w = last.iso_week,
-            dates = week_dates(last.iso_year, last.iso_week),
-            by = last.completed_by,
-        ));
+    if is_empty {
+        return Ok(Some(format::mentionify("No cleaning groups configured yet.")));
     }
 
-    // Per-member breakdown when multiple members share a floor
-    if unit.members.len() > 1 {
+    // Pre-fetch Matrix display names for all assignees and completers.
+    let all_mxids: Vec<String> = {
+        let mut ids = Vec::new();
+        for a in &snapshot.assignments {
+            if let Some(mxid) = a.assignee_mxid() {
+                if !ids.contains(&mxid.to_owned()) { ids.push(mxid.to_owned()); }
+            }
+            if let Some(by) = &a.completed_by {
+                // completed_by is a display_name, look it up
+                if !ids.contains(by) {
+                    let state = ctx.state.lock().await;
+                    if let Some(p) = state.find_person(by) {
+                        if let Some(m) = &p.matrix_id { if !ids.contains(m) { ids.push(m.clone()); } }
+                    }
+                }
+            }
+        }
+        ids
+    };
+    let uid_refs: Vec<&str> = all_mxids.iter().map(String::as_str).collect();
+    let names = format::fetch_names(room, &uid_refs).await;
+
+    let interval = snapshot.interval_weeks;
+    let (cur_y, cur_w) = current_iso_week();
+
+    let mut lines = vec![format!(
+        "📅 **Cleaning plan** · next {n} week{} · every {interval} week{}",
+        if n == 1 { "" } else { "s" }, if interval == 1 { "" } else { "s" }
+    )];
+
+    for (dy, dw) in snapshot.weeks() {
+        let is_cur = (dy, dw) == (cur_y, cur_w);
         lines.push(String::new());
-        lines.push("Per user:".into());
-        for p in &unit.members {
-            let display = p.display();
-            let cnt = state.completions.iter()
-                .filter(|c| c.unit_name == unit.name && c.completed_by.as_str() == display)
-                .count();
-            lines.push(format!("  {display}: {cnt} cleanings"));
+        if is_cur {
+            lines.push(format!("📆 **Week {dw} ({})** ← this week", week_dates(dy, dw)));
+        } else {
+            lines.push(format!("📆 Week {dw} ({})", week_dates(dy, dw)));
+        }
+        for a in snapshot.for_group_in_week(dy, dw) {
+            let icon   = if a.is_completed { "✅" } else if is_cur { "🔲" } else { "🗓" };
+            let detail = if a.is_completed {
+                if a.is_skipped {
+                    "skipped ⏭️".into()
+                } else {
+                    let by = a.completed_by.as_deref().unwrap_or("?");
+                    format!("done by {by}")
+                }
+            } else {
+                match &a.assignee {
+                    None    => "nobody assigned yet".into(),
+                    Some(p) => {
+                        let key = p.mxid.as_deref().unwrap_or(&p.name);
+                        let state = ctx.state.lock().await;
+                        let away = state.is_absent(&p.id, &a.group_id, dy, dw);
+                        drop(state);
+                        if away { format!("{key} (away)") } else { key.to_owned() }
+                    }
+                }
+            };
+            lines.push(format!("  {icon} {} : {detail}", a.group_name));
         }
     }
 
-    let missed = state.missed_weeks_for(&unit.name, interval);
-    if !missed.is_empty() {
-        let shown: Vec<String> = missed.iter().take(5)
-            .map(|(y, w)| format!("w{w} ({})", week_dates(*y, *w))).collect();
-        let suffix = if missed.len() > 5 {
-            format!(" (+{})", missed.len() - 5)
-        } else {
-            String::new()
-        };
-        lines.push(String::new());
-        lines.push(format!("Missed weeks: {}{suffix}", shown.join(", ")));
-    }
-
-    lines.join("\n")
+    Ok(Some(format::mentionify_with_names(&lines.join("\n"), &names)))
 }
 
-// ── !pdf [N] ──────────────────────────────────────────────────────────────────
+// ── Admin: !pdf [N] ───────────────────────────────────────────────────────────
 
 async fn cmd_pdf(
     ctx: &BotContext,
@@ -1486,36 +1273,33 @@ async fn cmd_pdf(
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
     require_admin(ctx, sender)?;
-    let n: usize = args.first()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8)
-        .clamp(1, 52);
-    let (html, week_count) = {
-        let state = ctx.state.lock().await;
+    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(8).clamp(1, 52);
+
+    let html = {
+        let state    = ctx.state.lock().await;
         let interval = ctx.config.schedule.interval_weeks;
-        (crate::pdf::generate_schedule_html(&state, interval, n), n)
+        let snapshot = build_schedule(&state, interval, n);
+        crate::pdf::render_pdf(&snapshot)
     };
-    let html_bytes = html.into_bytes();
+
     let mime: mime::Mime = "text/html".parse().expect("valid mime");
-    match room.client().media().upload(&mime, html_bytes, None).await {
+    match room.client().media().upload(&mime, html.into_bytes(), None).await {
         Ok(upload) => {
             use matrix_sdk::ruma::events::room::message::{FileMessageEventContent, MessageType};
-            let filename = format!("putzplan_{week_count}w.html");
-            let file_content = FileMessageEventContent::plain(filename, upload.content_uri);
-            let content = RoomMessageEventContent::new(MessageType::File(file_content));
+            let content = RoomMessageEventContent::new(MessageType::File(
+                FileMessageEventContent::plain(format!("putzplan_{n}w.html"), upload.content_uri)
+            ));
             room.send(content).await.ok();
-            Ok(Some(format::mentionify(
-                "📄 Putzplan generiert. Öffne die HTML-Datei im Browser → Drucken → Als PDF speichern."
-            )))
+            Ok(Some(format::mentionify("📄 Putzplan generiert. Öffne die HTML-Datei im Browser → Drucken → Als PDF.")))
         }
         Err(e) => {
             tracing::warn!("PDF upload failed: {e}");
-            Ok(Some(format::mentionify("❌ Upload fehlgeschlagen. Versuche es erneut.")))
+            Ok(Some(format::mentionify("❌ Upload fehlgeschlagen.")))
         }
     }
 }
 
-// ── !ical [N] / !ical <person> [N] ───────────────────────────────────────────
+// ── !ical [N] / !ical <person> [N] ────────────────────────────────────────────
 
 async fn cmd_ical(
     ctx: &BotContext,
@@ -1523,126 +1307,175 @@ async fn cmd_ical(
     room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
-    let sender_str = sender.as_str();
+    let sender_mxid = sender.as_str();
+    let is_admin    = ctx.admin_users.contains(sender);
 
-    // Resolve target person and week count from args.
-    // !ical            → sender, 26 weeks
-    // !ical 12         → sender, 12 weeks
-    // !ical @other 12  → @other, 12 weeks  (admin only)
-    // !ical Alice 12   → Named person "Alice", 12 weeks (admin only)
-    let (person_id, weeks): (String, usize) = match args.first() {
-        None => (sender_str.to_owned(), 26),
-        Some(first) => {
-            if let Ok(n) = first.parse::<usize>() {
-                // Numeric first arg = week count, target = sender
-                (sender_str.to_owned(), n.clamp(1, 104))
-            } else {
-                // Non-numeric = person identifier; require admin for others
-                if *first != sender_str && !ctx.admin_users.contains(sender) {
-                    return Ok(Some(format::mentionify(
-                        "❌ Admin-Berechtigung erforderlich, um iCal für andere zu erstellen.",
-                    )));
+    // Parse target person and week count.
+    let (person_id, weeks): (String, usize) = {
+        let state = ctx.state.lock().await;
+        match args.first() {
+            None => {
+                let pid = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+                    Some(id) => id,
+                    None     => return Ok(Some(format::mentionify(
+                        &format!("You ({sender_mxid}) are not registered. Ask an admin to use !adduser.")
+                    ))),
+                };
+                (pid, 26)
+            }
+            Some(first) => {
+                if let Ok(n) = first.parse::<usize>() {
+                    let pid = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+                        Some(id) => id,
+                        None     => return Ok(Some(format::mentionify(
+                            &format!("You ({sender_mxid}) are not registered.")
+                        ))),
+                    };
+                    (pid, n.clamp(1, 104))
+                } else {
+                    if !is_admin {
+                        return Ok(Some(format::mentionify("❌ Admin permission required to generate iCal for others.")));
+                    }
+                    let person = match state.find_person(first).cloned() {
+                        Some(p) => p,
+                        None    => return Ok(Some(format::mentionify(&format!("Person «{first}» not found.")))),
+                    };
+                    let n = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(26usize).clamp(1, 104);
+                    (person.id.clone(), n)
                 }
-                let n = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(26usize).clamp(1, 104);
-                (first.to_string(), n)
             }
         }
     };
 
-    let (ical_data, found) = {
-        let state = ctx.state.lock().await;
-        let in_any = state.units().iter().any(|u| u.has_member(&person_id));
-        let interval = ctx.config.schedule.interval_weeks;
-        let data = crate::ical::generate_ical(&state, interval, &person_id, weeks);
-        (data, in_any)
-    };
+    // If HTTP server is configured, return URL (token-based feed).
+    if let Some(ical_cfg) = &ctx.config.ical_server {
+        let mut state = ctx.state.lock().await;
 
-    if !found && person_id != sender_str {
+        // Check if a non-revoked token already exists for this person.
+        let has_token = state.calendar_tokens.iter()
+            .any(|ct| !ct.revoked && ct.person_id == person_id);
+
+        if has_token {
+            return Ok(Some(format::mentionify(
+                "📅 You already have an active calendar feed.\n\
+                 Use !icalreset to get a new URL (this invalidates the old subscription)."
+            )));
+        }
+
+        let (raw_token, hash) = new_calendar_token();
+        state.calendar_tokens.push(CalendarToken {
+            id:         Uuid::new_v4().to_string(),
+            token_hash: hash,
+            person_id:  person_id.clone(),
+            created_at: Utc::now(),
+            revoked:    false,
+        });
+        state.save(&ctx.state_path).await?;
+        drop(state);
+
+        let url = format!("{}/ical/{raw_token}.ics", ical_cfg.public_url);
         return Ok(Some(format::mentionify(&format!(
-            "Person «{person_id}» nicht in einem Bereich gefunden."
+            "📅 Your calendar feed URL:\n{url}\n\n\
+             Add this URL to your calendar app for automatic updates.\n\
+             ⚠️ This URL is shown only once — save it!"
         ))));
     }
 
-    let ical_bytes = ical_data.into_bytes();
+    // Fallback: generate and upload as a Matrix file attachment.
+    let ical_data = {
+        let state    = ctx.state.lock().await;
+        let interval = ctx.config.schedule.interval_weeks;
+        let snapshot = build_schedule(&state, interval, weeks);
+        crate::ical::render_ics(&snapshot, &person_id)
+    };
+
+    let safe_name = person_id.trim_start_matches('@')
+        .split(':').next().unwrap_or("user")
+        .chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect::<String>();
+
     let mime: mime::Mime = "text/calendar".parse().expect("valid mime");
-
-    // Build a safe filename from the person identifier.
-    let safe_name = person_id
-        .trim_start_matches('@')
-        .split(':')
-        .next()
-        .unwrap_or("user")
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
-        .collect::<String>();
-    let filename = format!("putzplan_{safe_name}.ics");
-
-    match room.client().media().upload(&mime, ical_bytes, None).await {
+    match room.client().media().upload(&mime, ical_data.into_bytes(), None).await {
         Ok(upload) => {
             use matrix_sdk::ruma::events::room::message::{FileMessageEventContent, MessageType};
-            let file_content = FileMessageEventContent::plain(filename, upload.content_uri);
-            let content = RoomMessageEventContent::new(MessageType::File(file_content));
+            let content = RoomMessageEventContent::new(MessageType::File(
+                FileMessageEventContent::plain(format!("putzplan_{safe_name}.ics"), upload.content_uri)
+            ));
             room.send(content).await.ok();
-            let for_whom = if person_id == sender_str { String::new() } else { format!(" für {person_id}") };
             Ok(Some(format::mentionify(&format!(
-                "📅 iCal{for_whom} · {weeks} Wochen · .ics-Datei in Kalender-App importieren."
+                "📅 iCal · {weeks} Wochen · Import .ics into your calendar app.\n\
+                 Tip: configure [ical_server] in config.toml for live-updating feed URLs."
             ))))
         }
         Err(e) => {
             tracing::warn!("iCal upload failed: {e}");
-            Ok(Some(format::mentionify("❌ Upload fehlgeschlagen.")))
+            Ok(Some(format::mentionify("❌ Upload failed.")))
         }
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── !icalreset [person] ───────────────────────────────────────────────────────
 
-fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
-    if ctx.admin_users.contains(sender) {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("__not_admin__"))
+async fn cmd_icalreset(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    _room: &Room,
+    args: &[&str],
+) -> Result<Option<RoomMessageEventContent>> {
+    let sender_mxid = sender.as_str();
+    let is_admin    = ctx.admin_users.contains(sender);
+
+    let Some(ical_cfg) = &ctx.config.ical_server else {
+        return Ok(Some(format::mentionify(
+            "iCal HTTP server is not configured. Add [ical_server] to config.toml."
+        )));
+    };
+
+    let person_id: String = {
+        let state = ctx.state.lock().await;
+        match args.first() {
+            None => {
+                match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+                    Some(id) => id,
+                    None     => return Ok(Some(format::mentionify(&format!(
+                        "{sender_mxid} is not registered."
+                    )))),
+                }
+            }
+            Some(query) => {
+                if !is_admin {
+                    return Ok(Some(format::mentionify("❌ Admin permission required.")));
+                }
+                match state.find_person(query).map(|p| p.id.clone()) {
+                    Some(id) => id,
+                    None     => return Ok(Some(format::mentionify(&format!("Person «{query}» not found.")))),
+                }
+            }
+        }
+    };
+
+    let mut state = ctx.state.lock().await;
+    // Revoke all existing tokens for this person.
+    for ct in state.calendar_tokens.iter_mut().filter(|ct| ct.person_id == person_id) {
+        ct.revoked = true;
     }
-}
 
-fn help_text() -> String {
-    r#"🧹 Cleaning bot commands:
+    // Issue new token.
+    let (raw_token, hash) = new_calendar_token();
+    state.calendar_tokens.push(CalendarToken {
+        id:         Uuid::new_v4().to_string(),
+        token_hash: hash,
+        person_id:  person_id.clone(),
+        created_at: Utc::now(),
+        revoked:    false,
+    });
+    state.save(&ctx.state_path).await?;
+    drop(state);
 
-  !help                        · show this help
-  !status                      · this week's cleaned / not-cleaned overview
-  !floors                      · list all floors, groups and their members
-  !done [floor_or_group]       · mark your cleaning as done for this week
-  !undo [floor_or_group]       · undo this week's done mark
-  !next [@user]                · when is your (or @user's) next due week?
-  !stats [@user]               · completion statistics; add @user for one person
-  !leaderboard                 · overall cleaning leaderboard with streaks
-  !cleanplan [N]               · show the next N due cleaning weeks (default 6)
-  !blame                       · all units due but not cleaned this week
-  !blame @user                 · cleaning record for one user
-  !blame <floor>               · cleaning record for a specific floor
-  !joinfloor <floor>           · add yourself to a floor
-  !leavefloor <floor>          · remove yourself from a floor
-  !ical [N]                    · your cleaning duties as iCal (default 26 weeks)
-  !swap @user [floor] [week N] · propose a swap; !acceptswap / !rejectswap to respond
-  !acceptswap <id>             · accept a pending swap request
-  !rejectswap <id>             · reject a pending swap request
-
-Admin commands:
-  !skip [floor]                         · excuse this week (won't count as missed)
-  !remind [floor]                       · manually fire the cleaning reminder now
-  !pdf [N]                              · generate printable HTML schedule (default 8 weeks)
-  !absent @user [weeks]                 · mark user away for N weeks (default 4)
-  !back @user                           · cancel an absence early
-  !addfloor <name>                      · create a new floor
-  !removefloor <name>                   · delete a floor
-  !adduser @user <floor>                · assign a Matrix user to a floor
-  !removeuser @user <floor>             · unassign a Matrix user from a floor
-  !addperson <name> <floor>             · add a non-Matrix person to a floor
-  !removeperson <name> <floor>          · remove a non-Matrix person from a floor
-  !addroom <floor> <room>               · add a room to clean on a floor
-  !removeroom <floor> <room>            · remove a room from a floor
-  !linkfloors <group> <floor1> [floor2…]· group floors onto one shared schedule
-  !unlinkfloors <group>                 · dissolve a floor group"#.to_owned()
+    let url = format!("{}/ical/{raw_token}.ics", ical_cfg.public_url);
+    Ok(Some(format::mentionify(&format!(
+        "🔄 New calendar feed URL:\n{url}\n\n\
+         ⚠️ Old URLs for this person are now invalid."
+    ))))
 }
 
 // ── !testnotify ───────────────────────────────────────────────────────────────
@@ -1651,22 +1484,68 @@ async fn cmd_testnotify(room: &Room) -> Result<Option<RoomMessageEventContent>> 
     let room = room.clone();
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(5 * 60)).await;
-
         use matrix_sdk::ruma::events::Mentions;
         let mut msg = RoomMessageEventContent::text_html(
-            "🔔 @room · test notification (MSC3952 encrypted @room ping)",
-            "🔔 @room · test notification (MSC3952 encrypted @room ping)",
+            "🔔 @room · test notification",
+            "🔔 @room · test notification",
         );
         let mut mentions = Mentions::new();
         mentions.room = true;
         msg = msg.add_mentions(mentions);
-
-        if let Err(e) = room.send(msg).await {
-            tracing::error!("testnotify send failed: {e}");
-        }
+        room.send(msg).await.ok();
     });
+    Ok(Some(RoomMessageEventContent::text_plain("⏱ @room notification in 5 minutes.")))
+}
 
-    Ok(Some(RoomMessageEventContent::text_plain(
-        "⏱ @room notification scheduled in 5 minutes.",
-    )))
+// ── Admin: !validate ──────────────────────────────────────────────────────────
+
+async fn cmd_validate(ctx: &BotContext, sender: &OwnedUserId) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let state = ctx.state.lock().await;
+    let report = crate::validate::validate_state(&state);
+    Ok(Some(report.summary()))
+}
+
+// ── help ─────────────────────────────────────────────────────────────────────
+
+fn help_text() -> String {
+    r#"🧹 Cleaning bot commands:
+
+  !help                        · show this help
+  !status                      · this week's cleaned / not-cleaned overview
+  !areas                       · list all cleaning groups and their members
+  !done [group]                · mark your cleaning done for this week
+  !undo [group]                · undo this week's done mark
+  !next [@user]                · when is your (or @user's) next due week?
+  !stats [@user]               · completion statistics
+  !leaderboard                 · overall cleaning leaderboard with streaks
+  !cleanplan [N]               · show the next N due cleaning weeks (default 6)
+  !blame                       · all due but uncleaned groups this week
+  !blame @user                 · cleaning record for one person
+  !blame <group>               · cleaning record for a specific group
+  !joinfloor <group>           · add yourself to a cleaning group
+  !leavefloor <group>          · remove yourself from a cleaning group
+  !swap @user [group] [week N] · propose a swap; !acceptswap / !rejectswap to respond
+  !acceptswap <id>             · accept a pending swap request
+  !rejectswap <id>             · reject a pending swap request
+  !ical [N]                    · get your cleaning schedule as iCal (default 26 weeks)
+  !icalreset                   · revoke and regenerate your iCal feed URL
+
+Admin commands:
+  !skip [group]                         · excuse this week (won't count as missed)
+  !remind [group]                       · manually fire the cleaning reminder now
+  !pdf [N]                              · generate printable HTML schedule (default 8 weeks)
+  !absent <person> [weeks]              · mark person away (default 4 weeks)
+  !back <person>                        · cancel an absence early
+  !addfloor <name>                      · create a new cleaning group
+  !removefloor <name>                   · delete a cleaning group
+  !adduser @user <group>                · assign a Matrix user to a group
+  !removeuser @user <group>             · unassign a Matrix user from a group
+  !addperson <name> <group>             · add a non-Matrix person to a group
+  !removeperson <name> <group>          · remove a non-Matrix person from a group
+  !addroom <group> <room>               · add a room to clean in a group
+  !removeroom <group> <room>            · remove a room from a group
+  !ical <person> [N]                    · get iCal for any person (admin)
+  !icalreset <person>                   · reset iCal token for any person (admin)
+  !validate                             · check state for consistency issues"#.to_owned()
 }

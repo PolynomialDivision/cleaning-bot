@@ -1,52 +1,52 @@
-//! Generate a printable HTML cleaning schedule.
+//! PDF/HTML schedule rendering.
+//!
+//! `render_pdf` is a pure function over a `ScheduleSnapshot`.
+//! It performs no state access, no scheduling logic, no mutations.
+//!
+//! Determinism guarantee: identical snapshot → identical HTML bytes.
 
-use crate::state::{State, add_weeks, current_iso_week, week_dates, weeks_between};
+use crate::schedule::ScheduleSnapshot;
 
-pub fn generate_schedule_html(state: &State, interval: u32, weeks: usize) -> String {
-    let (cur_y, cur_w) = current_iso_week();
-    let (start_y, start_w) = state.tracking_start();
-    let iv = interval as i64;
-
-    let elapsed = weeks_between((start_y, start_w), (cur_y, cur_w));
-    let first_due = if elapsed < 0 {
-        (start_y, start_w)
-    } else {
-        let past = elapsed / iv;
-        if elapsed % iv == 0 { (cur_y, cur_w) }
-        else { add_weeks(start_y, start_w, (past + 1) * iv) }
-    };
-
-    let units = state.units();
+/// Render an A4-printable HTML string from the given schedule snapshot.
+///
+/// All inputs come from the snapshot; no state access required.
+pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
     let mut rows = String::new();
 
-    for i in 0..(weeks as i64) {
-        let (dy, dw) = add_weeks(first_due.0, first_due.1, i * iv);
-        let dates = week_dates(dy, dw);
-        let is_current = (dy, dw) == (cur_y, cur_w);
+    let cur_week = {
+        let d = chrono::Utc::now().date_naive();
+        use chrono::Datelike;
+        (d.iso_week().year(), d.iso_week().week())
+    };
 
-        for unit in &units {
-            let responsible = state.responsible_user(unit, dy, dw, interval);
-            let name_str = responsible.as_ref().map(|p| p.display()).unwrap_or("—");
-            let is_done = state.is_completed(&unit.name, dy, dw);
-            let rooms_str = unit.rooms_text().unwrap_or_default();
-
-            rows.push_str(&format!(
-                "<tr class=\"{row_class}\">\
-                  <td class=\"week-num\">KW {dw}<br><small>{dy}</small></td>\
-                  <td class=\"dates\">{dates}</td>\
-                  <td class=\"area\">{area}{rooms}</td>\
-                  <td class=\"responsible\">{name}</td>\
-                  <td class=\"check\">{check}</td>\
-                  <td class=\"sig\"></td>\
-                </tr>\n",
-                row_class = if is_done { "done" } else if is_current { "current" } else { "" },
-                area = e(&unit.name),
-                rooms = if rooms_str.is_empty() { String::new() } else { format!("<br><small class=\"rooms\">{}</small>", e(&rooms_str)) },
-                name = e(name_str),
-                check = if is_done { "✓" } else { "☐" },
-            ));
-        }
+    for a in &snapshot.assignments {
+        let is_current = (a.iso_year, a.iso_week) == cur_week;
+        let rooms_html = if a.room_names.is_empty() {
+            String::new()
+        } else {
+            format!("<br><small class=\"rooms\">{}</small>", e(&a.room_names.join(", ")))
+        };
+        rows.push_str(&format!(
+            "<tr class=\"{row_class}\">\
+              <td class=\"week-num\">KW {dw}<br><small>{yr}</small></td>\
+              <td class=\"dates\">{dates}</td>\
+              <td class=\"area\">{area}{rooms}</td>\
+              <td class=\"responsible\">{name}</td>\
+              <td class=\"check\">{check}</td>\
+              <td class=\"sig\"></td>\
+            </tr>\n",
+            row_class = if a.is_completed { "done" } else if is_current { "current" } else { "" },
+            dw        = a.iso_week,
+            yr        = a.iso_year,
+            dates     = e(&a.week_label),
+            area      = e(&a.group_name),
+            rooms     = rooms_html,
+            name      = e(a.assignee_name()),
+            check     = if a.is_completed { "✓" } else { "☐" },
+        ));
     }
+
+    let date_str = snapshot.state_timestamp.format("%d.%m.%Y").to_string();
 
     format!(r#"<!DOCTYPE html>
 <html lang="de">
@@ -57,7 +57,7 @@ pub fn generate_schedule_html(state: &State, interval: u32, weeks: usize) -> Str
   @page {{ size: A4 portrait; margin: 12mm 15mm; }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ font-family: Arial, Helvetica, sans-serif; font-size: 10.5pt; color: #000; background: #fff; }}
-  h1 {{ font-size: 15pt; text-align: center; margin-bottom: 5mm; letter-spacing: 0.5px; }}
+  h1 {{ font-size: 15pt; text-align: center; margin-bottom: 5mm; }}
   p.meta {{ font-size: 8pt; color: #666; text-align: center; margin-bottom: 5mm; }}
   table {{ width: 100%; border-collapse: collapse; }}
   th, td {{ border: 1px solid #999; padding: 2.5mm 2mm; vertical-align: top; line-height: 1.35; }}
@@ -67,21 +67,20 @@ pub fn generate_schedule_html(state: &State, interval: u32, weeks: usize) -> Str
   .area     {{ width: 50mm; }}
   .responsible {{ width: 37mm; }}
   .check    {{ width: 9mm; text-align: center; font-size: 13pt; }}
-  .sig      {{ /* remaining width */ }}
   .rooms    {{ color: #555; font-size: 8.5pt; }}
-  tr.done {{ background: #edfaed; color: #444; }}
+  tr.done    {{ background: #edfaed; }}
   tr.current {{ background: #fffbea; }}
   .legend {{ font-size: 8pt; color: #666; margin-top: 4mm; border-top: 1px solid #ccc; padding-top: 2mm; }}
   @media print {{
-    tr.done {{ background: #edfaed; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    tr.done    {{ background: #edfaed; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
     tr.current {{ background: #fffbea; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    th {{ background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    th         {{ background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
   }}
 </style>
 </head>
 <body>
   <h1>🧹 Putzplan</h1>
-  <p class="meta">Erstellt: {date} &nbsp;·&nbsp; Intervall: alle {interval} Woche(n) &nbsp;·&nbsp; {weeks} Wochen Vorschau</p>
+  <p class="meta">Stand: {date} &nbsp;·&nbsp; Intervall: alle {interval} Woche(n)</p>
   <table>
     <thead>
       <tr>
@@ -97,14 +96,13 @@ pub fn generate_schedule_html(state: &State, interval: u32, weeks: usize) -> Str
 {rows}    </tbody>
   </table>
   <div class="legend">
-    Legende: ☐ = ausstehend &nbsp;·&nbsp; ✓ = erledigt &nbsp;·&nbsp; KW = Kalenderwoche &nbsp;·&nbsp; Grün = bereits erledigt &nbsp;·&nbsp; Gelb = laufende Woche
+    Legende: ☐ = ausstehend &nbsp;·&nbsp; ✓ = erledigt &nbsp;·&nbsp; KW = Kalenderwoche
   </div>
 </body>
 </html>"#,
-        date = chrono::Utc::now().format("%d.%m.%Y"),
-        interval = interval,
-        weeks = weeks,
-        rows = rows,
+        date     = date_str,
+        interval = snapshot.interval_weeks,
+        rows     = rows,
     )
 }
 
@@ -113,4 +111,46 @@ fn e(s: &str) -> String {
      .replace('<', "&lt;")
      .replace('>', "&gt;")
      .replace('"', "&quot;")
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use crate::{
+        domain::{CleaningGroup, Person},
+        schedule::build_schedule,
+        state::State,
+    };
+
+    fn make_state() -> State {
+        let mut st = State::default();
+        st.created_at    = Some(Utc::now());
+        st.last_modified = st.created_at;
+        let p  = Person::new_matrix("@bob:example.org");
+        let id = p.id.clone();
+        st.persons.push(p);
+        let mut g = CleaningGroup::new("Hallway");
+        g.member_ids.push(id);
+        st.cleaning_groups.push(g);
+        st
+    }
+
+    #[test]
+    fn pdf_output_is_deterministic() {
+        let st  = make_state();
+        let sn1 = build_schedule(&st, 1, 4);
+        let sn2 = build_schedule(&st, 1, 4);
+        assert_eq!(render_pdf(&sn1), render_pdf(&sn2));
+    }
+
+    #[test]
+    fn pdf_contains_group_name() {
+        let st  = make_state();
+        let sn  = build_schedule(&st, 1, 2);
+        let html = render_pdf(&sn);
+        assert!(html.contains("Hallway"), "group name should appear in PDF");
+    }
 }

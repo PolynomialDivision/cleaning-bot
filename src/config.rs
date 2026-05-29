@@ -7,6 +7,8 @@ pub struct Config {
     #[serde(default)]
     pub security: SecurityConfig,
     pub schedule: ScheduleConfig,
+    /// If set, enables the HTTP iCal feed server.
+    pub ical_server: Option<ICalServerConfig>,
 }
 
 #[derive(Deserialize, Default)]
@@ -40,6 +42,17 @@ pub struct ScheduleConfig {
     /// Weekday to post a weekly stats summary (0 = Mon … 6 = Sun).
     /// Omit or comment out to disable the automatic summary.
     pub summary_weekday: Option<u8>,
+}
+
+/// Optional HTTP server that serves per-person iCal feeds.
+/// If absent the `!ical` command falls back to Matrix file upload.
+#[derive(Deserialize, Clone)]
+pub struct ICalServerConfig {
+    /// Address to bind the HTTP server to, e.g. "0.0.0.0:8080".
+    pub bind_addr:  String,
+    /// Public base URL shown to users, e.g. "https://cal.example.org".
+    /// Must NOT end with a trailing slash.
+    pub public_url: String,
 }
 
 fn default_interval_weeks() -> u32 { 1 }

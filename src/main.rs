@@ -27,25 +27,24 @@ use tracing::{error, info, warn};
 
 mod commands;
 mod config;
+mod domain;
 mod format;
+mod http;
 mod ical;
 mod pdf;
+mod schedule;
 mod scheduler;
 mod state;
+mod validate;
 
 use config::Config;
-use state::{PersonRef, State};
+use domain::Person;
+use state::{Completion, GreetingChoice, GreetingInfo, ReactionDone, State};
 
-/// Attach an `m.thread` relation to an already-built `RoomMessageEventContent`.
-/// `root`     — the thread root event (m.thread event_id).
-/// `reply_to` — the specific event being quoted (m.in_reply_to).
 fn add_thread_relation(content: &mut RoomMessageEventContent, root: OwnedEventId, reply_to: OwnedEventId) {
     content.relates_to = Some(Relation::Thread(Thread::reply(root, reply_to)));
 }
 
-/// Wrap a plain-text reply in an `m.thread` relation, mentionifying any MXIDs.
-/// `root`     — the thread root event (m.thread event_id).
-/// `reply_to` — the specific event being quoted (m.in_reply_to).
 fn thread_reply(text: &str, root: OwnedEventId, reply_to: OwnedEventId) -> RoomMessageEventContent {
     let mut content = format::mentionify(text);
     add_thread_relation(&mut content, root, reply_to);
@@ -54,11 +53,11 @@ fn thread_reply(text: &str, root: OwnedEventId, reply_to: OwnedEventId) -> RoomM
 
 #[derive(Clone)]
 pub struct BotContext {
-    pub state: Arc<Mutex<State>>,
+    pub state:      Arc<Mutex<State>>,
     pub state_path: PathBuf,
-    pub config: Arc<Config>,
+    pub config:     Arc<Config>,
     pub admin_users: HashSet<OwnedUserId>,
-    pub room_id: OwnedRoomId,
+    pub room_id:    OwnedRoomId,
 }
 
 #[tokio::main]
@@ -87,43 +86,47 @@ async fn main() -> Result<()> {
 
     let state_path = store_path.join("state.json");
     let mut st = State::load(&state_path).await?;
-
-    // Record when the bot first started — used as the statistics baseline.
     if st.created_at.is_none() {
         st.created_at = Some(chrono::Utc::now());
         st.save(&state_path).await?;
     }
 
+    // Validate on startup — log issues but never abort.
+    {
+        let report = validate::validate_state(&st);
+        if !report.errors.is_empty() {
+            tracing::error!("State validation errors on startup:\n{}", report.summary());
+        } else if !report.warnings.is_empty() {
+            tracing::warn!("State validation warnings on startup:\n{}", report.summary());
+        } else {
+            tracing::info!("State validation passed.");
+        }
+    }
+
     let state = Arc::new(Mutex::new(st));
 
     let admin_users: HashSet<OwnedUserId> = config.security.admin_users
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+        .iter().filter_map(|s| s.parse().ok()).collect();
+    let allowed_inviters: HashSet<String> = config.security.allowed_inviters.iter().cloned().collect();
+    let room_id: OwnedRoomId = config.schedule.room_id.parse().context("Invalid room_id in [schedule]")?;
 
-    let allowed_inviters: HashSet<String> = config.security.allowed_inviters
-        .iter()
-        .cloned()
-        .collect();
+    let ctx = BotContext { state: state.clone(), state_path, config: Arc::clone(&config), admin_users, room_id: room_id.clone() };
 
-    let room_id: OwnedRoomId = config.schedule.room_id
-        .parse()
-        .context("Invalid room_id in [schedule]")?;
-
-    let ctx = BotContext {
-        state,
-        state_path,
-        config: Arc::clone(&config),
-        admin_users,
-        room_id: room_id.clone(),
-    };
+    // ── Optional HTTP iCal server ─────────────────────────────────────────────
+    if let Some(ref ical_cfg) = config.ical_server {
+        let bind_addr = ical_cfg.bind_addr.clone();
+        let state_clone  = state.clone();
+        let config_clone = Arc::clone(&config);
+        tokio::spawn(async move {
+            if let Err(e) = http::run(state_clone, config_clone, &bind_addr).await {
+                error!("iCal HTTP server error: {e}");
+            }
+        });
+    }
 
     let (client, bot_user_id) = mxbot_common::session::build_and_restore(
-        &config.matrix,
-        &store_path,
-        config.security.encryption_strategy.clone().into(),
-    )
-    .await?;
+        &config.matrix, &store_path, config.security.encryption_strategy.clone().into(),
+    ).await?;
 
     // ── Invite handler ────────────────────────────────────────────────────────
     client.add_event_handler({
@@ -168,15 +171,9 @@ async fn main() -> Result<()> {
 
                 let MessageType::Text(ref text) = ev.content.msgtype else { return; };
                 let body = text.body.trim();
-                let cmd_lines: Vec<&str> = body
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| l.starts_with('!'))
-                    .collect();
+                let cmd_lines: Vec<&str> = body.lines().map(str::trim).filter(|l| l.starts_with('!')).collect();
                 if cmd_lines.is_empty() { return; }
 
-                // If the command was sent inside an existing thread, stay in
-                // that thread. Otherwise start a new thread rooted here.
                 let thread_root = match &ev.content.relates_to {
                     Some(Relation::Thread(t)) => t.event_id.clone(),
                     _ => ev.event_id.clone(),
@@ -186,13 +183,10 @@ async fn main() -> Result<()> {
                 for line in cmd_lines {
                     match commands::handle(&ctx, &ev.sender, &room, line).await {
                         Ok(Some(reply)) => replies.push(reply),
-                        Err(e) if e.to_string() == "__not_admin__" => {
-                            replies.push(format::mentionify(
-                                "❌ This command requires admin privileges.",
-                            ));
-                        }
+                        Err(e) if e.to_string() == "__not_admin__" =>
+                            replies.push(format::mentionify("❌ This command requires admin privileges.")),
                         Ok(None) => {}
-                        Err(e) => error!("Command error: {e}"),
+                        Err(e)   => error!("Command error: {e}"),
                     }
                 }
                 if !replies.is_empty() {
@@ -200,18 +194,9 @@ async fn main() -> Result<()> {
                         let mut content = if replies.len() == 1 {
                             replies.remove(0)
                         } else {
-                            // Multiple commands in one message: join plain bodies.
-                            let joined = replies
-                                .iter()
-                                .filter_map(|c| {
-                                    if let MessageType::Text(t) = &c.msgtype {
-                                        Some(t.body.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n\n");
+                            let joined = replies.iter()
+                                .filter_map(|c| if let MessageType::Text(t) = &c.msgtype { Some(t.body.as_str()) } else { None })
+                                .collect::<Vec<_>>().join("\n\n");
                             format::mentionify(&joined)
                         };
                         add_thread_relation(&mut content, thread_root, ev.event_id.clone());
@@ -222,7 +207,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── Reaction handler (✅ on a reminder = !done; number on greeting = !joinfloor) ──
+    // ── Reaction handler ──────────────────────────────────────────────────────
     client.add_event_handler({
         let ctx = ctx.clone();
         let bot_user_id = bot_user_id.clone();
@@ -236,150 +221,169 @@ async fn main() -> Result<()> {
 
                 let reacted_to = ev.content.relates_to.event_id.to_string();
                 let emoji_key  = ev.content.relates_to.key.clone();
-                let sender_str = ev.sender.as_str().to_owned();
+                let sender_mxid = ev.sender.as_str().to_owned();
 
-                // ── Greeting number-reaction → join floor ─────────────────────
+                // ── Greeting number-reaction → join group ─────────────────────
                 {
                     let mut state = ctx.state.lock().await;
                     if let Some(info) = state.greeting_event_ids.get(&reacted_to).cloned() {
-                        // Only the greeted user's reaction counts.
-                        if info.for_user == sender_str {
+                        if info.for_user == sender_mxid {
                             if let Some(choice) = info.choices.iter().find(|c| c.emoji == emoji_key) {
-                                // Add sender to all floors in this unit.
-                                let floor_names = choice.floor_names.clone();
-                                let unit_name   = choice.unit_name.clone();
-                                for floor_name in &floor_names {
-                                    if let Some(floor) = state.floors.iter_mut().find(|f| &f.name == floor_name) {
-                                        if !floor.members.iter().any(|p| p.matches_str(&sender_str)) {
-                                            floor.members.push(PersonRef::Matrix { mxid: sender_str.clone() });
-                                        }
+                                let group_id   = choice.group_id.clone();
+                                let group_name = choice.group_name.clone();
+
+                                // Find or create Person for this MXID.
+                                let person_id = {
+                                    if let Some(p) = state.person_by_matrix_id(&sender_mxid) {
+                                        p.id.clone()
+                                    } else {
+                                        let p = Person::new_matrix(&sender_mxid);
+                                        let id = p.id.clone();
+                                        state.persons.push(p);
+                                        id
+                                    }
+                                };
+
+                                if let Some(group) = state.cleaning_groups.iter_mut().find(|g| g.id == group_id) {
+                                    if !group.member_ids.contains(&person_id) {
+                                        group.member_ids.push(person_id);
                                     }
                                 }
+
                                 if let Err(e) = state.save(&ctx.state_path).await {
                                     tracing::error!("Failed to save after greeting join: {e}");
                                 }
-                                // Remove greeting so further reactions are ignored.
                                 state.greeting_event_ids.remove(&reacted_to);
                                 drop(state);
 
                                 if let Some(r) = client.get_room(&ctx.room_id) {
                                     let msg = format!(
-                                        "✅ {sender_str} joined **{unit_name}** — welcome to the cleaning crew! 🧹"
+                                        "✅ {sender_mxid} joined **{group_name}** — welcome to the cleaning crew! 🧹"
                                     );
                                     r.send(format::mentionify_rich(&msg, &r).await).await.ok();
                                 }
                             }
                         }
-                        return; // don't process as a ✅ cleaning reaction
+                        return;
                     }
                 }
 
                 if emoji_key != "✅" { return; }
 
                 let mut state = ctx.state.lock().await;
-
-                let unit_name = match state.reminder_event_ids.get(&reacted_to).cloned() {
-                    Some(n) => n,
-                    None => return, // reaction on something unrelated
+                let group_id = match state.reminder_event_ids.get(&reacted_to).cloned() {
+                    Some(id) => id,
+                    None     => return,
                 };
 
                 let (year, week) = state::current_iso_week();
+                let interval = ctx.config.schedule.interval_weeks;
 
-                if state.is_completed(&unit_name, year, week) {
-                    // Already marked — acknowledge but don't duplicate
+                if state.is_completed(&group_id, year, week) {
                     drop(state);
                     if let Some(r) = client.get_room(&ctx.room_id) {
-                        let msg = format!("«{unit_name}» is already marked as cleaned this week.");
-                        let reminder_id = ev.content.relates_to.event_id.clone();
-                        r.send(thread_reply(&msg, reminder_id.clone(), reminder_id)).await.ok();
+                        let group_name = {
+                            let s = ctx.state.lock().await;
+                            s.group_by_id(&group_id).map(|g| g.name.clone()).unwrap_or_default()
+                        };
+                        let msg = format!("«{group_name}» is already marked as cleaned this week.");
+                        let rid = ev.content.relates_to.event_id.clone();
+                        r.send(thread_reply(&msg, rid.clone(), rid)).await.ok();
                     }
                     return;
                 }
 
-                let responsible_users = {
-                    let units = state.units();
-                    let interval = ctx.config.schedule.interval_weeks;
-                    units.iter()
-                        .find(|u| u.name == unit_name)
-                        .and_then(|u| state.responsible_user(u, year, week, interval))
-                        .map(|p| vec![p.display().to_owned()])
-                        .unwrap_or_default()
+                // Find or create sender Person.
+                let sender_person_id = {
+                    if let Some(p) = state.person_by_matrix_id(&sender_mxid) {
+                        p.id.clone()
+                    } else {
+                        let p = Person::new_matrix(&sender_mxid);
+                        let id = p.id.clone();
+                        state.persons.push(p);
+                        id
+                    }
                 };
-                state.completions.push(state::Completion {
-                    unit_name: unit_name.clone(),
-                    iso_year: year,
-                    iso_week: week,
+
+                let responsible_ids = state.cleaning_groups.iter()
+                    .find(|g| g.id == group_id)
+                    .and_then(|g| state.responsible_person(g, year, week, interval))
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default();
+
+                let group_name = state.group_by_id(&group_id).map(|g| g.name.clone()).unwrap_or_default();
+
+                state.completions.push(Completion {
+                    group_id:               group_id.clone(),
+                    completed_by_id:        sender_person_id.clone(),
+                    responsible_person_ids: responsible_ids,
+                    iso_year:     year,
+                    iso_week:     week,
                     completed_at: chrono::Utc::now(),
-                    completed_by: sender_str.clone(),
-                    responsible_users,
-                    skipped: false,
+                    skipped:      false,
+                    unit_name:    String::new(),
+                    completed_by: String::new(),
+                    responsible_users: Vec::new(),
                 });
-                // Track the reaction event ID so we can auto-undo if the
-                // user removes their ✅ reaction later.
                 state.reaction_dones.insert(
                     ev.event_id.to_string(),
-                    state::ReactionDone {
-                        unit_name:    unit_name.clone(),
-                        iso_year:     year,
-                        iso_week:     week,
-                        completed_by: sender_str.clone(),
+                    ReactionDone {
+                        group_id:        group_id.clone(),
+                        completed_by_id: sender_person_id,
+                        iso_year:  year,
+                        iso_week:  week,
+                        unit_name:    String::new(),
+                        completed_by: String::new(),
                     },
                 );
                 if let Err(e) = state.save(&ctx.state_path).await {
                     tracing::error!("Failed to save state after reaction: {e}");
                 }
-                let root_event_id = ev.content.relates_to.event_id.clone();
+                let root_eid = ev.content.relates_to.event_id.clone();
                 drop(state);
 
                 if let Some(r) = client.get_room(&ctx.room_id) {
-                    let msg = format!("✅ {sender_str} marked «{unit_name}» as cleaned.");
-                    r.send(thread_reply(&msg, root_event_id.clone(), root_event_id)).await.ok();
+                    let msg = format!("✅ {sender_mxid} marked «{group_name}» as cleaned.");
+                    r.send(thread_reply(&msg, root_eid.clone(), root_eid)).await.ok();
                 }
             }
         }
     });
 
-    // ── Redaction handler (remove ✅ reaction = !undo) ────────────────────────
+    // ── Redaction handler (undo ✅ reaction) ──────────────────────────────────
     client.add_event_handler({
         let ctx = ctx.clone();
         move |ev: OriginalSyncRoomRedactionEvent, room: Room, client: Client| {
             let ctx = ctx.clone();
             async move {
-                if room.state() != RoomState::Joined  { return; }
-                if room.room_id() != ctx.room_id      { return; }
+                if room.state() != RoomState::Joined { return; }
+                if room.room_id() != ctx.room_id     { return; }
 
-                let redacted_id = match &ev.redacts {
-                    Some(id) => id.to_string(),
-                    None     => return, // malformed redaction with no target
-                };
+                let redacted_id = match &ev.redacts { Some(id) => id.to_string(), None => return };
                 let mut state   = ctx.state.lock().await;
+                let rd = match state.reaction_dones.remove(&redacted_id) { Some(rd) => rd, None => return };
 
-                let rd = match state.reaction_dones.remove(&redacted_id) {
-                    Some(rd) => rd,
-                    None     => return, // wasn't a tracked reaction-done
-                };
-
-                // Remove the matching completion.
                 let before = state.completions.len();
                 state.completions.retain(|c| {
-                    !(c.unit_name    == rd.unit_name
-                      && c.iso_year == rd.iso_year
-                      && c.iso_week == rd.iso_week
-                      && c.completed_by == rd.completed_by)
+                    !(c.group_id == rd.group_id && c.iso_year == rd.iso_year && c.iso_week == rd.iso_week
+                      && c.completed_by_id == rd.completed_by_id)
                 });
                 let removed = state.completions.len() < before;
 
                 if let Err(e) = state.save(&ctx.state_path).await {
-                    tracing::error!("Failed to save state after reaction removal: {e}");
+                    tracing::error!("Failed to save after reaction removal: {e}");
                 }
-                drop(state);
 
                 if removed {
+                    let by = state.person_by_id(&rd.completed_by_id)
+                        .map(|p| p.display_name.clone())
+                        .unwrap_or_else(|| rd.completed_by_id.clone());
+                    let group_name = state.group_by_id(&rd.group_id)
+                        .map(|g| g.name.clone())
+                        .unwrap_or_else(|| rd.group_id.clone());
+                    drop(state);
                     if let Some(r) = client.get_room(&ctx.room_id) {
-                        let msg = format!(
-                            "↩️ {} removed their ✅ — «{}» marked undone.",
-                            rd.completed_by, rd.unit_name,
-                        );
+                        let msg = format!("↩️ {by} removed their ✅ — «{group_name}» marked undone.");
                         r.send(format::mentionify_rich(&msg, &r).await).await.ok();
                     }
                 }
@@ -395,112 +399,77 @@ async fn main() -> Result<()> {
             let ctx = ctx.clone();
             let bot_user_id = bot_user_id.clone();
             async move {
-                // Only care about our designated room.
                 if room.room_id() != ctx.room_id { return; }
                 if room.state() != RoomState::Joined { return; }
-
-                // Only new joins, not profile updates or re-joins we already handled.
                 if ev.content.membership != MembershipState::Join { return; }
                 if ev.state_key == bot_user_id { return; }
-
-                // Skip if this is merely a profile update (display-name / avatar change).
-                // A genuine join has prev_content = None or prev membership != Join.
                 if let Some(prev) = ev.prev_content() {
-                    if prev.membership == MembershipState::Join {
-                        return; // was already joined — just a profile update
-                    }
+                    if prev.membership == MembershipState::Join { return; }
                 }
 
                 let user_id = ev.state_key.to_string();
 
-                // Don't greet the same user twice.
                 {
                     let mut state = ctx.state.lock().await;
-                    if state.greeted_users.contains(&user_id) {
-                        return;
-                    }
+                    if state.greeted_users.contains(&user_id) { return; }
                     state.greeted_users.insert(user_id.clone());
                     if let Err(e) = state.save(&ctx.state_path).await {
                         tracing::error!("Failed to save greeted_users: {e}");
                     }
                 }
 
-                // Build the list of cleaning units available to join.
-                let units = {
+                let groups: Vec<_> = {
                     let state = ctx.state.lock().await;
-                    state.units()
+                    state.cleaning_groups.clone()
                 };
-                if units.is_empty() { return; }
+                if groups.is_empty() { return; }
 
-                // Number emojis 1️⃣ … 9️⃣ (we support up to 9 floors/groups).
-                let number_emojis = [
-                    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣",
+                let number_emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"];
+                let mut choices: Vec<GreetingChoice> = Vec::new();
+                let mut lines = vec![
+                    format!("👋 Welcome, {user_id}!"),
+                    String::new(),
+                    "Please pick your cleaning group by reacting with the matching number:".to_owned(),
+                    String::new(),
                 ];
 
-                let mut choices: Vec<state::GreetingChoice> = Vec::new();
-                let mut lines: Vec<String> = Vec::new();
-                lines.push(format!("👋 Welcome, {user_id}!"));
-                lines.push(String::new());
-                lines.push(
-                    "Please pick the floor/group you want to join for cleaning duty \
-                     by reacting with the matching number below:".to_owned()
-                );
-                lines.push(String::new());
-
-                for (i, unit) in units.iter().enumerate() {
+                for (i, group) in groups.iter().enumerate() {
                     let Some(emoji) = number_emojis.get(i) else { break };
-                    let members_text = if unit.members.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" — {}", unit.members.iter().map(|p| p.display()).collect::<Vec<_>>().join(", "))
+                    let members_text = {
+                        let state = ctx.state.lock().await;
+                        let names: Vec<String> = state.members_of(group).iter().map(|p| p.display_name.clone()).collect();
+                        if names.is_empty() { String::new() } else { format!(" — {}", names.join(", ")) }
                     };
-                    lines.push(format!("{emoji} **{}**{members_text}", unit.name));
-                    choices.push(state::GreetingChoice {
-                        emoji: emoji.to_string(),
-                        unit_name: unit.name.clone(),
-                        floor_names: unit.floor_names.clone(),
+                    lines.push(format!("{emoji} **{}**{members_text}", group.name));
+                    choices.push(GreetingChoice {
+                        emoji:      emoji.to_string(),
+                        group_id:   group.id.clone(),
+                        group_name: group.name.clone(),
                     });
                 }
 
-                let msg = lines.join("\n");
-                let content = format::mentionify_rich(&msg, &room).await;
-
+                let content = format::mentionify_rich(&lines.join("\n"), &room).await;
                 let resp = match room.send(content).await {
                     Ok(r) => r,
                     Err(e) => { tracing::error!("Failed to send greeting: {e}"); return; }
                 };
-                let greeting_event_id = resp.response.event_id;
-                let event_id_str = greeting_event_id.to_string();
+                let event_id_str = resp.response.event_id.to_string();
+                let greeting_eid = resp.response.event_id;
 
-                // Store the greeting info so the reaction handler can act on it.
                 {
                     let mut state = ctx.state.lock().await;
-                    state.greeting_event_ids.insert(
-                        event_id_str,
-                        state::GreetingInfo {
-                            for_user: user_id.clone(),
-                            choices: choices.clone(),
-                        },
-                    );
+                    state.greeting_event_ids.insert(event_id_str, GreetingInfo { for_user: user_id.clone(), choices: choices.clone() });
                     if let Err(e) = state.save(&ctx.state_path).await {
                         tracing::error!("Failed to save greeting_event_ids: {e}");
                     }
                 }
 
-                // Self-react with each number emoji so users can just click.
                 for choice in &choices {
-                    let reaction = ReactionEventContent::new(
-                        Annotation::new(
-                            greeting_event_id.clone(),
-                            choice.emoji.clone(),
-                        )
-                    );
+                    let reaction = ReactionEventContent::new(Annotation::new(greeting_eid.clone(), choice.emoji.clone()));
                     if let Err(e) = room.send(reaction).await {
                         tracing::warn!("Failed to send self-reaction {}: {e}", choice.emoji);
                     }
                 }
-
-                // Announce the new member in the room if there's a client handle.
                 let _ = client;
             }
         }
@@ -508,43 +477,30 @@ async fn main() -> Result<()> {
 
     // ── Verification handler ──────────────────────────────────────────────────
     client.add_event_handler({
-        let reset_allowed: Arc<Mutex<HashSet<OwnedUserId>>> =
-            Arc::new(Mutex::new(HashSet::new()));
+        let reset_allowed: Arc<Mutex<HashSet<OwnedUserId>>> = Arc::new(Mutex::new(HashSet::new()));
         move |ev: ToDeviceKeyVerificationRequestEvent, client: Client| {
             let reset = Arc::clone(&reset_allowed);
             async move {
-                if let Some(req) = client
-                    .encryption()
-                    .get_verification_request(&ev.sender, &ev.content.transaction_id)
-                    .await
+                if let Some(req) = client.encryption()
+                    .get_verification_request(&ev.sender, &ev.content.transaction_id).await
                 {
-                    tokio::spawn(mxbot_common::verify::handle_verification_request(
-                        client, reset, req,
-                    ));
+                    tokio::spawn(mxbot_common::verify::handle_verification_request(client, reset, req));
                 }
             }
         }
     });
 
     // ── Initial sync ──────────────────────────────────────────────────────────
-    let filter = FilterDefinition::with_lazy_loading();
-    client
-        .sync_once(SyncSettings::default().filter(filter.into()))
-        .await
-        .context("Initial sync failed")?;
+    client.sync_once(SyncSettings::default().filter(FilterDefinition::with_lazy_loading().into()))
+        .await.context("Initial sync failed")?;
     info!("Initial sync complete");
 
-    // ── Scheduler ─────────────────────────────────────────────────────────────
     tokio::spawn(scheduler::run(ctx, client.clone()));
 
-    // ── Continuous sync ───────────────────────────────────────────────────────
     loop {
         match client.sync(SyncSettings::default()).await {
-            Ok(()) => warn!("Sync loop exited — reconnecting"),
-            Err(e) => {
-                warn!("Sync error: {e} — reconnecting in 5s");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            }
+            Ok(())  => warn!("Sync loop exited — reconnecting"),
+            Err(e)  => { warn!("Sync error: {e} — reconnecting in 5s"); tokio::time::sleep(tokio::time::Duration::from_secs(5)).await; }
         }
     }
 }

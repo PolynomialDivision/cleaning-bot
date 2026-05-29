@@ -4,10 +4,7 @@ use matrix_sdk::{
     Client, Room,
     ruma::{
         OwnedUserId,
-        events::{
-            Mentions,
-            room::message::RoomMessageEventContent,
-        },
+        events::{Mentions, room::message::RoomMessageEventContent},
     },
 };
 use tracing::{error, info, warn};
@@ -17,127 +14,91 @@ use crate::{
     state::{ReminderKind, current_iso_week, week_dates},
 };
 
-/// Build a rich message: display-name pills for every MXID found in `text`,
-/// plus proper `m.mentions` metadata so push notifications fire for
-/// `mention_user_ids` (the people who should actually be pinged).
 async fn mention_message(
     text: &str,
-    mention_user_ids: &[String],
+    mention_mxids: &[String],
     room: &Room,
 ) -> RoomMessageEventContent {
     let parsed: Vec<OwnedUserId> =
-        mention_user_ids.iter().filter_map(|s| s.parse().ok()).collect();
-
-    // Scan the full message text for MXIDs — this picks up both the
-    // responsible users *and* "done by @user" completions in one shot.
+        mention_mxids.iter().filter_map(|s| s.parse().ok()).collect();
     let all_mxids = crate::format::extract_mxids(text);
     let refs: Vec<&str> = all_mxids.iter().map(String::as_str).collect();
     let names = crate::format::fetch_names(room, &refs).await;
-
     let content = crate::format::mentionify_with_names(text, &names);
-    if parsed.is_empty() {
-        content
-    } else {
-        content.add_mentions(Mentions::with_user_ids(parsed))
-    }
+    if parsed.is_empty() { content } else { content.add_mentions(Mentions::with_user_ids(parsed)) }
 }
 
-/// Background task: wake up every 30 minutes, check whether any reminders or
-/// the weekly summary need to go out.
 pub async fn run(ctx: BotContext, client: Client) {
     info!("Scheduler started");
     loop {
-        if let Err(e) = tick(&ctx, &client).await {
-            error!("Scheduler error: {e}");
-        }
+        if let Err(e) = tick(&ctx, &client).await { error!("Scheduler error: {e}"); }
         tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
     }
 }
 
 async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
-    let tz: Tz = ctx.config.schedule.timezone
-        .parse()
-        .unwrap_or(chrono_tz::UTC);
-
-    let local_now = chrono::Utc::now().with_timezone(&tz);
-    let local_weekday = local_now.weekday().num_days_from_monday() as u8; // 0=Mon…6=Sun
-    let (year, week) = current_iso_week();
-    let interval = ctx.config.schedule.interval_weeks;
+    let tz: Tz        = ctx.config.schedule.timezone.parse().unwrap_or(chrono_tz::UTC);
+    let local_now     = chrono::Utc::now().with_timezone(&tz);
+    let local_weekday = local_now.weekday().num_days_from_monday() as u8;
+    let (year, week)  = current_iso_week();
+    let interval      = ctx.config.schedule.interval_weeks;
 
     let room = match client.get_room(&ctx.room_id) {
         Some(r) => r,
-        None => {
-            warn!("Scheduler: bot is not in room {}", ctx.room_id);
-            return Ok(());
-        }
+        None => { warn!("Scheduler: bot is not in room {}", ctx.room_id); return Ok(()); }
     };
 
     let mut state = ctx.state.lock().await;
+    let groups = state.cleaning_groups.clone();
 
-    // ── Per-unit reminders ────────────────────────────────────────────────────
-    let units = state.units();
-    for unit in &units {
-        let due = state.is_due(&unit.name, year, week, interval);
-        if !due {
-            continue;
-        }
+    for group in &groups {
+        if !state.is_due(&group.id, year, week, interval) { continue; }
 
-        // Only the one person whose turn it is gets pinged.
-        let responsible_person = state.responsible_user(unit, year, week, interval);
-        let responsible: Vec<String> = responsible_person.iter()
-            .filter_map(|p| p.matrix_id().map(str::to_owned))
-            .collect();
-        let users_text = match &responsible_person {
-            None    => "(nobody assigned)".to_owned(),
-            Some(p) => p.display().to_owned(),
+        let responsible = state.responsible_person(group, year, week, interval);
+        let (resp_mxids, users_text): (Vec<String>, String) = match responsible {
+            None    => (vec![], "(nobody assigned)".to_owned()),
+            Some(p) => (
+                p.matrix_id.as_ref().map(|m| vec![m.clone()]).unwrap_or_default(),
+                p.display_name.clone(),
+            ),
         };
+        let rooms_line = group.rooms_text().map(|r| format!("\n{r}")).unwrap_or_default();
 
-        let rooms_line = unit.rooms_text()
-            .map(|r| format!("\n{r}"))
-            .unwrap_or_default();
-
-        // Initial reminder
         if local_weekday == ctx.config.schedule.reminder_weekday
-            && !state.reminder_sent(&unit.name, year, week, &ReminderKind::Initial)
+            && !state.reminder_sent(&group.id, year, week, &ReminderKind::Initial)
         {
             let msg = format!(
-                "🧹 **{}** · week {week} ({})\n\
-                 {users_text}{rooms_line}\n\
-                 ✅ React or type !done",
-                unit.name, week_dates(year, week)
+                "🧹 **{}** · week {week} ({})\n{users_text}{rooms_line}\n✅ React or type !done",
+                group.name, week_dates(year, week)
             );
-            let resp = room.send(mention_message(&msg, &responsible, &room).await).await
+            let resp = room.send(mention_message(&msg, &resp_mxids, &room).await).await
                 .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
-            state.reminder_event_ids.insert(resp.response.event_id.to_string(), unit.name.clone());
-            state.mark_reminder_sent(&unit.name, year, week, ReminderKind::Initial);
-            info!("Sent initial reminder for «{}» week {week}/{year}", unit.name);
+            state.reminder_event_ids.insert(resp.response.event_id.to_string(), group.id.clone());
+            state.mark_reminder_sent(&group.id, year, week, ReminderKind::Initial);
+            info!("Sent initial reminder for «{}» week {week}/{year}", group.name);
         }
 
-        // Final reminder
         if local_weekday == ctx.config.schedule.final_reminder_weekday
-            && !state.reminder_sent(&unit.name, year, week, &ReminderKind::Final)
+            && !state.reminder_sent(&group.id, year, week, &ReminderKind::Final)
         {
             let msg = format!(
-                "⚠️ **{}** still not cleaned · week {week} ({})\n\
-                 {users_text}{rooms_line}\n\
-                 ✅ React or type !done · swap: !swap @user",
-                unit.name, week_dates(year, week)
+                "⚠️ **{}** still not cleaned · week {week} ({})\n{users_text}{rooms_line}\n✅ React or type !done · swap: !swap @user",
+                group.name, week_dates(year, week)
             );
-            let resp = room.send(mention_message(&msg, &responsible, &room).await).await
+            let resp = room.send(mention_message(&msg, &resp_mxids, &room).await).await
                 .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
-            state.reminder_event_ids.insert(resp.response.event_id.to_string(), unit.name.clone());
-            state.mark_reminder_sent(&unit.name, year, week, ReminderKind::Final);
-            info!("Sent final reminder for «{}» week {week}/{year}", unit.name);
+            state.reminder_event_ids.insert(resp.response.event_id.to_string(), group.id.clone());
+            state.mark_reminder_sent(&group.id, year, week, ReminderKind::Final);
+            info!("Sent final reminder for «{}» week {week}/{year}", group.name);
         }
     }
 
-    // ── Weekly summary ────────────────────────────────────────────────────────
     if let Some(summary_day) = ctx.config.schedule.summary_weekday {
         if local_weekday == summary_day
             && !state.reminder_sent("", year, week, &ReminderKind::WeeklySummary)
         {
-            let (msg, missed_users) = build_summary(&state, year, week, interval);
-            room.send(mention_message(&msg, &missed_users, &room).await).await
+            let (msg, missed_mxids) = build_summary(&state, year, week, interval);
+            room.send(mention_message(&msg, &missed_mxids, &room).await).await
                 .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
             state.mark_reminder_sent("", year, week, ReminderKind::WeeklySummary);
             info!("Sent weekly summary for week {week}/{year}");
@@ -148,57 +109,40 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns (message_text, users_to_mention).
-/// Only Matrix users responsible for still-uncleaned units are mentioned in
-/// the summary so people who already did their job don't get pinged.
 fn build_summary(
     state: &crate::state::State,
-    year: i32,
-    week: u32,
-    interval: u32,
+    year: i32, week: u32, interval: u32,
 ) -> (String, Vec<String>) {
-    let units = state.units();
+    let groups = state.cleaning_groups.clone();
     let mut lines = vec![format!("📋 **Cleaning summary** · week {week} ({})", week_dates(year, week))];
     lines.push(String::new());
-
     let mut done_count = 0usize;
-    let mut due_count = 0usize;
-    let mut mention_users: Vec<String> = Vec::new();
+    let mut due_count  = 0usize;
+    let mut mention_mxids: Vec<String> = Vec::new();
 
-    for unit in &units {
-        let due = state.is_due(&unit.name, year, week, interval);
-        if !due {
-            continue;
-        }
+    for group in &groups {
+        if !state.is_due(&group.id, year, week, interval) { continue; }
         due_count += 1;
 
-        let completed = state.is_completed(&unit.name, year, week);
-        if completed {
+        if state.is_completed(&group.id, year, week) {
             done_count += 1;
             let by = state.completions.iter()
-                .find(|c| c.unit_name == unit.name && c.iso_year == year && c.iso_week == week)
-                .map(|c| format!(" · {}", c.completed_by))
+                .find(|c| c.group_id == group.id && c.iso_year == year && c.iso_week == week)
+                .and_then(|c| state.person_by_id(&c.completed_by_id))
+                .map(|p| format!(" · {}", p.display_name))
                 .unwrap_or_default();
-            lines.push(format!("✅ **{}**{by}", unit.name));
+            lines.push(format!("✅ **{}**{by}", group.name));
         } else {
-            let responsible_opt = state.responsible_user(unit, year, week, interval);
-            let responsible = responsible_opt.as_ref()
-                .map(|p| p.display())
-                .unwrap_or("(nobody assigned)");
-            let rooms_str = unit.rooms_text()
-                .map(|r| format!("\n  {r}"))
-                .unwrap_or_default();
-            lines.push(format!("❌ **{}** · {responsible}{rooms_str}", unit.name));
-            // Only ping the responsible Matrix user of uncleaned units
-            if let Some(p) = &responsible_opt {
-                if let Some(mxid) = p.matrix_id() {
-                    mention_users.push(mxid.to_owned());
-                }
+            let resp = state.responsible_person(group, year, week, interval);
+            let resp_text = resp.map(|p| p.display_name.as_str()).unwrap_or("(nobody assigned)");
+            let rooms_str = group.rooms_text().map(|r| format!("\n  {r}")).unwrap_or_default();
+            lines.push(format!("❌ **{}** · {resp_text}{rooms_str}", group.name));
+            if let Some(mxid) = resp.and_then(|p| p.matrix_id.as_ref()) {
+                mention_mxids.push(mxid.clone());
             }
         }
-
-        let streak = state.streak_for(&unit.name, interval);
-        if streak >= 3 && completed {
+        let streak = state.streak_for(&group.id, interval);
+        if streak >= 3 && state.is_completed(&group.id, year, week) {
             lines.push(format!("   🔥 {streak}-week streak!"));
         }
     }
@@ -206,25 +150,21 @@ fn build_summary(
     lines.push(String::new());
     if due_count > 0 {
         lines.push(format!("{done_count}/{due_count} cleaned this week"));
-
-        let overdue: Vec<_> = units.iter()
-            .filter(|u| state.missed_weeks_for(&u.name, interval).len() >= 2)
+        let overdue: Vec<_> = groups.iter()
+            .filter(|g| state.missed_weeks_for(&g.id, interval).len() >= 2)
             .collect();
         if !overdue.is_empty() {
             lines.push(String::new());
             lines.push("⚠️ Repeatedly missed (2+ weeks in a row):".into());
-            for u in overdue {
-                let missed = state.missed_weeks_for(&u.name, interval);
-                lines.push(format!("   {} : {} weeks missed", u.name, missed.len()));
+            for g in overdue {
+                lines.push(format!("   {} : {} weeks missed", g.name, state.missed_weeks_for(&g.id, interval).len()));
             }
         }
     } else {
-        lines.push("No units were scheduled this week.".into());
+        lines.push("No groups were scheduled this week.".into());
     }
 
-    // Deduplicate mention list
-    mention_users.sort();
-    mention_users.dedup();
-
-    (lines.join("\n"), mention_users)
+    mention_mxids.sort();
+    mention_mxids.dedup();
+    (lines.join("\n"), mention_mxids)
 }
