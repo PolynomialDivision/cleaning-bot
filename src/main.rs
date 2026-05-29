@@ -28,6 +28,7 @@ use tracing::{error, info, warn};
 mod commands;
 mod config;
 mod format;
+mod ical;
 mod pdf;
 mod scheduler;
 mod state;

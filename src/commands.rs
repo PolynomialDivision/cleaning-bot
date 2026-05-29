@@ -26,6 +26,7 @@ pub async fn handle(
         "!remind"       => return cmd_remind(ctx, sender, room, &args).await,
         "!testnotify"   => return cmd_testnotify(room).await,
         "!pdf"          => return cmd_pdf(ctx, sender, room, &args).await,
+        "!ical"         => return cmd_ical(ctx, sender, room, &args).await,
         _ => {}
     }
 
@@ -1514,6 +1515,86 @@ async fn cmd_pdf(
     }
 }
 
+// ── !ical [N] / !ical <person> [N] ───────────────────────────────────────────
+
+async fn cmd_ical(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+    args: &[&str],
+) -> Result<Option<RoomMessageEventContent>> {
+    let sender_str = sender.as_str();
+
+    // Resolve target person and week count from args.
+    // !ical            → sender, 26 weeks
+    // !ical 12         → sender, 12 weeks
+    // !ical @other 12  → @other, 12 weeks  (admin only)
+    // !ical Alice 12   → Named person "Alice", 12 weeks (admin only)
+    let (person_id, weeks): (String, usize) = match args.first() {
+        None => (sender_str.to_owned(), 26),
+        Some(first) => {
+            if let Ok(n) = first.parse::<usize>() {
+                // Numeric first arg = week count, target = sender
+                (sender_str.to_owned(), n.clamp(1, 104))
+            } else {
+                // Non-numeric = person identifier; require admin for others
+                if *first != sender_str && !ctx.admin_users.contains(sender) {
+                    return Ok(Some(format::mentionify(
+                        "❌ Admin-Berechtigung erforderlich, um iCal für andere zu erstellen.",
+                    )));
+                }
+                let n = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(26usize).clamp(1, 104);
+                (first.to_string(), n)
+            }
+        }
+    };
+
+    let (ical_data, found) = {
+        let state = ctx.state.lock().await;
+        let in_any = state.units().iter().any(|u| u.has_member(&person_id));
+        let interval = ctx.config.schedule.interval_weeks;
+        let data = crate::ical::generate_ical(&state, interval, &person_id, weeks);
+        (data, in_any)
+    };
+
+    if !found && person_id != sender_str {
+        return Ok(Some(format::mentionify(&format!(
+            "Person «{person_id}» nicht in einem Bereich gefunden."
+        ))));
+    }
+
+    let ical_bytes = ical_data.into_bytes();
+    let mime: mime::Mime = "text/calendar".parse().expect("valid mime");
+
+    // Build a safe filename from the person identifier.
+    let safe_name = person_id
+        .trim_start_matches('@')
+        .split(':')
+        .next()
+        .unwrap_or("user")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .collect::<String>();
+    let filename = format!("putzplan_{safe_name}.ics");
+
+    match room.client().media().upload(&mime, ical_bytes, None).await {
+        Ok(upload) => {
+            use matrix_sdk::ruma::events::room::message::{FileMessageEventContent, MessageType};
+            let file_content = FileMessageEventContent::plain(filename, upload.content_uri);
+            let content = RoomMessageEventContent::new(MessageType::File(file_content));
+            room.send(content).await.ok();
+            let for_whom = if person_id == sender_str { String::new() } else { format!(" für {person_id}") };
+            Ok(Some(format::mentionify(&format!(
+                "📅 iCal{for_whom} · {weeks} Wochen · .ics-Datei in Kalender-App importieren."
+            ))))
+        }
+        Err(e) => {
+            tracing::warn!("iCal upload failed: {e}");
+            Ok(Some(format::mentionify("❌ Upload fehlgeschlagen.")))
+        }
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
@@ -1541,6 +1622,7 @@ fn help_text() -> String {
   !blame <floor>               · cleaning record for a specific floor
   !joinfloor <floor>           · add yourself to a floor
   !leavefloor <floor>          · remove yourself from a floor
+  !ical [N]                    · your cleaning duties as iCal (default 26 weeks)
   !swap @user [floor] [week N] · propose a swap; !acceptswap / !rejectswap to respond
   !acceptswap <id>             · accept a pending swap request
   !rejectswap <id>             · reject a pending swap request
