@@ -104,6 +104,9 @@ pub struct State {
     pub absences:       Vec<Absence>,
     #[serde(default)]
     pub sent_reminders: Vec<SentReminder>,
+    /// Append-only domain event log.  Backfilled from completions/swaps on first load.
+    #[serde(default)]
+    pub event_log: Vec<crate::analytics::LoggedEvent>,
 
     #[serde(default)]
     pub next_id:       u64,
@@ -128,10 +131,218 @@ impl State {
     pub async fn load(path: &Path) -> Result<Self> {
         if tokio::fs::metadata(path).await.is_ok() {
             let s = tokio::fs::read_to_string(path).await?;
-            Ok(serde_json::from_str(&s)?)
+            let mut st: Self = serde_json::from_str(&s)?;
+            // Backfill event log from existing data on first load after upgrade.
+            if st.event_log.is_empty() && !st.completions.is_empty() {
+                st.event_log = crate::analytics::backfill_events(&st);
+            }
+            Ok(st)
         } else {
             Ok(Self::default())
         }
+    }
+
+    /// Apply a domain event: mutate state **and** append to the event log.
+    ///
+    /// This is the **only** permitted way to mutate domain state (persons,
+    /// groups, completions, swaps, absences).  Bot-infrastructure state
+    /// (reminder_event_ids, reaction_dones, greeted_users, calendar_tokens)
+    /// may still be mutated directly.
+    ///
+    /// Returns `Ok(())` whether the event caused a state change or was a
+    /// no-op (idempotent).  Returns `Err` only for structural violations
+    /// such as referencing a non-existent group or person.
+    /// Low-level: append an already-applied backfill event without mutating state.
+    /// Only called from `analytics::backfill_events` bootstrapping path.
+    pub(crate) fn append_event(&mut self, event: crate::analytics::LoggedEvent) {
+        self.event_log.push(event);
+    }
+
+    pub fn apply_event(&mut self, event: crate::analytics::DomainEvent) -> anyhow::Result<()> {
+        use crate::analytics::DomainEvent as E;
+
+        let changed = match &event {
+            // ── Groups ────────────────────────────────────────────────────────
+            E::GroupCreated { group_id, name } => {
+                if self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    return Ok(());
+                }
+                let mut g = CleaningGroup::new(name);
+                g.id = group_id.clone();
+                self.cleaning_groups.push(g);
+                true
+            }
+            E::GroupDeleted { group_id } => {
+                let before = self.cleaning_groups.len();
+                self.cleaning_groups.retain(|g| &g.id != group_id);
+                if self.cleaning_groups.len() == before {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                true
+            }
+            E::RoomAdded { group_id, room_name } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if g.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)) {
+                    return Ok(());
+                }
+                g.room_names.push(room_name.clone());
+                true
+            }
+            E::RoomRemoved { group_id, room_name } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                let before = g.room_names.len();
+                g.room_names.retain(|r| !r.eq_ignore_ascii_case(room_name));
+                g.room_names.len() < before
+            }
+
+            // ── Persons ───────────────────────────────────────────────────────
+            E::PersonCreated { person_id, display_name, matrix_id } => {
+                if self.persons.iter().any(|p| &p.id == person_id) {
+                    return Ok(());
+                }
+                if let Some(mxid) = matrix_id {
+                    if self.persons.iter().any(|p| p.matrix_id.as_deref() == Some(mxid)) {
+                        return Ok(());
+                    }
+                }
+                let mut p = match matrix_id.as_deref() {
+                    Some(mxid) => Person::new_matrix(mxid),
+                    None       => Person::new_named(display_name),
+                };
+                p.id = person_id.clone();
+                self.persons.push(p);
+                true
+            }
+            E::PersonJoinedGroup { person_id, group_id } => {
+                if !self.persons.iter().any(|p| &p.id == person_id) {
+                    anyhow::bail!("Person not found: {person_id}");
+                }
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if g.member_ids.contains(person_id) { return Ok(()); }
+                g.member_ids.push(person_id.clone());
+                true
+            }
+            E::PersonLeftGroup { person_id, group_id } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                let before = g.member_ids.len();
+                g.member_ids.retain(|id| id != person_id);
+                g.member_ids.len() < before
+            }
+
+            // ── Cleaning ──────────────────────────────────────────────────────
+            E::CleaningCompleted { group_id, person_id, responsible_person_ids, iso_year, iso_week } => {
+                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                if self.is_completed(group_id, *iso_year, *iso_week) { return Ok(()); }
+                self.completions.push(Completion {
+                    group_id:               group_id.clone(),
+                    completed_by_id:        person_id.clone(),
+                    responsible_person_ids: responsible_person_ids.clone(),
+                    iso_year:  *iso_year,
+                    iso_week:  *iso_week,
+                    completed_at: Utc::now(),
+                    skipped: false,
+                });
+                true
+            }
+            E::CleaningSkipped { group_id, skipper_id, iso_year, iso_week } => {
+                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                if self.is_completed(group_id, *iso_year, *iso_week) { return Ok(()); }
+                self.completions.push(Completion {
+                    group_id:               group_id.clone(),
+                    completed_by_id:        skipper_id.clone(),
+                    responsible_person_ids: vec![],
+                    iso_year:  *iso_year,
+                    iso_week:  *iso_week,
+                    completed_at: Utc::now(),
+                    skipped: true,
+                });
+                true
+            }
+            E::CleaningUndone { group_id, iso_year, iso_week } => {
+                let before = self.completions.len();
+                self.completions.retain(|c| {
+                    !(&c.group_id == group_id && c.iso_year == *iso_year && c.iso_week == *iso_week)
+                });
+                self.completions.len() < before
+            }
+
+            // ── Swaps ─────────────────────────────────────────────────────────
+            E::SwapRequested { group_id, requester_mxid, target_mxid, iso_year, iso_week } => {
+                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                let id = self.next_id;
+                self.next_id += 1;
+                self.swap_requests.push(SwapRequest {
+                    id,
+                    requester:  requester_mxid.clone(),
+                    target:     target_mxid.clone(),
+                    group_id:   group_id.clone(),
+                    iso_year:   *iso_year,
+                    iso_week:   *iso_week,
+                    created_at: Utc::now(),
+                    status:     SwapStatus::Pending,
+                });
+                true
+            }
+            E::SwapApproved { swap_id, requester_id: _, replacement_id: _, .. } => {
+                let req = self.swap_requests.iter_mut().find(|r| r.id == *swap_id)
+                    .ok_or_else(|| anyhow::anyhow!("Swap not found: {swap_id}"))?;
+                if req.status == SwapStatus::Accepted { return Ok(()); }
+                if req.status != SwapStatus::Pending {
+                    anyhow::bail!("Swap #{swap_id} is not pending");
+                }
+                req.status = SwapStatus::Accepted;
+                true
+            }
+            E::SwapRejected { swap_id } => {
+                let req = self.swap_requests.iter_mut().find(|r| r.id == *swap_id)
+                    .ok_or_else(|| anyhow::anyhow!("Swap not found: {swap_id}"))?;
+                if req.status == SwapStatus::Rejected { return Ok(()); }
+                if req.status != SwapStatus::Pending {
+                    anyhow::bail!("Swap #{swap_id} is not pending");
+                }
+                req.status = SwapStatus::Rejected;
+                true
+            }
+
+            // ── Absences ──────────────────────────────────────────────────────
+            E::AbsenceRecorded { person_id, group_id, from_year, from_week, duration_weeks } => {
+                if !self.persons.iter().any(|p| &p.id == person_id) {
+                    anyhow::bail!("Person not found: {person_id}");
+                }
+                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                self.absences.retain(|a| !(&a.person_id == person_id && &a.group_id == group_id));
+                self.absences.push(Absence {
+                    person_id:      person_id.clone(),
+                    group_id:       group_id.clone(),
+                    from_year:      *from_year,
+                    from_week:      *from_week,
+                    duration_weeks: *duration_weeks,
+                });
+                true
+            }
+            E::AbsenceCancelled { person_id } => {
+                let before = self.absences.len();
+                self.absences.retain(|a| &a.person_id != person_id);
+                self.absences.len() < before
+            }
+        };
+
+        if changed {
+            self.event_log.push(crate::analytics::LoggedEvent::now(event));
+        }
+        Ok(())
     }
 
     pub async fn save(&mut self, path: &Path) -> Result<()> {

@@ -25,6 +25,7 @@ use matrix_sdk::{
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+mod analytics;
 mod commands;
 mod config;
 mod domain;
@@ -39,7 +40,7 @@ mod validate;
 
 use config::Config;
 use domain::Person;
-use state::{Completion, GreetingChoice, GreetingInfo, ReactionDone, State};
+use state::{GreetingChoice, GreetingInfo, ReactionDone, State};
 
 fn add_thread_relation(content: &mut RoomMessageEventContent, root: OwnedEventId, reply_to: OwnedEventId) {
     content.relates_to = Some(Relation::Thread(Thread::reply(root, reply_to)));
@@ -232,22 +233,21 @@ async fn main() -> Result<()> {
                                 let group_id   = choice.group_id.clone();
                                 let group_name = choice.group_name.clone();
 
-                                // Find or create Person for this MXID.
-                                let person_id = {
-                                    if let Some(p) = state.person_by_matrix_id(&sender_mxid) {
-                                        p.id.clone()
-                                    } else {
-                                        let p = Person::new_matrix(&sender_mxid);
-                                        let id = p.id.clone();
-                                        state.persons.push(p);
-                                        id
-                                    }
-                                };
-
-                                if let Some(group) = state.cleaning_groups.iter_mut().find(|g| g.id == group_id) {
-                                    if !group.member_ids.contains(&person_id) {
-                                        group.member_ids.push(person_id);
-                                    }
+                                // Ensure Person exists (idempotent) then join group.
+                                let new_pid = uuid::Uuid::new_v4().to_string();
+                                let _ = state.apply_event(analytics::DomainEvent::PersonCreated {
+                                    person_id: new_pid,
+                                    display_name: sender_mxid.clone(),
+                                    matrix_id: Some(sender_mxid.clone()),
+                                });
+                                let person_id = state.person_by_matrix_id(&sender_mxid)
+                                    .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
+                                let already = state.group_by_id(&group_id)
+                                    .map(|g| g.member_ids.contains(&person_id)).unwrap_or(false);
+                                if !already {
+                                    let _ = state.apply_event(analytics::DomainEvent::PersonJoinedGroup {
+                                        person_id, group_id: group_id.clone(),
+                                    });
                                 }
 
                                 if let Err(e) = state.save(&ctx.state_path).await {
@@ -293,19 +293,18 @@ async fn main() -> Result<()> {
                     return;
                 }
 
-                // Find or create sender Person.
-                let sender_person_id = {
-                    if let Some(p) = state.person_by_matrix_id(&sender_mxid) {
-                        p.id.clone()
-                    } else {
-                        let p = Person::new_matrix(&sender_mxid);
-                        let id = p.id.clone();
-                        state.persons.push(p);
-                        id
-                    }
-                };
+                // Find or create sender Person through apply_event (idempotent).
+                let new_pid = uuid::Uuid::new_v4().to_string();
+                if let Err(e) = state.apply_event(analytics::DomainEvent::PersonCreated {
+                    person_id: new_pid, display_name: sender_mxid.clone(), matrix_id: Some(sender_mxid.clone()),
+                }) {
+                    tracing::error!("PersonCreated failed in reaction handler: {e}");
+                    return;
+                }
+                let sender_person_id = state.person_by_matrix_id(&sender_mxid)
+                    .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
 
-                let responsible_ids = state.cleaning_groups.iter()
+                let responsible_ids: Vec<String> = state.cleaning_groups.iter()
                     .find(|g| g.id == group_id)
                     .and_then(|g| state.responsible_person(g, year, week, interval))
                     .map(|p| vec![p.id.clone()])
@@ -313,15 +312,16 @@ async fn main() -> Result<()> {
 
                 let group_name = state.group_by_id(&group_id).map(|g| g.name.clone()).unwrap_or_default();
 
-                state.completions.push(Completion {
+                if let Err(e) = state.apply_event(analytics::DomainEvent::CleaningCompleted {
                     group_id:               group_id.clone(),
-                    completed_by_id:        sender_person_id.clone(),
+                    person_id:              sender_person_id.clone(),
                     responsible_person_ids: responsible_ids,
-                    iso_year:     year,
-                    iso_week:     week,
-                    completed_at: chrono::Utc::now(),
-                    skipped:      false,
-                });
+                    iso_year:               year,
+                    iso_week:               week,
+                }) {
+                    tracing::error!("CleaningCompleted failed in reaction handler: {e}");
+                    return;
+                }
                 state.reaction_dones.insert(
                     ev.event_id.to_string(),
                     ReactionDone {
