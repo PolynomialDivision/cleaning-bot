@@ -43,8 +43,23 @@ pub async fn handle(
     let mut tokens = tokenize(body);
     let cmd_owned  = if tokens.is_empty() { String::new() } else { tokens.remove(0) };
     let cmd        = cmd_owned.as_str();
-    let arg_strings = tokens; // remaining tokens are the args
+    let arg_strings = tokens;
     let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
+
+    // Update the sender's display name from Matrix on every command (lightweight).
+    {
+        let sender_mxid = sender.as_str().to_owned();
+        let refs = vec![sender_mxid.as_str()];
+        let fetched = format::fetch_names(room, &refs).await;
+        if let Some(name) = fetched.get(sender_mxid.as_str()) {
+            if !name.is_empty() && name != &sender_mxid {
+                let mut state = ctx.state.lock().await;
+                if let Some(p) = state.persons.iter_mut().find(|p| p.matrix_id.as_deref() == Some(&sender_mxid)) {
+                    p.display_name = name.clone();
+                }
+            }
+        }
+    }
 
     // Commands that need direct room access.
     match cmd {
@@ -106,6 +121,28 @@ fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
 /// Returns the MXID or display_name depending on whether the person has Matrix.
 fn person_key(p: &Person) -> &str {
     p.matrix_id.as_deref().unwrap_or(&p.display_name)
+}
+
+/// Fetch Matrix display names for all known Matrix users and update state.
+/// Keeps Person.display_name in sync with the real Matrix profile name.
+/// Called before PDF generation and whenever a command comes in.
+async fn refresh_display_names(ctx: &BotContext, room: &Room) {
+    let mxids: Vec<String> = ctx.state.lock().await.persons.iter()
+        .filter_map(|p| p.matrix_id.clone()).collect();
+    if mxids.is_empty() { return; }
+    let refs: Vec<&str> = mxids.iter().map(String::as_str).collect();
+    let fetched = format::fetch_names(room, &refs).await;
+    if fetched.is_empty() { return; }
+    let mut state = ctx.state.lock().await;
+    for p in &mut state.persons {
+        if let Some(mxid) = &p.matrix_id {
+            if let Some(name) = fetched.get(mxid.as_str()) {
+                if !name.is_empty() && name != mxid {
+                    p.display_name = name.clone();
+                }
+            }
+        }
+    }
 }
 
 // ── !done [group] ─────────────────────────────────────────────────────────────
@@ -1373,6 +1410,9 @@ async fn cmd_pdf(
 ) -> Result<Option<RoomMessageEventContent>> {
     require_admin(ctx, sender)?;
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(8).clamp(1, 52);
+
+    // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99".
+    refresh_display_names(ctx, room).await;
 
     let html = {
         let state    = ctx.state.lock().await;

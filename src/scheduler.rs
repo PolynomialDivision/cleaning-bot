@@ -55,17 +55,24 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
         if !state.is_due(&group.id, year, week, interval) { continue; }
 
         // Build assignment text and mention list — slot-aware.
+        // For multi-slot groups: already-completed slots are shown as ✅ (no mention).
+        // Only pending-slot assignees are pinged.
         let (resp_mxids, assignment_text) = if group.is_multi_slot() {
             let mut mxids = Vec::new();
             let mut lines = Vec::new();
             for (slot_idx, slot) in group.slots.iter().enumerate() {
-                let assignee = state.slot_assignee(group, slot_idx, year, week, interval);
+                let done  = state.is_slot_completed(&group.id, &slot.id, year, week);
                 let rooms = if slot.room_names.is_empty() { String::new() } else { format!(": {}", slot.room_names.join(", ")) };
-                match assignee {
-                    None    => lines.push(format!("  **{}**{rooms}: (nobody assigned)", slot.name)),
-                    Some(p) => {
-                        if let Some(m) = &p.matrix_id { mxids.push(m.clone()); }
-                        lines.push(format!("  **{}**{rooms}: {}", slot.name, p.display_name));
+                if done {
+                    lines.push(format!("  ✅ {}{rooms}", slot.name));
+                } else {
+                    let assignee = state.slot_assignee(group, slot_idx, year, week, interval);
+                    match assignee {
+                        None    => lines.push(format!("  **{}**{rooms}: (nobody assigned)", slot.name)),
+                        Some(p) => {
+                            if let Some(m) = &p.matrix_id { mxids.push(m.clone()); }
+                            lines.push(format!("  **{}**{rooms}: {}", slot.name, p.display_name));
+                        }
                     }
                 }
             }

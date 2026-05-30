@@ -28,9 +28,16 @@ pub struct Person {
 
 impl Person {
     pub fn new_matrix(mxid: &str) -> Self {
+        // Use localpart as the initial display name so PDF/ICS show "bomberdomme"
+        // instead of "@bomberdomme:matrix.org".  Updated to the real Matrix display
+        // name when the person first sends a command.
+        let display_name = mxid.strip_prefix('@')
+            .and_then(|s| s.split(':').next())
+            .map(str::to_owned)
+            .unwrap_or_else(|| mxid.to_owned());
         Person {
             id:           Uuid::new_v4().to_string(),
-            display_name: mxid.to_owned(),
+            display_name,
             active:       true,
             matrix_id:    Some(mxid.to_owned()),
         }
