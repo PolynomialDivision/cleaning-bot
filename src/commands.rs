@@ -3,10 +3,10 @@ use chrono::Utc;
 use matrix_sdk::{
     Room,
     ruma::{
-        OwnedEventId, OwnedUserId,
+        OwnedEventId, OwnedUserId, UInt,
         events::{
             relation::Thread,
-            room::message::{FileMessageEventContent, MessageType, RoomMessageEventContent},
+            room::message::{FileInfo, FileMessageEventContent, MessageType, RoomMessageEventContent},
         },
     },
 };
@@ -1578,11 +1578,15 @@ async fn cmd_pdf(
     };
 
     let mime: mime::Mime = "application/pdf".parse().expect("valid mime");
+    let pdf_size = pdf_bytes.len();
     match room.client().media().upload(&mime, pdf_bytes, None).await {
         Ok(upload) => {
-            let mut file_content = RoomMessageEventContent::new(MessageType::File(
-                FileMessageEventContent::plain(file_name, upload.content_uri)
-            ));
+            let mut file_info = FileInfo::new();
+            file_info.mimetype = Some("application/pdf".to_owned());
+            file_info.size     = UInt::new(pdf_size as u64);
+            let mut fc = FileMessageEventContent::plain(file_name, upload.content_uri);
+            fc.info = Some(Box::new(file_info));
+            let mut file_content = RoomMessageEventContent::new(MessageType::File(fc));
             file_content.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
                 Thread::reply(thread_root.clone(), event_id.clone())
             ));
