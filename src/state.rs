@@ -3,13 +3,16 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, path::Path};
 
-use crate::domain::{CleaningGroup, GroupId, Person, PersonId};
+use crate::domain::{CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotId};
 
 // ── Scheduling records ────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Completion {
     pub group_id:               GroupId,
+    /// `Some` for multi-slot groups; `None` for single-slot groups.
+    #[serde(default)]
+    pub slot_id:                Option<SlotId>,
     pub completed_by_id:        PersonId,
     #[serde(default)]
     pub responsible_person_ids: Vec<PersonId>,
@@ -180,21 +183,56 @@ impl State {
                 }
                 true
             }
-            E::RoomAdded { group_id, room_name } => {
+            E::SlotAdded { group_id, slot_id, slot_name } => {
                 let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                if g.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)) {
-                    return Ok(());
-                }
-                g.room_names.push(room_name.clone());
+                if g.slots.iter().any(|s| &s.id == slot_id) { return Ok(()); }
+                let mut s = CleaningSlot::new(slot_name);
+                s.id = slot_id.clone();
+                g.slots.push(s);
                 true
             }
-            E::RoomRemoved { group_id, room_name } => {
+            E::SlotRemoved { group_id, slot_id } => {
                 let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                let before = g.room_names.len();
-                g.room_names.retain(|r| !r.eq_ignore_ascii_case(room_name));
-                g.room_names.len() < before
+                let before = g.slots.len();
+                g.slots.retain(|s| &s.id != slot_id);
+                g.slots.len() < before
+            }
+            E::RoomAdded { group_id, slot_id, room_name } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                match slot_id {
+                    Some(sid) => {
+                        let s = g.slots.iter_mut().find(|s| &s.id == sid)
+                            .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
+                        if s.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)) { return Ok(()); }
+                        s.room_names.push(room_name.clone());
+                    }
+                    None => {
+                        if g.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)) { return Ok(()); }
+                        g.room_names.push(room_name.clone());
+                    }
+                }
+                true
+            }
+            E::RoomRemoved { group_id, slot_id, room_name } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                match slot_id {
+                    Some(sid) => {
+                        let s = g.slots.iter_mut().find(|s| &s.id == sid)
+                            .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
+                        let before = s.room_names.len();
+                        s.room_names.retain(|r| !r.eq_ignore_ascii_case(room_name));
+                        s.room_names.len() < before
+                    }
+                    None => {
+                        let before = g.room_names.len();
+                        g.room_names.retain(|r| !r.eq_ignore_ascii_case(room_name));
+                        g.room_names.len() < before
+                    }
+                }
             }
 
             // ── Persons ───────────────────────────────────────────────────────
@@ -234,13 +272,19 @@ impl State {
             }
 
             // ── Cleaning ──────────────────────────────────────────────────────
-            E::CleaningCompleted { group_id, person_id, responsible_person_ids, iso_year, iso_week } => {
+            E::CleaningCompleted { group_id, slot_id, person_id, responsible_person_ids, iso_year, iso_week } => {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
-                if self.is_completed(group_id, *iso_year, *iso_week) { return Ok(()); }
+                // Idempotency: check whether this specific slot (or the whole group) is already done.
+                let already_done = match slot_id {
+                    Some(sid) => self.is_slot_completed(group_id, sid, *iso_year, *iso_week),
+                    None      => self.is_completed(group_id, *iso_year, *iso_week),
+                };
+                if already_done { return Ok(()); }
                 self.completions.push(Completion {
                     group_id:               group_id.clone(),
+                    slot_id:                slot_id.clone(),
                     completed_by_id:        person_id.clone(),
                     responsible_person_ids: responsible_person_ids.clone(),
                     iso_year:  *iso_year,
@@ -254,17 +298,41 @@ impl State {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
-                if self.is_completed(group_id, *iso_year, *iso_week) { return Ok(()); }
-                self.completions.push(Completion {
-                    group_id:               group_id.clone(),
-                    completed_by_id:        skipper_id.clone(),
-                    responsible_person_ids: vec![],
-                    iso_year:  *iso_year,
-                    iso_week:  *iso_week,
-                    completed_at: Utc::now(),
-                    skipped: true,
-                });
-                true
+                // For multi-slot groups, skip all slots not yet completed.
+                let group = self.group_by_id(group_id).unwrap().clone();
+                if group.is_multi_slot() {
+                    let slots: Vec<_> = group.slots.iter().map(|s| s.id.clone()).collect();
+                    let mut changed = false;
+                    for sid in slots {
+                        if !self.is_slot_completed(group_id, &sid, *iso_year, *iso_week) {
+                            self.completions.push(Completion {
+                                group_id:               group_id.clone(),
+                                slot_id:                Some(sid),
+                                completed_by_id:        skipper_id.clone(),
+                                responsible_person_ids: vec![],
+                                iso_year:  *iso_year,
+                                iso_week:  *iso_week,
+                                completed_at: Utc::now(),
+                                skipped: true,
+                            });
+                            changed = true;
+                        }
+                    }
+                    changed
+                } else {
+                    if self.is_completed(group_id, *iso_year, *iso_week) { return Ok(()); }
+                    self.completions.push(Completion {
+                        group_id:               group_id.clone(),
+                        slot_id:                None,
+                        completed_by_id:        skipper_id.clone(),
+                        responsible_person_ids: vec![],
+                        iso_year:  *iso_year,
+                        iso_week:  *iso_week,
+                        completed_at: Utc::now(),
+                        skipped: true,
+                    });
+                    true
+                }
             }
             E::CleaningUndone { group_id, iso_year, iso_week } => {
                 let before = self.completions.len();
@@ -392,12 +460,30 @@ impl State {
 // ── Scheduling queries ────────────────────────────────────────────────────────
 
 impl State {
+    /// True when the group (or ALL slots for a multi-slot group) are completed this week.
     pub fn is_completed(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
-        self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week)
+        match self.group_by_id(group_id) {
+            Some(g) if g.is_multi_slot() => g.slots.iter().all(|s| self.is_slot_completed(group_id, &s.id, year, week)),
+            _ => self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week),
+        }
     }
+
     pub fn is_cleaned(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
-        self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week && !c.skipped)
+        match self.group_by_id(group_id) {
+            Some(g) if g.is_multi_slot() => g.slots.iter().all(|s| {
+                self.completions.iter().any(|c| &c.group_id == group_id && c.slot_id.as_deref() == Some(&s.id) && c.iso_year == year && c.iso_week == week && !c.skipped)
+            }),
+            _ => self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week && !c.skipped),
+        }
     }
+
+    /// True when the specific slot is marked completed.
+    pub fn is_slot_completed(&self, group_id: &GroupId, slot_id: &SlotId, year: i32, week: u32) -> bool {
+        self.completions.iter().any(|c| {
+            &c.group_id == group_id && c.slot_id.as_deref() == Some(slot_id) && c.iso_year == year && c.iso_week == week
+        })
+    }
+
     pub fn is_due(&self, group_id: &GroupId, year: i32, week: u32, interval: u32) -> bool {
         (0..interval).all(|w| {
             let (y, wk) = weeks_ago(year, week, w);
@@ -424,6 +510,15 @@ impl State {
         });
     }
 
+    /// Core rotation index: due-week index n, slot index s → member_ids index.
+    fn rotation_index(&self, group: &CleaningGroup, year: i32, week: u32, interval: u32, slot_index: usize) -> usize {
+        let num_slots = group.slots.len().max(1);
+        let start = self.tracking_start();
+        let n = all_due_weeks_in_range(start, (year, week), interval).len().saturating_sub(1);
+        (n * num_slots + slot_index) % group.member_ids.len()
+    }
+
+    /// For single-slot groups (or swap-overridden): one responsible person.
     pub fn responsible_person(&self, group: &CleaningGroup, year: i32, week: u32, interval: u32) -> Option<&Person> {
         if group.member_ids.is_empty() { return None; }
         if let Some(swap) = self.swap_requests.iter().find(|s| {
@@ -431,10 +526,23 @@ impl State {
         }) {
             return self.person_by_matrix_id(&swap.target);
         }
-        let start = self.tracking_start();
-        let n = all_due_weeks_in_range(start, (year, week), interval).len();
-        let idx = n.saturating_sub(1) % group.member_ids.len();
+        let idx = self.rotation_index(group, year, week, interval, 0);
         self.person_by_id(&group.member_ids[idx])
+    }
+
+    /// For multi-slot groups: the person assigned to `slot_index` this cycle.
+    pub fn slot_assignee(&self, group: &CleaningGroup, slot_index: usize, year: i32, week: u32, interval: u32) -> Option<&Person> {
+        if group.member_ids.is_empty() { return None; }
+        let idx = self.rotation_index(group, year, week, interval, slot_index);
+        self.person_by_id(&group.member_ids[idx])
+    }
+
+    /// All (slot, Option<Person>) pairs for a multi-slot group in a given week.
+    /// Falls back to single-slot behaviour for non-slotted groups.
+    pub fn slot_assignments<'a>(&'a self, group: &'a CleaningGroup, year: i32, week: u32, interval: u32) -> Vec<(&'a CleaningSlot, Option<&'a Person>)> {
+        group.slots.iter().enumerate().map(|(i, slot)| {
+            (slot, self.slot_assignee(group, i, year, week, interval))
+        }).collect()
     }
 
     pub fn last_completion(&self, group_id: &GroupId) -> Option<&Completion> {

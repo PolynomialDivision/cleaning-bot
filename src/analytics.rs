@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    domain::{GroupId, PersonId},
+    domain::{GroupId, PersonId, SlotId},
     state::{State, SwapStatus, all_due_weeks_in_range, current_iso_week},
 };
 
@@ -42,8 +42,10 @@ pub enum DomainEvent {
     // ── Group management ──────────────────────────────────────────────────────
     GroupCreated { group_id: GroupId, name: String },
     GroupDeleted { group_id: GroupId },
-    RoomAdded    { group_id: GroupId, room_name: String },
-    RoomRemoved  { group_id: GroupId, room_name: String },
+    SlotAdded    { group_id: GroupId, slot_id: SlotId, slot_name: String },
+    SlotRemoved  { group_id: GroupId, slot_id: SlotId },
+    RoomAdded    { group_id: GroupId, #[serde(default)] slot_id: Option<SlotId>, room_name: String },
+    RoomRemoved  { group_id: GroupId, #[serde(default)] slot_id: Option<SlotId>, room_name: String },
 
     // ── Person management ─────────────────────────────────────────────────────
     PersonCreated {
@@ -58,8 +60,10 @@ pub enum DomainEvent {
     // ── Cleaning operations ───────────────────────────────────────────────────
     CleaningCompleted {
         group_id:               GroupId,
+        /// `Some` for multi-slot groups; `None` for single-slot groups.
+        #[serde(default)]
+        slot_id:                Option<SlotId>,
         person_id:              PersonId,
-        /// Who was scheduled to clean; pre-computed by caller from rotation.
         #[serde(default)]
         responsible_person_ids: Vec<PersonId>,
         iso_year:               i32,
@@ -67,7 +71,7 @@ pub enum DomainEvent {
     },
     CleaningSkipped {
         group_id:   GroupId,
-        skipper_id: PersonId,   // admin who ran !skip
+        skipper_id: PersonId,
         iso_year:   i32,
         iso_week:   u32,
     },
@@ -148,6 +152,7 @@ pub fn backfill_events(state: &State) -> Vec<LoggedEvent> {
         } else {
             DomainEvent::CleaningCompleted {
                 group_id:               c.group_id.clone(),
+                slot_id:                c.slot_id.clone(),
                 person_id:              c.completed_by_id.clone(),
                 responsible_person_ids: c.responsible_person_ids.clone(),
                 iso_year:               c.iso_year,
@@ -485,6 +490,7 @@ mod tests {
 
         st.completions.push(Completion {
             group_id:               gid.clone(),
+            slot_id:                None,
             completed_by_id:        pid.clone(),
             responsible_person_ids: vec![],
             iso_year: 2025, iso_week: 10,
@@ -519,6 +525,7 @@ mod tests {
         for (pid, week) in [(&pid1, 1u32), (&pid2, 2u32)] {
             st.completions.push(Completion {
                 group_id:               gid.clone(),
+                slot_id:                None,
                 completed_by_id:        pid.clone(),
                 responsible_person_ids: vec![],
                 iso_year: 2025, iso_week: week,

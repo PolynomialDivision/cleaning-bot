@@ -54,21 +54,35 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     for group in &groups {
         if !state.is_due(&group.id, year, week, interval) { continue; }
 
-        let responsible = state.responsible_person(group, year, week, interval);
-        let (resp_mxids, users_text): (Vec<String>, String) = match responsible {
-            None    => (vec![], "(nobody assigned)".to_owned()),
-            Some(p) => (
-                p.matrix_id.as_ref().map(|m| vec![m.clone()]).unwrap_or_default(),
-                p.display_name.clone(),
-            ),
+        // Build assignment text and mention list — slot-aware.
+        let (resp_mxids, assignment_text) = if group.is_multi_slot() {
+            let mut mxids = Vec::new();
+            let mut lines = Vec::new();
+            for (slot_idx, slot) in group.slots.iter().enumerate() {
+                let assignee = state.slot_assignee(group, slot_idx, year, week, interval);
+                let rooms = if slot.room_names.is_empty() { String::new() } else { format!(": {}", slot.room_names.join(", ")) };
+                match assignee {
+                    None    => lines.push(format!("  **{}**{rooms}: (nobody assigned)", slot.name)),
+                    Some(p) => {
+                        if let Some(m) = &p.matrix_id { mxids.push(m.clone()); }
+                        lines.push(format!("  **{}**{rooms}: {}", slot.name, p.display_name));
+                    }
+                }
+            }
+            (mxids, lines.join("\n"))
+        } else {
+            let responsible = state.responsible_person(group, year, week, interval);
+            let mxids  = responsible.and_then(|p| p.matrix_id.as_ref()).map(|m| vec![m.clone()]).unwrap_or_default();
+            let rooms  = group.rooms_text().map(|r| format!("\n{r}")).unwrap_or_default();
+            let name   = responsible.map(|p| p.display_name.clone()).unwrap_or_else(|| "(nobody assigned)".into());
+            (mxids, format!("{name}{rooms}"))
         };
-        let rooms_line = group.rooms_text().map(|r| format!("\n{r}")).unwrap_or_default();
 
         if local_weekday == ctx.config.schedule.reminder_weekday
             && !state.reminder_sent(&group.id, year, week, &ReminderKind::Initial)
         {
             let msg = format!(
-                "🧹 **{}** · week {week} ({})\n{users_text}{rooms_line}\n✅ React or type !done",
+                "🧹 **{}** · week {week} ({})\n{assignment_text}\n✅ React or type !done",
                 group.name, week_dates(year, week)
             );
             let resp = room.send(mention_message(&msg, &resp_mxids, &room).await).await
@@ -82,7 +96,7 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             && !state.reminder_sent(&group.id, year, week, &ReminderKind::Final)
         {
             let msg = format!(
-                "⚠️ **{}** still not cleaned · week {week} ({})\n{users_text}{rooms_line}\n✅ React or type !done · swap: !swap @user",
+                "⚠️ **{}** still not cleaned · week {week} ({})\n{assignment_text}\n✅ React or type !done · swap: !swap @user",
                 group.name, week_dates(year, week)
             );
             let resp = room.send(mention_message(&msg, &resp_mxids, &room).await).await

@@ -73,6 +73,8 @@ pub async fn handle(
         "!removeperson" => cmd_removeperson(ctx, sender, &args).await,
         "!addgroup"     => cmd_addfloor(ctx, sender, &args).await,
         "!removegroup"  => cmd_removefloor(ctx, sender, &args).await,
+        "!addslot"      => cmd_addslot(ctx, sender, &args).await,
+        "!removeslot"   => cmd_removeslot(ctx, sender, &args).await,
         "!addroom"      => cmd_addroom(ctx, sender, &args).await,
         "!removeroom"   => cmd_removeroom(ctx, sender, &args).await,
         "!undo"         => cmd_undo(ctx, sender, &args).await,
@@ -140,7 +142,6 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     let mut already_done = vec![];
 
     for group_id in &target_group_ids {
-        // Check membership or accepted swap.
         let is_member = state.cleaning_groups.iter()
             .find(|g| &g.id == group_id)
             .map(|g| g.member_ids.contains(&sender_person_id))
@@ -154,35 +155,66 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
             return Ok(Some(format!("You are not a member of «{name}».")));
         }
 
-        if state.is_completed(group_id, year, week) {
-            let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
-            already_done.push(name);
-            continue;
+        let group = state.group_by_id(group_id).unwrap().clone();
+
+        if group.is_multi_slot() {
+            // Mark the slot(s) assigned to this person.
+            let slot_assignments: Vec<(String, String)> = group.slots.iter().enumerate()
+                .filter_map(|(slot_idx, slot)| {
+                    let assignee = state.slot_assignee(&group, slot_idx, year, week, interval)?;
+                    if assignee.id == sender_person_id { Some((slot.id.clone(), slot.name.clone())) } else { None }
+                })
+                .collect();
+
+            if slot_assignments.is_empty() {
+                let name = group.name.clone();
+                return Ok(Some(format!("You are not assigned to any slot in «{name}» this week.")));
+            }
+
+            for (slot_id, slot_name) in slot_assignments {
+                if state.is_slot_completed(group_id, &slot_id, year, week) {
+                    already_done.push(format!("{} / {slot_name}", group.name));
+                    continue;
+                }
+                let responsible_ids = vec![sender_person_id.clone()];
+                state.apply_event(DomainEvent::CleaningCompleted {
+                    group_id:               group_id.clone(),
+                    slot_id:                Some(slot_id),
+                    person_id:              sender_person_id.clone(),
+                    responsible_person_ids: responsible_ids,
+                    iso_year: year, iso_week: week,
+                })?;
+                // Report group as fully done only when all slots complete.
+                if state.is_completed(group_id, year, week) {
+                    marked.push(format!("{} ✅ fully done", group.name));
+                } else {
+                    marked.push(format!("{} / {slot_name}", group.name));
+                }
+            }
+        } else {
+            if state.is_completed(group_id, year, week) {
+                already_done.push(group.name.clone());
+                continue;
+            }
+            let responsible_ids: Vec<String> = state.responsible_person(&group, year, week, interval)
+                .map(|p| vec![p.id.clone()]).unwrap_or_default();
+            state.apply_event(DomainEvent::CleaningCompleted {
+                group_id:               group_id.clone(),
+                slot_id:                None,
+                person_id:              sender_person_id.clone(),
+                responsible_person_ids: responsible_ids,
+                iso_year: year, iso_week: week,
+            })?;
+            marked.push(group.name.clone());
         }
-
-        let responsible_ids: Vec<String> = state.cleaning_groups.iter()
-            .find(|g| &g.id == group_id)
-            .and_then(|g| state.responsible_person(g, year, week, interval))
-            .map(|p| vec![p.id.clone()])
-            .unwrap_or_default();
-
-        let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
-        state.apply_event(DomainEvent::CleaningCompleted {
-            group_id:               group_id.clone(),
-            person_id:              sender_person_id.clone(),
-            responsible_person_ids: responsible_ids,
-            iso_year:  year,
-            iso_week:  week,
-        })?;
-        marked.push(name);
     }
 
     state.save(&ctx.state_path).await?;
     drop(state);
 
     let mut lines = vec![];
-    if !marked.is_empty()      { lines.push(format!("✅ Cleaned: {}", marked.join(", "))); }
-    if !already_done.is_empty(){ lines.push(format!("Already done: {}", already_done.join(", "))); }
+    if !marked.is_empty()       { lines.push(format!("✅ Cleaned: {}", marked.join(", "))); }
+    if !already_done.is_empty() { lines.push(format!("Already done: {}", already_done.join(", "))); }
     Ok(Some(lines.join("\n")))
 }
 
@@ -526,44 +558,119 @@ async fn cmd_removefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) 
     Ok(Some(format!("✅ Removed group «{name}».")))
 }
 
-// ── Admin: !addroom <group> <room> ───────────────────────────────────────────
+// ── Admin: !addslot <group> <slot_name> ──────────────────────────────────────
+
+async fn cmd_addslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
+        (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
+        _ => return Ok(Some("Usage: !addslot <group> <slot_name>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let group_id = match state.group_by_name(&group_name) {
+        Some(g) => g.id.clone(),
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    if state.group_by_id(&group_id).and_then(|g| g.slot_by_name(&slot_name)).is_some() {
+        return Ok(Some(format!("Slot «{slot_name}» already exists in «{group_name}».")));
+    }
+    let slot_id = uuid::Uuid::new_v4().to_string();
+    state.apply_event(DomainEvent::SlotAdded { group_id, slot_id, slot_name: slot_name.clone() })?;
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Added slot «{slot_name}» to «{group_name}».")))
+}
+
+// ── Admin: !removeslot <group> <slot_name> ───────────────────────────────────
+
+async fn cmd_removeslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
+        (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
+        _ => return Ok(Some("Usage: !removeslot <group> <slot_name>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let (group_id, slot_id) = match state.group_by_name(&group_name) {
+        Some(g) => match g.slot_by_name(&slot_name) {
+            Some(s) => (g.id.clone(), s.id.clone()),
+            None    => return Ok(Some(format!("Slot «{slot_name}» not found in «{group_name}»."))),
+        },
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    state.apply_event(DomainEvent::SlotRemoved { group_id, slot_id })?;
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Removed slot «{slot_name}» from «{group_name}».")))
+}
+
+// ── Admin: !addroom <group> [<slot>] <room> ──────────────────────────────────
+//
+// If the group has slots and the second argument matches a slot name, the room
+// is added to that slot.  Otherwise the room is added to the group directly
+// (single-slot mode, or a group-level room for backwards compatibility).
 
 async fn cmd_addroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let (group_name, room_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
-        (Some(f), Some(r)) if !r.is_empty() => (f.to_string(), r),
-        _ => return Ok(Some("Usage: !addroom <group> <room name>".into())),
-    };
+    if args.len() < 2 {
+        return Ok(Some("Usage: !addroom <group> [<slot>] <room name>".into()));
+    }
+    let group_name = args[0].to_string();
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
         None    => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    if state.group_by_id(&group_id).map(|g| g.room_names.iter().any(|r| r.eq_ignore_ascii_case(&room_name))).unwrap_or(false) {
-        return Ok(Some(format!("Room «{room_name}» already in «{group_name}».")));
-    }
-    state.apply_event(DomainEvent::RoomAdded { group_id, room_name: room_name.clone() })?;
+
+    // Detect slot targeting: if args[1] matches a slot name and there are more args, route to slot.
+    let (slot_id, room_name) = {
+        let g = state.group_by_id(&group_id).unwrap();
+        if args.len() >= 3 {
+            if let Some(slot) = g.slot_by_name(args[1]) {
+                (Some(slot.id.clone()), args[2..].join(" "))
+            } else {
+                (None, args[1..].join(" "))
+            }
+        } else if g.is_multi_slot() {
+            return Ok(Some(format!(
+                "«{group_name}» has slots. Usage: !addroom \"{group_name}\" <slot_name> <room>.\nSlots: {}",
+                g.slots.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+            )));
+        } else {
+            (None, args[1..].join(" "))
+        }
+    };
+
+    state.apply_event(DomainEvent::RoomAdded { group_id, slot_id, room_name: room_name.clone() })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Added room «{room_name}» to «{group_name}».")))
+    Ok(Some(format!("✅ Added room «{room_name}».")))
 }
 
-// ── Admin: !removeroom <group> <room> ────────────────────────────────────────
+// ── Admin: !removeroom <group> [<slot>] <room> ───────────────────────────────
 
 async fn cmd_removeroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let (group_name, room_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
-        (Some(f), Some(r)) if !r.is_empty() => (f.to_string(), r),
-        _ => return Ok(Some("Usage: !removeroom <group> <room name>".into())),
-    };
+    if args.len() < 2 {
+        return Ok(Some("Usage: !removeroom <group> [<slot>] <room name>".into()));
+    }
+    let group_name = args[0].to_string();
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
         None    => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    if !state.group_by_id(&group_id).map(|g| g.room_names.iter().any(|r| r.eq_ignore_ascii_case(&room_name))).unwrap_or(false) {
-        return Ok(Some(format!("Room «{room_name}» not in «{group_name}».")));
-    }
-    state.apply_event(DomainEvent::RoomRemoved { group_id, room_name: room_name.clone() })?;
+
+    let (slot_id, room_name) = {
+        let g = state.group_by_id(&group_id).unwrap();
+        if args.len() >= 3 {
+            if let Some(slot) = g.slot_by_name(args[1]) {
+                (Some(slot.id.clone()), args[2..].join(" "))
+            } else {
+                (None, args[1..].join(" "))
+            }
+        } else {
+            (None, args[1..].join(" "))
+        }
+    };
+
+    state.apply_event(DomainEvent::RoomRemoved { group_id, slot_id, room_name: room_name.clone() })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Removed room «{room_name}» from «{group_name}».")))
 }

@@ -304,24 +304,41 @@ async fn main() -> Result<()> {
                 let sender_person_id = state.person_by_matrix_id(&sender_mxid)
                     .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
 
-                let responsible_ids: Vec<String> = state.cleaning_groups.iter()
-                    .find(|g| g.id == group_id)
-                    .and_then(|g| state.responsible_person(g, year, week, interval))
-                    .map(|p| vec![p.id.clone()])
-                    .unwrap_or_default();
-
                 let group_name = state.group_by_id(&group_id).map(|g| g.name.clone()).unwrap_or_default();
 
-                if let Err(e) = state.apply_event(analytics::DomainEvent::CleaningCompleted {
-                    group_id:               group_id.clone(),
-                    person_id:              sender_person_id.clone(),
-                    responsible_person_ids: responsible_ids,
-                    iso_year:               year,
-                    iso_week:               week,
-                }) {
-                    tracing::error!("CleaningCompleted failed in reaction handler: {e}");
-                    return;
-                }
+                // For multi-slot groups, mark only the slot(s) assigned to this person.
+                let group = state.group_by_id(&group_id).cloned();
+                let apply_ok = if let Some(g) = group.filter(|g| g.is_multi_slot()) {
+                    let slot_jobs: Vec<(String, Vec<String>)> = g.slots.iter().enumerate().filter_map(|(idx, slot)| {
+                        let assignee = state.slot_assignee(&g, idx, year, week, interval)?;
+                        if assignee.id == sender_person_id {
+                            Some((slot.id.clone(), vec![sender_person_id.clone()]))
+                        } else { None }
+                    }).collect();
+                    let mut ok = true;
+                    for (sid, resp_ids) in slot_jobs {
+                        if let Err(e) = state.apply_event(analytics::DomainEvent::CleaningCompleted {
+                            group_id: group_id.clone(), slot_id: Some(sid),
+                            person_id: sender_person_id.clone(), responsible_person_ids: resp_ids,
+                            iso_year: year, iso_week: week,
+                        }) {
+                            tracing::error!("CleaningCompleted (slot) failed: {e}");
+                            ok = false;
+                        }
+                    }
+                    ok
+                } else {
+                    let responsible_ids: Vec<String> = state.cleaning_groups.iter()
+                        .find(|g| g.id == group_id)
+                        .and_then(|g| state.responsible_person(g, year, week, interval))
+                        .map(|p| vec![p.id.clone()]).unwrap_or_default();
+                    state.apply_event(analytics::DomainEvent::CleaningCompleted {
+                        group_id: group_id.clone(), slot_id: None,
+                        person_id: sender_person_id.clone(), responsible_person_ids: responsible_ids,
+                        iso_year: year, iso_week: week,
+                    }).is_ok()
+                };
+                if !apply_ok { return; }
                 state.reaction_dones.insert(
                     ev.event_id.to_string(),
                     ReactionDone {

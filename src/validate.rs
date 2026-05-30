@@ -77,7 +77,7 @@ pub fn validate_state(state: &State) -> ValidationReport {
     }
     let valid_group_ids: HashSet<&str> = state.cleaning_groups.iter().map(|g| g.id.as_str()).collect();
 
-    // ── 3. Group member_ids must reference valid persons ──────────────────────
+    // ── 3. Group member_ids and slots ─────────────────────────────────────────
     for g in &state.cleaning_groups {
         for pid in &g.member_ids {
             if !valid_person_ids.contains(pid.as_str()) {
@@ -86,6 +86,28 @@ pub fn validate_state(state: &State) -> ValidationReport {
         }
         if g.member_ids.is_empty() {
             warnings.push(format!("Group «{}» has no members", g.name));
+        }
+        // Slot validation
+        let mut seen_slot_ids = HashSet::new();
+        for slot in &g.slots {
+            if slot.id.is_empty() {
+                errors.push(format!("Group «{}» has a slot with empty ID", g.name));
+            } else if !seen_slot_ids.insert(slot.id.as_str()) {
+                errors.push(format!("Group «{}» has duplicate SlotId: {}", g.name, slot.id));
+            }
+            if slot.name.is_empty() {
+                errors.push(format!("Group «{}» has a slot with empty name", g.name));
+            }
+        }
+        // Multi-slot groups need >= 2 members per slot so rotation makes sense
+        if !g.slots.is_empty() && !g.member_ids.is_empty() {
+            let min_recommended = g.slots.len() * 2;
+            if g.member_ids.len() < g.slots.len() {
+                warnings.push(format!("Group «{}» has {} slot(s) but only {} member(s) — some people will clean every cycle", g.name, g.slots.len(), g.member_ids.len()));
+            } else if g.member_ids.len() < min_recommended {
+                // informational only
+                let _ = min_recommended;
+            }
         }
         // Duplicate member check
         let mut ms: HashSet<&str> = HashSet::new();

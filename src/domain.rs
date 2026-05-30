@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 pub type PersonId = String;
 pub type GroupId  = String;
+pub type SlotId   = String;
 
 // ── Person ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,29 @@ impl Person {
     }
 }
 
+// ── CleaningSlot ──────────────────────────────────────────────────────────────
+
+/// A named sub-unit within a multi-slot `CleaningGroup`.
+///
+/// When a group has `slots`, each cycle assigns one person per slot using
+/// consecutive members from the rotation:
+///   slot_index s, due-week index n → member[(n × num_slots + s) % num_members]
+///
+/// If `slots` is empty the group behaves as a traditional single-slot group.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CleaningSlot {
+    pub id:         SlotId,
+    pub name:       String,
+    #[serde(default)]
+    pub room_names: Vec<String>,
+}
+
+impl CleaningSlot {
+    pub fn new(name: &str) -> Self {
+        CleaningSlot { id: Uuid::new_v4().to_string(), name: name.to_owned(), room_names: Vec::new() }
+    }
+}
+
 // ── CleaningGroup ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -57,8 +81,12 @@ pub struct CleaningGroup {
     pub name:       String,
     /// Member PersonIds **in rotation order** — index determines whose turn it is.
     pub member_ids: Vec<PersonId>,
+    /// Used in single-slot mode (slots is empty).
     #[serde(default)]
     pub room_names: Vec<String>,
+    /// When non-empty, enables multi-slot mode.
+    #[serde(default)]
+    pub slots:      Vec<CleaningSlot>,
 }
 
 impl CleaningGroup {
@@ -68,8 +96,25 @@ impl CleaningGroup {
             name:       name.to_owned(),
             member_ids: Vec::new(),
             room_names: Vec::new(),
+            slots:      Vec::new(),
         }
     }
+
+    pub fn is_multi_slot(&self) -> bool { !self.slots.is_empty() }
+
+    pub fn slot_by_name(&self, name: &str) -> Option<&CleaningSlot> {
+        self.slots.iter().find(|s| s.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn slot_by_id(&self, id: &SlotId) -> Option<&CleaningSlot> {
+        self.slots.iter().find(|s| &s.id == id)
+    }
+
+    pub fn slot_by_id_mut(&mut self, id: &SlotId) -> Option<&mut CleaningSlot> {
+        self.slots.iter_mut().find(|s| &s.id == id)
+    }
+
+    /// Single-slot rooms text (for non-slotted groups or scheduler header).
     pub fn rooms_text(&self) -> Option<String> {
         if self.room_names.is_empty() {
             None
@@ -115,9 +160,14 @@ const ASSIGNMENT_NS: Uuid = Uuid::from_bytes([
     0xc1, 0xea, 0x3b, 0x07, 0xc1, 0xea, 0x3b, 0x07,
 ]);
 
-/// Stable UUID v5 for a (group, year, week, assignee) tuple.
+/// Stable UUID v5 for a (group, [slot,] year, week, assignee) tuple.
 /// Identical inputs always produce the same UID — no storage required.
 pub fn assignment_uid(group_id: &str, year: i32, week: u32, person_id: &str) -> String {
     let name = format!("{group_id}:{year}:W{week:02}:{person_id}");
+    Uuid::new_v5(&ASSIGNMENT_NS, name.as_bytes()).to_string()
+}
+
+pub fn slot_assignment_uid(group_id: &str, slot_id: &str, year: i32, week: u32, person_id: &str) -> String {
+    let name = format!("{group_id}:{slot_id}:{year}:W{week:02}:{person_id}");
     Uuid::new_v5(&ASSIGNMENT_NS, name.as_bytes()).to_string()
 }

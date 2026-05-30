@@ -12,7 +12,7 @@
 
 use chrono::{NaiveDate, Utc, Weekday};
 use crate::{
-    domain::{assignment_uid, GroupId, PersonId},
+    domain::{assignment_uid, slot_assignment_uid, GroupId, PersonId, SlotId},
     state::{State, add_weeks, current_iso_week, week_dates, weeks_between},
 };
 
@@ -26,13 +26,16 @@ pub struct PersonDetails {
     pub mxid: Option<String>,
 }
 
-/// A single resolved assignment: one person responsible for one group in one week.
+/// A single resolved assignment: one person responsible for one group (or slot) in one week.
 #[derive(Clone, Debug)]
 pub struct AssignmentInstance {
-    /// Stable UUID v5 — identical for (group_id × year × week × assignee_id).
+    /// Stable UUID v5 — identical for (group_id × [slot_id ×] year × week × assignee_id).
     pub uid:         String,
     pub group_id:    GroupId,
     pub group_name:  String,
+    /// `Some` for multi-slot groups; `None` for single-slot groups.
+    pub slot_id:     Option<SlotId>,
+    pub slot_name:   Option<String>,
     pub room_names:  Vec<String>,
     pub iso_year:    i32,
     pub iso_week:    u32,
@@ -40,7 +43,7 @@ pub struct AssignmentInstance {
     pub week_sunday: NaiveDate,
     /// Pre-formatted "1–7 Jun" style string.
     pub week_label:  String,
-    /// `None` means the group exists but has no members this cycle.
+    /// `None` means the group/slot exists but has no members this cycle.
     pub assignee:    Option<PersonDetails>,
     pub is_completed: bool,
     pub is_skipped:   bool,
@@ -140,40 +143,80 @@ pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSna
         let sunday   = monday + chrono::Duration::days(6);
 
         for group in &state.cleaning_groups {
-            let assignee = state.responsible_person(group, dy, dw, interval).map(|p| PersonDetails {
-                id:   p.id.clone(),
-                name: p.display_name.clone(),
-                mxid: p.matrix_id.clone(),
-            });
+            if group.is_multi_slot() {
+                // Emit one AssignmentInstance per slot.
+                for (slot_idx, slot) in group.slots.iter().enumerate() {
+                    let assignee = state.slot_assignee(group, slot_idx, dy, dw, interval).map(|p| PersonDetails {
+                        id:   p.id.clone(),
+                        name: p.display_name.clone(),
+                        mxid: p.matrix_id.clone(),
+                    });
+                    let person_part = assignee.as_ref().map(|p| p.id.as_str()).unwrap_or("none");
+                    let uid = slot_assignment_uid(&group.id, &slot.id, dy, dw, person_part);
 
-            let uid = {
+                    let completion = state.completions.iter().find(|c| {
+                        c.group_id == group.id && c.slot_id.as_deref() == Some(&slot.id) && c.iso_year == dy && c.iso_week == dw
+                    });
+                    let is_completed = completion.is_some();
+                    let is_skipped   = completion.map(|c| c.skipped).unwrap_or(false);
+                    let completed_by = completion
+                        .and_then(|c| state.person_by_id(&c.completed_by_id))
+                        .map(|p| p.display_name.clone());
+
+                    assignments.push(AssignmentInstance {
+                        uid,
+                        group_id:    group.id.clone(),
+                        group_name:  group.name.clone(),
+                        slot_id:     Some(slot.id.clone()),
+                        slot_name:   Some(slot.name.clone()),
+                        room_names:  slot.room_names.clone(),
+                        iso_year:    dy,
+                        iso_week:    dw,
+                        week_monday: monday,
+                        week_sunday: sunday,
+                        week_label:  week_dates(dy, dw),
+                        assignee,
+                        is_completed,
+                        is_skipped,
+                        completed_by,
+                    });
+                }
+            } else {
+                // Single-slot: existing behaviour.
+                let assignee = state.responsible_person(group, dy, dw, interval).map(|p| PersonDetails {
+                    id:   p.id.clone(),
+                    name: p.display_name.clone(),
+                    mxid: p.matrix_id.clone(),
+                });
                 let person_part = assignee.as_ref().map(|p| p.id.as_str()).unwrap_or("none");
-                assignment_uid(&group.id, dy, dw, person_part)
-            };
+                let uid = assignment_uid(&group.id, dy, dw, person_part);
 
-            let completion = state.completions.iter()
-                .find(|c| c.group_id == group.id && c.iso_year == dy && c.iso_week == dw);
-            let is_completed  = completion.is_some();
-            let is_skipped    = completion.map(|c| c.skipped).unwrap_or(false);
-            let completed_by  = completion
-                .and_then(|c| state.person_by_id(&c.completed_by_id))
-                .map(|p| p.display_name.clone());
+                let completion = state.completions.iter()
+                    .find(|c| c.group_id == group.id && c.slot_id.is_none() && c.iso_year == dy && c.iso_week == dw);
+                let is_completed = completion.is_some();
+                let is_skipped   = completion.map(|c| c.skipped).unwrap_or(false);
+                let completed_by = completion
+                    .and_then(|c| state.person_by_id(&c.completed_by_id))
+                    .map(|p| p.display_name.clone());
 
-            assignments.push(AssignmentInstance {
-                uid,
-                group_id:    group.id.clone(),
-                group_name:  group.name.clone(),
-                room_names:  group.room_names.clone(),
-                iso_year:    dy,
-                iso_week:    dw,
-                week_monday: monday,
-                week_sunday: sunday,
-                week_label:  week_dates(dy, dw),
-                assignee,
-                is_completed,
-                is_skipped,
-                completed_by,
-            });
+                assignments.push(AssignmentInstance {
+                    uid,
+                    group_id:    group.id.clone(),
+                    group_name:  group.name.clone(),
+                    slot_id:     None,
+                    slot_name:   None,
+                    room_names:  group.room_names.clone(),
+                    iso_year:    dy,
+                    iso_week:    dw,
+                    week_monday: monday,
+                    week_sunday: sunday,
+                    week_label:  week_dates(dy, dw),
+                    assignee,
+                    is_completed,
+                    is_skipped,
+                    completed_by,
+                });
+            }
         }
     }
 
