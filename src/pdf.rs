@@ -10,11 +10,12 @@
 
 use crate::schedule::ScheduleSnapshot;
 
-/// Approximate layout constants for one A4 page (portrait, 10mm/12mm margins).
-/// Used to compute the per-section zoom factor.
-const A4_USABLE_MM: f32   = 249.0; // 297mm - 2 × 10mm margin - ~28mm for headings/legend
-const ROW_HEIGHT_MM: f32  = 6.5;   // at zoom=1.0
-const MIN_ZOOM: f32        = 0.50;  // below this the text becomes unreadable
+/// Approximate layout constants for one A4 page (portrait, 14mm margins).
+/// The usable height excludes section header (~20mm), table header (~8mm),
+/// and legend (~8mm) — leaving ~213mm for data rows.
+const A4_USABLE_MM: f32 = 213.0;
+const ROW_HEIGHT_MM: f32 = 7.0;  // at zoom=1.0 with 1.8mm cell padding
+const MIN_ZOOM: f32      = 0.62; // ~8.5pt effective body text — still legible
 
 pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
     let cur_week = {
@@ -51,7 +52,7 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
         // Date range subtitle.
         let date_range = match (group_rows.first(), group_rows.last()) {
             (Some(f), Some(l)) if f.week_monday != l.week_sunday => {
-                format!("{} – {}",
+                format!("{} \u{2013} {}",
                     f.week_monday.format("%d %b %Y"),
                     l.week_sunday.format("%d %b %Y"))
             }
@@ -63,8 +64,6 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
         for a in &group_rows {
             let is_current = (a.iso_year, a.iso_week) == cur_week;
 
-            // Area column: slot name for multi-slot groups, otherwise empty
-            // (rooms shown separately below the name).
             let area = match &a.slot_name {
                 Some(slot) => {
                     if a.room_names.is_empty() {
@@ -85,14 +84,14 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
             };
 
             let check = if a.is_completed {
-                "<span class=\"check-done\">✓</span>"
+                "<span class=\"check-done\">&#x2713;</span>"
             } else {
                 "<span class=\"check-box\"></span>"
             };
 
             tbody.push_str(&format!(
                 "<tr class=\"{cls}\">\
-                  <td class=\"col-week\">{wk}<br><small class=\"col-year\">{yr}</small></td>\
+                  <td class=\"col-week\"><span class=\"kw\">{wk}</span><span class=\"col-year\">{yr}</span></td>\
                   <td class=\"col-dates\">{dates}</td>\
                   <td class=\"col-area\">{area}</td>\
                   <td class=\"col-name\">{name}</td>\
@@ -111,20 +110,22 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
 
         sections.push_str(&format!(
             "<section class=\"group-section\" style=\"zoom:{zoom:.2}\">\n\
-              <h2>🧹 {name}</h2>\n\
-              <p class=\"meta\">{range} &nbsp;·&nbsp; Every {interval} week(s) &nbsp;·&nbsp; Generated {gen}</p>\n\
+              <div class=\"section-header\">\
+                <h2>{name}</h2>\
+                <p class=\"meta\">{range} &nbsp;&middot;&nbsp; Every {interval} week(s) &nbsp;&middot;&nbsp; Generated {gen}</p>\
+              </div>\n\
               <table>\n\
                 <thead><tr>\
                   <th class=\"col-week\">Week</th>\
                   <th class=\"col-dates\">Dates</th>\
                   <th class=\"col-area\">Area / Rooms</th>\
                   <th class=\"col-name\">Responsible</th>\
-                  <th class=\"col-check\">✓</th>\
+                  <th class=\"col-check\">&#x2713;</th>\
                   <th class=\"col-notes\">Notes</th>\
                 </tr></thead>\n\
                 <tbody>\n{tbody}</tbody>\n\
               </table>\n\
-              <p class=\"legend\">☐ = pending &nbsp;·&nbsp; ✓ = done</p>\n\
+              <p class=\"legend\">&#x25A1; = pending &nbsp;&middot;&nbsp; &#x2713; = done</p>\n\
             </section>\n",
             name     = e(group_name),
             range    = date_range,
@@ -141,57 +142,89 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
 <meta charset="UTF-8">
 <title>Cleaning Schedule</title>
 <style>
-  @page {{ size: A4 portrait; margin: 10mm 12mm; }}
+  @page {{ size: A4 portrait; margin: 14mm; }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: Arial, Helvetica, sans-serif; color: #000; background: #fff; }}
+  body {{ font-family: 'Helvetica Neue', Arial, Helvetica, sans-serif; color: #1a1a1a; background: #fff; }}
 
   .group-section {{ page-break-after: always; }}
   .group-section:last-child {{ page-break-after: auto; }}
 
-  h2 {{ font-size: 13pt; margin-bottom: 2mm; }}
-  p.meta {{ font-size: 7.5pt; color: #555; margin-bottom: 3mm; }}
+  /* Section header: coloured left border + light background */
+  .section-header {{
+    border-left: 4px solid #2c5f8a;
+    padding: 2.5mm 4mm;
+    margin-bottom: 3mm;
+    background: #f4f8fb;
+  }}
+  h2 {{ font-size: 13pt; font-weight: 700; color: #1a3a52; }}
+  p.meta {{ font-size: 7.5pt; color: #666; margin-top: 1mm; }}
 
-  table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
-  th, td {{
-    border: 1px solid #aaa;
-    padding: 1.5mm 2mm;
+  table {{ width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 1mm; }}
+
+  /* Dark blue header band */
+  thead tr {{ background: #2c5f8a; }}
+  th {{
+    padding: 2mm 2.5mm;
+    font-size: 7pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #fff;
+    text-align: left;
+    border: none;
+  }}
+
+  td {{
+    padding: 1.8mm 2.5mm;
+    font-size: 9pt;
+    border: none;
+    border-bottom: 1px solid #e8e8e8;
     vertical-align: middle;
-    line-height: 1.25;
+    line-height: 1.3;
     overflow: hidden;
   }}
-  th {{ background: #f0f0f0; font-size: 7.5pt; font-weight: bold; text-align: left; }}
 
-  .col-week  {{ width: 10mm; text-align: center; font-weight: bold; font-size: 8pt; }}
-  .col-year  {{ font-size: 6.5pt; font-weight: normal; color: #666; }}
-  .col-dates {{ width: 24mm; font-size: 7.5pt; white-space: nowrap; }}
-  .col-area  {{ width: 38mm; font-size: 7.5pt; }}
-  .col-name  {{ font-size: 8.5pt; }}
-  .col-check {{ width: 8mm; text-align: center; }}
-  .col-notes {{ width: 30mm; }}
+  /* Alternating row shading */
+  tbody tr:nth-child(odd)  {{ background: #fff; }}
+  tbody tr:nth-child(even) {{ background: #f7f7f7; }}
+  tr.done    {{ background: #eaf6ea !important; }}
+  tr.current {{ background: #fff8e1 !important; }}
 
-  .rooms {{ display: block; color: #666; font-size: 6.5pt; margin-top: 0.5mm; }}
+  /* Column widths */
+  .col-week  {{ width: 11mm; text-align: center; }}
+  .kw        {{ display: block; font-weight: 700; font-size: 9.5pt; }}
+  .col-year  {{ display: block; font-size: 6pt; color: #999; font-weight: 400; }}
+  .col-dates {{ width: 27mm; font-size: 8pt; color: #555; }}
+  .col-area  {{ width: 40mm; font-size: 8.5pt; }}
+  .col-name  {{ font-size: 9.5pt; font-weight: 500; }}
+  .col-check {{ width: 10mm; text-align: center; }}
+  .col-notes {{ width: 32mm; }}
 
-  /* Proper checkbox: empty bordered square when pending, tick when done */
+  .rooms {{ display: block; color: #999; font-size: 7pt; margin-top: 0.5mm; }}
+
+  /* Checkbox: empty bordered square (pending) or green tick (done) */
   .check-box {{
     display: inline-block;
-    width: 4.5mm;
-    height: 4.5mm;
-    border: 1.5px solid #333;
+    width: 5mm;
+    height: 5mm;
+    border: 1.5px solid #555;
+    border-radius: 1px;
     vertical-align: middle;
   }}
-  .check-done {{ font-size: 10pt; vertical-align: middle; }}
+  .check-done {{ font-size: 11pt; color: #2e7d32; vertical-align: middle; line-height: 1; }}
 
-  tr.done    {{ background: #edfaed; }}
-  tr.current {{ background: #fffbea; }}
-
-  p.legend {{ font-size: 6.5pt; color: #999; margin-top: 2.5mm; }}
+  p.legend {{ font-size: 6.5pt; color: #bbb; margin-top: 2.5mm; text-align: right; }}
 
   @media print {{
-    .group-section      {{ page-break-after: always; }}
+    .group-section           {{ page-break-after: always; }}
     .group-section:last-child {{ page-break-after: auto; }}
-    tr.done    {{ background: #edfaed; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    tr.current {{ background: #fffbea; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    th         {{ background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    .section-header          {{ background: #f4f8fb !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    thead tr                 {{ background: #2c5f8a !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    th                       {{ color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    tbody tr:nth-child(even) {{ background: #f7f7f7 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    tr.done                  {{ background: #eaf6ea !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    tr.current               {{ background: #fff8e1 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    .check-done              {{ color: #2e7d32 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
   }}
 </style>
 </head>
