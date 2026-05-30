@@ -959,7 +959,7 @@ async fn cmd_rejectswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     };
     if req.target != sender_mxid { return Ok(Some("This swap is not addressed to you.".into())); }
     if req.status != SwapStatus::Pending { return Ok(Some(format!("Request #{id} is already {:?}.", req.status))); }
-    drop(req);
+    let _ = req;
 
     state.apply_event(DomainEvent::SwapRejected { swap_id: id })?;
     state.save(&ctx.state_path).await?;
