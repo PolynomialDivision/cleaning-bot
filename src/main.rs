@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
 
                 let mut replies: Vec<RoomMessageEventContent> = Vec::new();
                 for line in cmd_lines {
-                    match commands::handle(&ctx, &ev.sender, &room, line).await {
+                    match commands::handle(&ctx, &ev.sender, &room, line, ev.event_id.clone(), thread_root.clone()).await {
                         Ok(Some(reply)) => replies.push(reply),
                         Err(e) if e.to_string() == "__not_admin__" =>
                             replies.push(format::mentionify("❌ This command requires admin privileges.")),

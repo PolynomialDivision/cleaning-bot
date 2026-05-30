@@ -1,6 +1,15 @@
 use anyhow::Result;
 use chrono::Utc;
-use matrix_sdk::{Room, ruma::{events::room::message::RoomMessageEventContent, OwnedUserId}};
+use matrix_sdk::{
+    Room,
+    ruma::{
+        OwnedEventId, OwnedUserId,
+        events::{
+            relation::Thread,
+            room::message::{FileMessageEventContent, MessageType, RoomMessageEventContent},
+        },
+    },
+};
 use uuid::Uuid;
 
 use crate::{
@@ -39,6 +48,8 @@ pub async fn handle(
     sender: &OwnedUserId,
     room: &Room,
     body: &str,
+    event_id: OwnedEventId,
+    thread_root: OwnedEventId,
 ) -> Result<Option<RoomMessageEventContent>> {
     let mut tokens = tokenize(body);
     let cmd_owned  = if tokens.is_empty() { String::new() } else { tokens.remove(0) };
@@ -66,7 +77,7 @@ pub async fn handle(
         "!cleanplan"  => return cmd_cleanplan(ctx, sender, room, &args).await,
         "!remind"     => return cmd_remind(ctx, sender, room, &args).await,
         "!testnotify" => return cmd_testnotify(room).await,
-        "!pdf"        => return cmd_pdf(ctx, sender, room, &args).await,
+        "!pdf"        => return cmd_pdf(ctx, sender, room, &args, event_id, thread_root).await,
         "!ical"       => return cmd_ical(ctx, sender, room, &args).await,
         "!icalreset"  => return cmd_icalreset(ctx, sender, room, &args).await,
         _ => {}
@@ -1460,9 +1471,22 @@ async fn cmd_pdf(
     sender: &OwnedUserId,
     room: &Room,
     args: &[&str],
+    event_id: OwnedEventId,
+    thread_root: OwnedEventId,
 ) -> Result<Option<RoomMessageEventContent>> {
     require_admin(ctx, sender)?;
-    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(8).clamp(1, 52);
+    // !pdf [weeks] [group name]
+    // First arg: either a number (weeks) or start of group name.
+    let (n, group_filter) = {
+        let weeks = args.first().and_then(|s| s.parse::<usize>().ok());
+        if let Some(w) = weeks {
+            let name = if args.len() > 1 { Some(args[1..].join(" ")) } else { None };
+            (w.clamp(1, 52), name)
+        } else {
+            let name = if !args.is_empty() { Some(args.join(" ")) } else { None };
+            (8, name)
+        }
+    };
 
     // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99".
     refresh_display_names(ctx, room).await;
@@ -1470,23 +1494,41 @@ async fn cmd_pdf(
     let html = {
         let state    = ctx.state.lock().await;
         let interval = ctx.config.schedule.interval_weeks;
-        let snapshot = build_schedule(&state, interval, n);
+        let mut snapshot = build_schedule(&state, interval, n);
+        if let Some(ref name) = group_filter {
+            match state.group_by_name(name) {
+                Some(g) => {
+                    let gid = g.id.clone();
+                    snapshot.assignments.retain(|a| a.group_id == gid);
+                }
+                None => return Ok(Some(
+                    RoomMessageEventContent::text_plain(format!("Group «{name}» not found."))
+                )),
+            }
+        }
         crate::pdf::render_pdf(&snapshot)
+    };
+
+    let file_name = match &group_filter {
+        Some(name) => format!("schedule_{}.html", name.to_lowercase().replace(' ', "_")),
+        None       => format!("schedule_{n}w.html"),
     };
 
     let mime: mime::Mime = "text/html".parse().expect("valid mime");
     match room.client().media().upload(&mime, html.into_bytes(), None).await {
         Ok(upload) => {
-            use matrix_sdk::ruma::events::room::message::{FileMessageEventContent, MessageType};
-            let content = RoomMessageEventContent::new(MessageType::File(
-                FileMessageEventContent::plain(format!("putzplan_{n}w.html"), upload.content_uri)
+            let mut file_content = RoomMessageEventContent::new(MessageType::File(
+                FileMessageEventContent::plain(file_name, upload.content_uri)
             ));
-            room.send(content).await.ok();
-            Ok(Some(format::mentionify("📄 Putzplan generiert. Öffne die HTML-Datei im Browser → Drucken → Als PDF.")))
+            file_content.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
+                Thread::reply(thread_root.clone(), event_id.clone())
+            ));
+            room.send(file_content).await.ok();
+            Ok(Some(format::mentionify("📄 Schedule generated. Open the HTML file in your browser → Print → Save as PDF.")))
         }
         Err(e) => {
             tracing::warn!("PDF upload failed: {e}");
-            Ok(Some(format::mentionify("❌ Upload fehlgeschlagen.")))
+            Ok(Some(format::mentionify("❌ Upload failed.")))
         }
     }
 }
