@@ -99,6 +99,7 @@ pub async fn handle(
         "!removeperson" => cmd_removeperson(ctx, sender, &args).await,
         "!addgroup"     => cmd_addfloor(ctx, sender, &args).await,
         "!removegroup"  => cmd_removefloor(ctx, sender, &args).await,
+        "!resetplan"    => cmd_resetplan(ctx, sender, &args).await,
         "!addslot"      => cmd_addslot(ctx, sender, &args).await,
         "!removeslot"   => cmd_removeslot(ctx, sender, &args).await,
         "!addroom"      => cmd_addroom(ctx, sender, &args).await,
@@ -551,8 +552,7 @@ async fn cmd_adduser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> R
     if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{mxid} is already in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id: group_id.clone() })?;
-    reset_and_rematerialize(ctx, &mut state, &group_id)?;
+    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {mxid} to «{group_name}».")))
 }
@@ -604,8 +604,7 @@ async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
     if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{name} is already in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id: group_id.clone() })?;
-    reset_and_rematerialize(ctx, &mut state, &group_id)?;
+    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {name} (no Matrix) to «{group_name}».")))
 }
@@ -673,6 +672,36 @@ async fn cmd_removefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) 
 }
 
 // ── Admin: !addslot <group> <slot_name> ──────────────────────────────────────
+
+// ── Admin: !resetplan <group> ─────────────────────────────────────────────────
+// Clears all future (>= today) slot assignments for a group and rematerializes.
+// Use this after the initial setup when you've added all members and want the
+// rotation to distribute fairly from now on.  Safe to run at any time — past
+// completed weeks are never touched.
+
+async fn cmd_resetplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let group_name = match args.first() {
+        Some(n) => n.to_string(),
+        None    => return Ok(Some("Usage: !resetplan <group>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let group_id = match state.group_by_name(&group_name) {
+        Some(g) => g.id.clone(),
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    reset_and_rematerialize(ctx, &mut state, &group_id)?;
+    let assignee = {
+        let interval = ctx.config.schedule.interval_weeks;
+        let (cur_y, cur_w) = current_iso_week();
+        let g = state.group_by_id(&group_id).unwrap().clone();
+        state.responsible_person(&g, cur_y, cur_w, interval)
+            .map(|p| p.display_name.clone())
+            .unwrap_or_else(|| "(nobody)".into())
+    };
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Plan reset for «{group_name}». This week: {assignee}.")))
+}
 
 async fn cmd_addslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
