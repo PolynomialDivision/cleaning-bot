@@ -33,6 +33,7 @@ mod format;
 mod http;
 mod ical;
 mod pdf;
+mod pdf_renderer;
 mod resolver;
 mod schedule;
 mod scheduler;

@@ -19,6 +19,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
+    chromium \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /cleaning-bot /usr/local/bin/cleaning-bot

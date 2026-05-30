@@ -19,37 +19,55 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
         (d.iso_week().year(), d.iso_week().week())
     };
 
-    for a in &snapshot.assignments {
-        let is_current = (a.iso_year, a.iso_week) == cur_week;
-        let rooms_html = if a.room_names.is_empty() {
-            String::new()
-        } else {
-            format!("<br><small class=\"rooms\">{}</small>", e(&a.room_names.join(", ")))
-        };
-        rows.push_str(&format!(
-            "<tr class=\"{row_class}\">\
-              <td class=\"week-num\">KW {dw}<br><small>{yr}</small></td>\
-              <td class=\"dates\">{dates}</td>\
-              <td class=\"area\">{area}{rooms}</td>\
-              <td class=\"responsible\">{name}</td>\
-              <td class=\"check\">{check}</td>\
-              <td class=\"sig\"></td>\
-            </tr>\n",
-            row_class = if a.is_completed { "done" } else if is_current { "current" } else { "" },
-            dw        = a.iso_week,
-            yr        = a.iso_year,
-            dates     = e(&a.week_label),
-            area      = e(&a.group_name),
-            rooms     = rooms_html,
-            name      = e(a.assignee_name()),
-            check     = if a.is_completed { "✓" } else { "☐" },
-        ));
+    // Group assignments by (year, week) so we can add a week-break row between groups.
+    let weeks = snapshot.weeks();
+    for (wi, &(wy, ww)) in weeks.iter().enumerate() {
+        let week_assignments: Vec<_> = snapshot.assignments.iter()
+            .filter(|a| a.iso_year == wy && a.iso_week == ww)
+            .collect();
+
+        // Page-break separator between weeks (not before the first).
+        if wi > 0 {
+            rows.push_str("<tr class=\"week-break\"><td colspan=\"6\"></td></tr>\n");
+        }
+
+        for a in week_assignments {
+            let is_current = (a.iso_year, a.iso_week) == cur_week;
+            let area_html = if let Some(slot) = &a.slot_name {
+                format!("{} / {}", e(&a.group_name), e(slot))
+            } else {
+                e(&a.group_name)
+            };
+            let rooms_html = if a.room_names.is_empty() {
+                String::new()
+            } else {
+                format!("<br><small class=\"rooms\">{}</small>", e(&a.room_names.join(", ")))
+            };
+            rows.push_str(&format!(
+                "<tr class=\"{row_class}\">\
+                  <td class=\"week-num\">KW {dw}<br><small>{yr}</small></td>\
+                  <td class=\"dates\">{dates}</td>\
+                  <td class=\"area\">{area}{rooms}</td>\
+                  <td class=\"responsible\">{name}</td>\
+                  <td class=\"check\">{check}</td>\
+                  <td class=\"sig\"></td>\
+                </tr>\n",
+                row_class = if a.is_completed { "done" } else if is_current { "current" } else { "" },
+                dw        = a.iso_week,
+                yr        = a.iso_year,
+                dates     = e(&a.week_label),
+                area      = area_html,
+                rooms     = rooms_html,
+                name      = e(a.assignee_name()),
+                check     = if a.is_completed { "✓" } else { "☐" },
+            ));
+        }
     }
 
     let date_str = snapshot.state_timestamp.format("%d.%m.%Y").to_string();
 
     format!(r#"<!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>Putzplan</title>
@@ -70,33 +88,35 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
   .rooms    {{ color: #555; font-size: 8.5pt; }}
   tr.done    {{ background: #edfaed; }}
   tr.current {{ background: #fffbea; }}
+  tr.week-break td {{ border: none; padding: 3mm 0; page-break-after: always; }}
   .legend {{ font-size: 8pt; color: #666; margin-top: 4mm; border-top: 1px solid #ccc; padding-top: 2mm; }}
   @media print {{
-    tr.done    {{ background: #edfaed; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    tr.current {{ background: #fffbea; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    th         {{ background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    tr.done       {{ background: #edfaed; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    tr.current    {{ background: #fffbea; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    th            {{ background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    tr.week-break {{ page-break-after: always; }}
   }}
 </style>
 </head>
 <body>
-  <h1>🧹 Putzplan</h1>
-  <p class="meta">Stand: {date} &nbsp;·&nbsp; Intervall: alle {interval} Woche(n)</p>
+  <h1>🧹 Cleaning Schedule</h1>
+  <p class="meta">Generated: {date} &nbsp;·&nbsp; Interval: every {interval} week(s)</p>
   <table>
     <thead>
       <tr>
-        <th class="week-num">KW</th>
-        <th class="dates">Datum</th>
-        <th class="area">Bereich / Räume</th>
-        <th class="responsible">Verantwortlich</th>
+        <th class="week-num">Week</th>
+        <th class="dates">Dates</th>
+        <th class="area">Area / Rooms</th>
+        <th class="responsible">Responsible</th>
         <th class="check">✓</th>
-        <th class="sig">Unterschrift</th>
+        <th class="sig">Notes</th>
       </tr>
     </thead>
     <tbody>
 {rows}    </tbody>
   </table>
   <div class="legend">
-    Legende: ☐ = ausstehend &nbsp;·&nbsp; ✓ = erledigt &nbsp;·&nbsp; KW = Kalenderwoche
+    Legend: ☐ = pending &nbsp;·&nbsp; ✓ = done
   </div>
 </body>
 </html>"#,

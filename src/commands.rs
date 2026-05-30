@@ -1491,7 +1491,7 @@ async fn cmd_pdf(
     // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99".
     refresh_display_names(ctx, room).await;
 
-    let html = {
+    let (html, file_name) = {
         let state    = ctx.state.lock().await;
         let interval = ctx.config.schedule.interval_weeks;
         let mut snapshot = build_schedule(&state, interval, n);
@@ -1506,16 +1506,37 @@ async fn cmd_pdf(
                 )),
             }
         }
-        crate::pdf::render_pdf(&snapshot)
+        let html = crate::pdf::render_pdf(&snapshot);
+        // Build filename: cleaning-plan-KW{first}-KW{last}.pdf
+        let weeks_range = {
+            let first = snapshot.assignments.first();
+            let last  = snapshot.assignments.last();
+            match (first, last) {
+                (Some(f), Some(l)) if (f.iso_year, f.iso_week) != (l.iso_year, l.iso_week) =>
+                    format!("KW{}-KW{}", f.iso_week, l.iso_week),
+                (Some(f), _) =>
+                    format!("KW{}", f.iso_week),
+                _ => format!("{n}w"),
+            }
+        };
+        let file_name = match &group_filter {
+            Some(name) => format!("cleaning-plan-{}_{}.pdf", name.to_lowercase().replace(' ', "_"), weeks_range),
+            None       => format!("cleaning-plan-{weeks_range}.pdf"),
+        };
+        (html, file_name)
     };
 
-    let file_name = match &group_filter {
-        Some(name) => format!("schedule_{}.html", name.to_lowercase().replace(' ', "_")),
-        None       => format!("schedule_{n}w.html"),
+    // Render HTML → PDF via headless Chromium.
+    let pdf_bytes = match crate::pdf_renderer::html_to_pdf(&html).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Chromium PDF render failed: {e}");
+            return Ok(Some(format::mentionify(&format!("❌ PDF render failed: {e}"))));
+        }
     };
 
-    let mime: mime::Mime = "text/html".parse().expect("valid mime");
-    match room.client().media().upload(&mime, html.into_bytes(), None).await {
+    let mime: mime::Mime = "application/pdf".parse().expect("valid mime");
+    match room.client().media().upload(&mime, pdf_bytes, None).await {
         Ok(upload) => {
             let mut file_content = RoomMessageEventContent::new(MessageType::File(
                 FileMessageEventContent::plain(file_name, upload.content_uri)
@@ -1524,7 +1545,7 @@ async fn cmd_pdf(
                 Thread::reply(thread_root.clone(), event_id.clone())
             ));
             room.send(file_content).await.ok();
-            Ok(Some(format::mentionify("📄 Schedule generated. Open the HTML file in your browser → Print → Save as PDF.")))
+            Ok(Some(format::mentionify("📄 Schedule generated.")))
         }
         Err(e) => {
             tracing::warn!("PDF upload failed: {e}");
