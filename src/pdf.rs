@@ -3,8 +3,9 @@
 //! `render_tex` is a pure function over a `ScheduleSnapshot`.
 //!
 //! Layout: one section per cleaning group, separated by `\clearpage`.
-//! Font size scales down automatically when a group has many rows so that
-//! all weeks fit on a single A4 page for that floor.
+//! Uses `longtable` so tables that exceed one A4 page break automatically
+//! with a repeated column header on every continuation page.
+//! Font size scales down automatically when a group has many rows.
 //!
 //! Determinism guarantee: identical snapshot → identical .tex bytes.
 
@@ -14,7 +15,7 @@ use crate::schedule::ScheduleSnapshot;
 
 const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \usepackage[a4paper, top=12mm, bottom=12mm, left=14mm, right=14mm]{geometry}
-\usepackage{tabularx}
+\usepackage{longtable}
 \usepackage{array}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
@@ -27,6 +28,9 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \setlength{\parindent}{0pt}
 \setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.3}
+% Remove longtable's default \bigskip spacing around the table.
+\setlength{\LTpre}{2pt}
+\setlength{\LTpost}{0pt}
 
 % Printable checkbox: a bordered square sized to match the line height.
 \newcommand{\checkbox}{\raisebox{0.5pt}{\framebox[4.5mm][c]{\rule{0pt}{3.5mm}}}}"#;
@@ -88,10 +92,12 @@ fn group_section(
     let (fsize, fskip) = font_size_for_rows(rows.len());
     let mut s = String::new();
 
-    // Open font-size group so scaling doesn't bleed past this section.
-    s.push_str(&format!("{{\\fontsize{{{fsize}}}{{{fskip}}}\\selectfont\n"));
+    // Set section font size without a grouping wrapper (longtable cannot be
+    // inside a TeX group).  The change persists until \clearpage or the next
+    // \fontsize\selectfont, which is fine since each section is on its own page.
+    s.push_str(&format!("\\fontsize{{{fsize}}}{{{fskip}}}\\selectfont\n"));
 
-    // Section heading: bold, black, with a rule underneath for visual separation.
+    // Section heading: bold, with a rule underneath.
     s.push_str(&format!(
         "{{\\fontsize{{14}}{{17}}\\selectfont\\bfseries {}}}\\\\\n",
         tex_esc(group_name),
@@ -106,48 +112,56 @@ fn group_section(
     ));
     s.push_str("\\vspace{2mm}\n\n");
 
-    // Column spec: Week | Dates | Area/Rooms | Responsible (flex) | ✓ | Notes
-    s.push_str("\\begin{tabularx}{\\linewidth}{|");
-    s.push_str(">{\\centering\\arraybackslash}p{13mm}|");
-    s.push_str(">{\\raggedright\\arraybackslash}p{28mm}|");
-    s.push_str(">{\\raggedright\\arraybackslash}p{36mm}|");
-    s.push_str(">{\\raggedright\\arraybackslash}X|");
-    s.push_str(">{\\centering\\arraybackslash}p{9mm}|");
-    s.push_str("p{26mm}|}\n");
+    // Column widths (total ≈ 182 mm = A4 210 mm − 28 mm margins):
+    //   13 + 28 + 35 + 55 + 9 + 24 = 164 mm content
+    //   + 6 cols × 2 × 4 pt tabcolsep ≈ 17 mm padding  ≈ 181 mm
+    let col_spec = concat!(
+        "|>{\\centering\\arraybackslash}p{13mm}",
+        "|>{\\raggedright\\arraybackslash}p{28mm}",
+        "|>{\\raggedright\\arraybackslash}p{35mm}",
+        "|>{\\raggedright\\arraybackslash}p{55mm}",
+        "|>{\\centering\\arraybackslash}p{9mm}",
+        "|p{24mm}|"
+    );
+    s.push_str(&format!("\\begin{{longtable}}{{{col_spec}}}\n"));
 
-    // Header row: bold black text, double rule above and below.
+    // ── First-page header ────────────────────────────────────────────────────
     s.push_str("\\hline\n");
-    s.push_str("\\textbf{Week} & ");
-    s.push_str("\\textbf{Dates} & ");
-    s.push_str("\\textbf{Area / Rooms} & ");
-    s.push_str("\\textbf{Responsible} & ");
-    s.push_str("$\\checkmark$ & ");
-    s.push_str("\\textbf{Notes} \\\\\n");
+    s.push_str("\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
+                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Notes} \\\\\n");
     s.push_str("\\hline\\hline\n");
+    s.push_str("\\endfirsthead\n");
 
-    // Data rows.
+    // ── Continuation header (repeated on every subsequent page) ──────────────
+    s.push_str(&format!(
+        "\\multicolumn{{6}}{{l}}{{\\small\\itshape {} (continued)}} \\\\\n",
+        tex_esc(group_name),
+    ));
+    s.push_str("\\hline\n");
+    s.push_str("\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
+                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Notes} \\\\\n");
+    s.push_str("\\hline\\hline\n");
+    s.push_str("\\endhead\n");
+
+    // ── Empty footer / last-footer (rows already end with \hline) ────────────
+    s.push_str("\\endfoot\n");
+    s.push_str("\\endlastfoot\n");
+
+    // ── Data rows ─────────────────────────────────────────────────────────────
     for a in rows.iter() {
         let is_current = (a.iso_year, a.iso_week) == cur_week;
 
-        // Wrap cell content in \textbf{} for the current week row.
-        let b = |text: String| -> String {
-            if is_current { format!("\\textbf{{{text}}}") } else { text }
-        };
-
-        // Week cell: bold week number, tiny year below.
-        let week_cell = format!(
-            "\\textbf{{{}}}{{\\newline{{\\tiny {}}}}}",
-            a.iso_week, a.iso_year,
-        );
-        s.push_str(&if is_current {
-            format!("\\textbf{{\\underline{{{}}}}}{{\\newline{{\\tiny {}}}}}", a.iso_week, a.iso_year)
-        } else {
-            week_cell
-        });
+        // Week cell: ">> WW" marker for current week (no bold — keep all rows
+        // visually uniform as requested).
+        let week_prefix = if is_current { ">> " } else { "" };
+        s.push_str(&format!(
+            "{}\\textbf{{{}}}{{\\newline{{\\tiny {}}}}}",
+            week_prefix, a.iso_week, a.iso_year,
+        ));
         s.push_str(" & ");
 
         // Date range.
-        s.push_str(&b(tex_esc(&a.week_label)));
+        s.push_str(&tex_esc(&a.week_label));
         s.push_str(" & ");
 
         // Area / rooms cell.
@@ -164,11 +178,11 @@ fn group_section(
             ),
             None => String::new(),
         };
-        s.push_str(&b(area));
+        s.push_str(&area);
         s.push_str(" & ");
 
         // Responsible.
-        s.push_str(&b(tex_esc(a.assignee_name())));
+        s.push_str(&tex_esc(a.assignee_name()));
         s.push_str(" & ");
 
         // Checkbox / tick.
@@ -181,7 +195,7 @@ fn group_section(
         s.push_str("\\hline\n");
     }
 
-    s.push_str("\\end{tabularx}\n\n");
+    s.push_str("\\end{longtable}\n\n");
 
     // Legend.
     s.push_str(
@@ -189,7 +203,6 @@ fn group_section(
          $\\square$ = pending \\quad $\\checkmark$ = done}\n"
     );
 
-    s.push_str("}\n"); // close font-size group
     s
 }
 
@@ -222,6 +235,9 @@ fn tex_esc(s: &str) -> String {
             '~'  => out.push_str(r"\textasciitilde{}"),
             '^'  => out.push_str(r"\textasciicircum{}"),
             '\\' => out.push_str(r"\textbackslash{}"),
+            // Unicode dashes: map to LaTeX ligatures (pdfLaTeX drops raw U+2013/U+2014).
+            '\u{2013}' => out.push_str("--"),   // en dash
+            '\u{2014}' => out.push_str("---"),  // em dash
             c    => out.push(c),
         }
     }
@@ -305,5 +321,16 @@ mod tests {
         assert_eq!(tex_esc("$price"), r"\$price");
         assert_eq!(tex_esc("a_b"), r"a\_b");
         assert_eq!(tex_esc("a#b"), r"a\#b");
+        assert_eq!(tex_esc("25 \u{2013} 31 May"), "25 -- 31 May");
+        assert_eq!(tex_esc("Mon\u{2014}Fri"), "Mon---Fri");
+    }
+
+    #[test]
+    fn uses_longtable_not_tabularx() {
+        let st  = make_state();
+        let sn  = build_schedule(&st, 1, 2);
+        let tex = render_tex(&sn);
+        assert!(tex.contains("longtable"), "must use longtable for page-breaking");
+        assert!(!tex.contains("tabularx"), "tabularx cannot break across pages");
     }
 }
