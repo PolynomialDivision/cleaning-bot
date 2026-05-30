@@ -56,6 +56,7 @@ async fn serve_ical(
     AxumState(app): AxumState<Arc<AppState>>,
 ) -> Response {
     let token = token_ics.trim_end_matches(".ics");
+    info!("iCal request: token_prefix={}", &token.chars().take(8).collect::<String>());
 
     let state = app.state.lock().await;
 
@@ -65,8 +66,10 @@ async fn serve_ical(
         .map(|ct| ct.person_id.clone());
 
     let Some(person_id) = person_id else {
+        info!("iCal request: token not found or revoked");
         return (StatusCode::NOT_FOUND, "Token not found or revoked.\n").into_response();
     };
+    info!("iCal request: serving feed for person {person_id}");
 
     // Build schedule snapshot (pure computation, no mutations).
     let interval = app.config.schedule.interval_weeks;
