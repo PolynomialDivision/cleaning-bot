@@ -32,8 +32,7 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \setlength{\LTpre}{2pt}
 \setlength{\LTpost}{0pt}
 
-% Printable checkbox: a bordered square sized to match the line height.
-\newcommand{\checkbox}{\raisebox{0.5pt}{\framebox[4.5mm][c]{\rule{0pt}{3.5mm}}}}"#;
+"#;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -185,11 +184,10 @@ fn group_section(
         s.push_str(&tex_esc(a.assignee_name()));
         s.push_str(" & ");
 
-        // Checkbox / tick.
+        // ✓ cell: show checkmark when done, leave empty when pending
+        // (the column borders provide writing space — no widget needed).
         if a.is_completed {
             s.push_str("$\\checkmark$");
-        } else {
-            s.push_str("\\checkbox");
         }
         s.push_str(" & \\\\\n");
         s.push_str("\\hline\n");
