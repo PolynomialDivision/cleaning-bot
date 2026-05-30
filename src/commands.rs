@@ -137,6 +137,29 @@ fn person_key(p: &Person) -> &str {
 /// After removing `person_id` from `group_id`, unassign any of their future
 /// stored slot assignments then rematerialize to fill the vacated weeks.
 ///
+/// When someone joins a group, clear ALL future slot assignments for that group
+/// and rematerialize.  This redistributes future weeks across the full member list.
+/// Without this, any assignments frozen before the new person joined stay unchanged.
+fn reset_and_rematerialize(
+    ctx: &BotContext,
+    state: &mut crate::state::State,
+    group_id: &str,
+) -> anyhow::Result<()> {
+    let (cur_y, cur_w) = current_iso_week();
+    // Drop all future assignments for this group — they'll be rebuilt with the full list.
+    state.slot_assignments.retain(|a| {
+        a.group_id != group_id
+            || a.iso_year < cur_y
+            || (a.iso_year == cur_y && a.iso_week < cur_w)
+    });
+    let interval = ctx.config.schedule.interval_weeks;
+    let weeks    = ctx.config.schedule.materialize_weeks as usize;
+    for ev in resolver::materialize(state, interval, weeks) {
+        state.apply_event(ev)?;
+    }
+    Ok(())
+}
+
 /// Must be called with `state` already locked, AFTER `PersonLeftGroup` is applied.
 async fn unassign_and_rematerialize(
     ctx: &BotContext,
@@ -528,13 +551,8 @@ async fn cmd_adduser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> R
     if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{mxid} is already in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
-    {
-        let interval = ctx.config.schedule.interval_weeks;
-        let weeks = ctx.config.schedule.materialize_weeks as usize;
-        let evs = resolver::materialize(&state, interval, weeks);
-        for ev in evs { state.apply_event(ev)?; }
-    }
+    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id: group_id.clone() })?;
+    reset_and_rematerialize(ctx, &mut state, &group_id)?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {mxid} to «{group_name}».")))
 }
@@ -586,13 +604,8 @@ async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
     if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{name} is already in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
-    {
-        let interval = ctx.config.schedule.interval_weeks;
-        let weeks = ctx.config.schedule.materialize_weeks as usize;
-        let evs = resolver::materialize(&state, interval, weeks);
-        for ev in evs { state.apply_event(ev)?; }
-    }
+    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id: group_id.clone() })?;
+    reset_and_rematerialize(ctx, &mut state, &group_id)?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {name} (no Matrix) to «{group_name}».")))
 }
