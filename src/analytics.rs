@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    domain::{GroupId, PersonId, SlotId},
+    domain::{AssignmentSource, GroupId, PersonId, SlotId},
     state::{State, SwapStatus, all_due_weeks_in_range, current_iso_week},
 };
 
@@ -44,6 +44,17 @@ pub enum DomainEvent {
     GroupDeleted { group_id: GroupId },
     SlotAdded    { group_id: GroupId, slot_id: SlotId, slot_name: String },
     SlotRemoved  { group_id: GroupId, slot_id: SlotId },
+    /// Frozen assignment: one person (or nobody) for one slot in one week.
+    /// Upserts — re-applying for the same key replaces the previous assignment.
+    SlotAssigned {
+        group_id:   GroupId,
+        slot_index: usize,
+        iso_year:   i32,
+        iso_week:   u32,
+        person_id:  Option<PersonId>,
+        #[serde(default)]
+        source:     AssignmentSource,
+    },
     RoomAdded    { group_id: GroupId, #[serde(default)] slot_id: Option<SlotId>, room_name: String },
     RoomRemoved  { group_id: GroupId, #[serde(default)] slot_id: Option<SlotId>, room_name: String },
 

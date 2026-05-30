@@ -33,6 +33,7 @@ mod format;
 mod http;
 mod ical;
 mod pdf;
+mod resolver;
 mod schedule;
 mod scheduler;
 mod state;
@@ -90,6 +91,17 @@ async fn main() -> Result<()> {
     if st.created_at.is_none() {
         st.created_at = Some(chrono::Utc::now());
         st.save(&state_path).await?;
+    }
+
+    // Materialize future assignments (idempotent — skips already-stored weeks).
+    {
+        let mat_events = resolver::materialize(&st, config.schedule.interval_weeks, config.schedule.materialize_weeks as usize);
+        let n = mat_events.len();
+        for ev in mat_events { st.apply_event(ev).ok(); }
+        if n > 0 {
+            st.save(&state_path).await?;
+            tracing::info!("Materialized {n} slot assignments.");
+        }
     }
 
     // Validate on startup — log issues but never abort.

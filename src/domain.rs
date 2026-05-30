@@ -159,6 +159,33 @@ pub fn verify_calendar_token(token_hex: &str, stored_hash: &str) -> bool {
     hex::encode(Sha256::digest(&raw)) == stored_hash
 }
 
+// ── Slot assignment resolver types ───────────────────────────────────────────
+
+/// How a `SlotAssignment` was created.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentSource {
+    #[default]
+    RoundRobin,
+    Manual,
+}
+
+/// A frozen assignment: one person (or nobody) is responsible for one group/slot
+/// in one specific due week.  Once stored, never overwritten except via an
+/// explicit `SlotAssigned` event (e.g. when the assigned person leaves).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SlotAssignment {
+    pub group_id:   GroupId,
+    /// 0 for single-slot groups; slot index into `CleaningGroup.slots` for multi-slot.
+    pub slot_index: usize,
+    pub iso_year:   i32,
+    pub iso_week:   u32,
+    /// `None` = unassigned (person left or group has no members).
+    pub person_id:  Option<PersonId>,
+    #[serde(default)]
+    pub source:     AssignmentSource,
+}
+
 // ── Deterministic assignment UID ──────────────────────────────────────────────
 
 /// Fixed namespace UUID for this bot — never changes.

@@ -3,7 +3,7 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, path::Path};
 
-use crate::domain::{CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotId};
+use crate::domain::{AssignmentSource, CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId};
 
 // ── Scheduling records ────────────────────────────────────────────────────────
 
@@ -99,6 +99,10 @@ pub struct State {
     #[serde(default)]
     pub calendar_tokens: Vec<CalendarToken>,
 
+    /// Frozen per-slot assignments produced by the resolver.
+    /// These are the authoritative source for who cleans which slot each week.
+    #[serde(default)]
+    pub slot_assignments: Vec<SlotAssignment>,
     #[serde(default)]
     pub completions:    Vec<Completion>,
     #[serde(default)]
@@ -198,6 +202,22 @@ impl State {
                 let before = g.slots.len();
                 g.slots.retain(|s| &s.id != slot_id);
                 g.slots.len() < before
+            }
+            E::SlotAssigned { group_id, slot_index, iso_year, iso_week, person_id, source } => {
+                // Upsert: replace any existing assignment for this (group, slot, year, week).
+                self.slot_assignments.retain(|a| {
+                    !(a.group_id == *group_id && a.slot_index == *slot_index
+                        && a.iso_year == *iso_year && a.iso_week == *iso_week)
+                });
+                self.slot_assignments.push(SlotAssignment {
+                    group_id:   group_id.clone(),
+                    slot_index: *slot_index,
+                    iso_year:   *iso_year,
+                    iso_week:   *iso_week,
+                    person_id:  person_id.clone(),
+                    source:     source.clone(),
+                });
+                true
             }
             E::RoomAdded { group_id, slot_id, room_name } => {
                 let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
@@ -519,19 +539,35 @@ impl State {
     }
 
     /// For single-slot groups (or swap-overridden): one responsible person.
+    /// Checks stored `slot_assignments` first (stable); falls back to the rotation
+    /// formula only when no materialized assignment exists yet.
     pub fn responsible_person(&self, group: &CleaningGroup, year: i32, week: u32, interval: u32) -> Option<&Person> {
+        // 1. Frozen stored assignment (stable across membership changes).
+        if let Some(a) = self.slot_assignments.iter().find(|a| {
+            a.group_id == group.id && a.slot_index == 0 && a.iso_year == year && a.iso_week == week
+        }) {
+            return a.person_id.as_ref().and_then(|pid| self.person_by_id(pid));
+        }
         if group.member_ids.is_empty() { return None; }
+        // 2. Swap override.
         if let Some(swap) = self.swap_requests.iter().find(|s| {
             s.group_id == group.id && s.iso_year == year && s.iso_week == week && s.status == SwapStatus::Accepted
         }) {
             return self.person_by_matrix_id(&swap.target);
         }
+        // 3. On-the-fly formula (used before first materialization).
         let idx = self.rotation_index(group, year, week, interval, 0);
         self.person_by_id(&group.member_ids[idx])
     }
 
     /// For multi-slot groups: the person assigned to `slot_index` this cycle.
+    /// Checks stored `slot_assignments` first; falls back to the rotation formula.
     pub fn slot_assignee(&self, group: &CleaningGroup, slot_index: usize, year: i32, week: u32, interval: u32) -> Option<&Person> {
+        if let Some(a) = self.slot_assignments.iter().find(|a| {
+            a.group_id == group.id && a.slot_index == slot_index && a.iso_year == year && a.iso_week == week
+        }) {
+            return a.person_id.as_ref().and_then(|pid| self.person_by_id(pid));
+        }
         if group.member_ids.is_empty() { return None; }
         let idx = self.rotation_index(group, year, week, interval, slot_index);
         self.person_by_id(&group.member_ids[idx])

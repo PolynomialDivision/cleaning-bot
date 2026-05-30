@@ -4,9 +4,9 @@ use matrix_sdk::{Room, ruma::{events::room::message::RoomMessageEventContent, Ow
 use uuid::Uuid;
 
 use crate::{
-    BotContext, format,
+    BotContext, format, resolver,
     analytics::{self, DomainEvent},
-    domain::{new_calendar_token, CalendarToken, CleaningGroup, Person},
+    domain::{AssignmentSource, new_calendar_token, CalendarToken, CleaningGroup, Person},
     schedule::build_schedule,
     state::{
         SwapStatus,
@@ -121,6 +121,44 @@ fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
 /// Returns the MXID or display_name depending on whether the person has Matrix.
 fn person_key(p: &Person) -> &str {
     p.matrix_id.as_deref().unwrap_or(&p.display_name)
+}
+
+/// After removing `person_id` from `group_id`, unassign any of their future
+/// stored slot assignments then rematerialize to fill the vacated weeks.
+///
+/// Must be called with `state` already locked, AFTER `PersonLeftGroup` is applied.
+async fn unassign_and_rematerialize(
+    ctx: &BotContext,
+    state: &mut crate::state::State,
+    person_id: &str,
+    group_id: &str,
+) -> anyhow::Result<()> {
+    let (cur_y, cur_w) = current_iso_week();
+    let future: Vec<(usize, i32, u32)> = state.slot_assignments.iter()
+        .filter(|a| {
+            a.group_id == group_id
+                && a.person_id.as_deref() == Some(person_id)
+                && (a.iso_year > cur_y || (a.iso_year == cur_y && a.iso_week >= cur_w))
+        })
+        .map(|a| (a.slot_index, a.iso_year, a.iso_week))
+        .collect();
+
+    for (si, y, w) in future {
+        state.apply_event(DomainEvent::SlotAssigned {
+            group_id:   group_id.to_owned(),
+            slot_index: si,
+            iso_year:   y,
+            iso_week:   w,
+            person_id:  None,
+            source:     AssignmentSource::RoundRobin,
+        })?;
+    }
+
+    let interval = ctx.config.schedule.interval_weeks;
+    let weeks = ctx.config.schedule.materialize_weeks as usize;
+    let evs = resolver::materialize(state, interval, weeks);
+    for ev in evs { state.apply_event(ev)?; }
+    Ok(())
 }
 
 /// Fetch Matrix display names for all known Matrix users and update state.
@@ -446,7 +484,8 @@ async fn cmd_leavefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     if !state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("You are not in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonLeftGroup { person_id, group_id })?;
+    state.apply_event(DomainEvent::PersonLeftGroup { person_id: person_id.clone(), group_id: group_id.clone() })?;
+    unassign_and_rematerialize(ctx, &mut state, &person_id, &group_id).await?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Left «{group_name}».")))
 }
@@ -479,6 +518,12 @@ async fn cmd_adduser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> R
         return Ok(Some(format!("{mxid} is already in «{group_name}».")));
     }
     state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
+    {
+        let interval = ctx.config.schedule.interval_weeks;
+        let weeks = ctx.config.schedule.materialize_weeks as usize;
+        let evs = resolver::materialize(&state, interval, weeks);
+        for ev in evs { state.apply_event(ev)?; }
+    }
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {mxid} to «{group_name}».")))
 }
@@ -503,7 +548,8 @@ async fn cmd_removeuser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     if !state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{query} is not in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonLeftGroup { person_id, group_id })?;
+    state.apply_event(DomainEvent::PersonLeftGroup { person_id: person_id.clone(), group_id: group_id.clone() })?;
+    unassign_and_rematerialize(ctx, &mut state, &person_id, &group_id).await?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Removed {query} from «{group_name}».")))
 }
@@ -530,6 +576,12 @@ async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
         return Ok(Some(format!("{name} is already in «{group_name}».")));
     }
     state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
+    {
+        let interval = ctx.config.schedule.interval_weeks;
+        let weeks = ctx.config.schedule.materialize_weeks as usize;
+        let evs = resolver::materialize(&state, interval, weeks);
+        for ev in evs { state.apply_event(ev)?; }
+    }
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {name} (no Matrix) to «{group_name}».")))
 }
@@ -554,7 +606,8 @@ async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str])
     if !state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{query} is not in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonLeftGroup { person_id, group_id })?;
+    state.apply_event(DomainEvent::PersonLeftGroup { person_id: person_id.clone(), group_id: group_id.clone() })?;
+    unassign_and_rematerialize(ctx, &mut state, &person_id, &group_id).await?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Removed {query} from «{group_name}».")))
 }

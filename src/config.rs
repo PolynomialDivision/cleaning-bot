@@ -1,6 +1,15 @@
 use serde::Deserialize;
 pub use mxbot_common::config::{EncryptionStrategy, MatrixConfig};
 
+/// Strategy used by the slot resolver to fill empty assignments.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FillStrategy {
+    #[default]
+    RoundRobin,
+    LeastLoadedFirst,
+}
+
 #[derive(Deserialize)]
 pub struct Config {
     pub matrix: MatrixConfig,
@@ -42,6 +51,12 @@ pub struct ScheduleConfig {
     /// Weekday to post a weekly stats summary (0 = Mon … 6 = Sun).
     /// Omit or comment out to disable the automatic summary.
     pub summary_weekday: Option<u8>,
+    /// Assignment fill strategy.
+    #[serde(default)]
+    pub fill_strategy: FillStrategy,
+    /// How many due weeks ahead to pre-materialize assignments.  Default: 26 (≈6 months).
+    #[serde(default = "default_materialize_weeks")]
+    pub materialize_weeks: u32,
 }
 
 /// Optional HTTP server that serves per-person iCal feeds.
@@ -56,6 +71,7 @@ pub struct ICalServerConfig {
 }
 
 fn default_interval_weeks() -> u32 { 1 }
+fn default_materialize_weeks() -> u32 { 26 }
 fn default_reminder_weekday() -> u8 { 0 }       // Monday
 fn default_final_reminder_weekday() -> u8 { 6 } // Sunday
 fn default_timezone() -> String { "UTC".to_owned() }
