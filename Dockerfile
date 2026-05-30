@@ -24,7 +24,7 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cleaning-bot-target,target=/build/target \
-    cargo chef cook --release --locked --recipe-path recipe.json
+    cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
 RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git \
@@ -35,12 +35,19 @@ RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git \
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
-    chromium \
-    fonts-liberation \
+    tectonic \
     && rm -rf /var/lib/apt/lists/*
+
+# Pre-warm the tectonic package cache so PDF generation works fully offline
+# at runtime.  tectonic downloads required LaTeX packages here (during build)
+# and stores them in /root/.cache/Tectonic, which is baked into this layer.
+COPY docker/tex-warmup.tex /tmp/tex-warmup.tex
+RUN tectonic --outdir /tmp /tmp/tex-warmup.tex \
+    && rm /tmp/tex-warmup.tex /tmp/tex-warmup.pdf
 
 COPY --from=builder /cleaning-bot /usr/local/bin/cleaning-bot
 
