@@ -1533,7 +1533,7 @@ async fn cmd_pdf(
     // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99".
     refresh_display_names(ctx, room).await;
 
-    let (html, file_name) = {
+    let (tex, file_name) = {
         let state    = ctx.state.lock().await;
         let interval = ctx.config.schedule.interval_weeks;
         let mut snapshot = build_schedule(&state, interval, n);
@@ -1548,7 +1548,7 @@ async fn cmd_pdf(
                 )),
             }
         }
-        let html = crate::pdf::render_pdf(&snapshot);
+        let tex = crate::pdf::render_tex(&snapshot);
         // Build filename: cleaning-plan-KW{first}-KW{last}.pdf
         let weeks_range = {
             let first = snapshot.assignments.first();
@@ -1565,14 +1565,14 @@ async fn cmd_pdf(
             Some(name) => format!("cleaning-plan-{}_{}.pdf", name.to_lowercase().replace(' ', "_"), weeks_range),
             None       => format!("cleaning-plan-{weeks_range}.pdf"),
         };
-        (html, file_name)
+        (tex, file_name)
     };
 
-    // Render HTML → PDF via headless Chromium.
-    let pdf_bytes = match crate::pdf_renderer::html_to_pdf(&html).await {
+    // Render .tex → PDF via tectonic.
+    let pdf_bytes = match crate::pdf_renderer::tex_to_pdf(&tex).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!("Chromium PDF render failed: {e}");
+            tracing::warn!("tectonic render failed: {e}");
             return Ok(Some(format::mentionify(&format!("❌ PDF render failed: {e}"))));
         }
     };

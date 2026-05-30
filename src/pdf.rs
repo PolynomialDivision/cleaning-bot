@@ -1,23 +1,50 @@
-//! PDF/HTML schedule rendering.
+//! LaTeX schedule renderer.
 //!
-//! `render_pdf` is a pure function over a `ScheduleSnapshot`.
+//! `render_tex` is a pure function over a `ScheduleSnapshot`.
 //!
-//! Layout: one `<section>` per cleaning group, each section targets one A4 page.
-//! Sections are auto-zoomed so the week rows fit the page; if there are too many
-//! weeks to stay legible the content simply overflows to a second page for that group.
+//! Layout: one section per cleaning group, separated by `\clearpage`.
+//! Font size scales down automatically when a group has many rows so that
+//! all weeks fit on a single A4 page for that floor.
 //!
-//! Determinism guarantee: identical snapshot → identical HTML bytes.
+//! Determinism guarantee: identical snapshot → identical .tex bytes.
 
 use crate::schedule::ScheduleSnapshot;
 
-/// Approximate layout constants for one A4 page (portrait, 14mm margins).
-/// The usable height excludes section header (~20mm), table header (~8mm),
-/// and legend (~8mm) — leaving ~213mm for data rows.
-const A4_USABLE_MM: f32 = 213.0;
-const ROW_HEIGHT_MM: f32 = 7.0;  // at zoom=1.0 with 1.8mm cell padding
-const MIN_ZOOM: f32      = 0.62; // ~8.5pt effective body text — still legible
+// ── LaTeX preamble ────────────────────────────────────────────────────────────
 
-pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
+const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
+\usepackage[a4paper, top=12mm, bottom=12mm, left=14mm, right=14mm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage[table]{xcolor}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{microtype}
+\usepackage{amssymb}
+\pagenumbering{gobble}
+\setlength{\parindent}{0pt}
+\setlength{\tabcolsep}{3.5pt}
+
+\definecolor{headerblue}{RGB}{44,95,138}
+\definecolor{rowgray}{RGB}{247,247,247}
+\definecolor{donebg}{RGB}{234,246,234}
+\definecolor{currentbg}{RGB}{255,248,225}
+\definecolor{metagray}{RGB}{102,102,102}
+\definecolor{roomfg}{RGB}{153,153,153}
+\definecolor{yearfg}{RGB}{170,170,170}
+\definecolor{legendfg}{RGB}{187,187,187}
+\definecolor{donegreen}{RGB}{46,125,50}
+
+% Printable checkbox: a bordered square sized to match the line height.
+\newcommand{\checkbox}{\raisebox{0.5pt}{\framebox[4.5mm][c]{\rule{0pt}{3.5mm}}}}"#;
+
+// ── Public entry point ────────────────────────────────────────────────────────
+
+pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
     let cur_week = {
         let d = chrono::Utc::now().date_naive();
         use chrono::Datelike;
@@ -25,7 +52,7 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
     };
     let generated = snapshot.state_timestamp.format("%d %b %Y").to_string();
 
-    // Collect unique groups in first-appearance order.
+    // Groups in first-appearance order.
     let mut group_order: Vec<(String, String)> = Vec::new();
     for a in &snapshot.assignments {
         if !group_order.iter().any(|(id, _)| id == &a.group_id) {
@@ -33,213 +60,178 @@ pub fn render_pdf(snapshot: &ScheduleSnapshot) -> String {
         }
     }
 
-    let mut sections = String::new();
-
-    for (group_id, group_name) in &group_order {
-        let group_rows: Vec<_> = snapshot.assignments.iter()
+    let mut body = String::new();
+    for (gi, (group_id, group_name)) in group_order.iter().enumerate() {
+        let rows: Vec<_> = snapshot.assignments.iter()
             .filter(|a| &a.group_id == group_id)
             .collect();
 
-        // Auto-zoom so rows fit on one A4 page.
-        let row_count = group_rows.len();
-        let max_at_1x = (A4_USABLE_MM / ROW_HEIGHT_MM) as usize;
-        let zoom: f32 = if row_count <= max_at_1x {
-            1.0
-        } else {
-            (max_at_1x as f32 / row_count as f32).max(MIN_ZOOM)
-        };
+        if rows.is_empty() { continue; }
 
-        // Date range subtitle.
-        let date_range = match (group_rows.first(), group_rows.last()) {
-            (Some(f), Some(l)) if f.week_monday != l.week_sunday => {
-                format!("{} \u{2013} {}",
+        let date_range = match (rows.first(), rows.last()) {
+            (Some(f), Some(l)) if f.week_monday != l.week_sunday =>
+                format!("{} -- {}",
                     f.week_monday.format("%d %b %Y"),
-                    l.week_sunday.format("%d %b %Y"))
-            }
+                    l.week_sunday.format("%d %b %Y")),
             (Some(f), _) => f.week_label.clone(),
             _ => String::new(),
         };
 
-        let mut tbody = String::new();
-        for a in &group_rows {
-            let is_current = (a.iso_year, a.iso_week) == cur_week;
-
-            let area = match &a.slot_name {
-                Some(slot) => {
-                    if a.room_names.is_empty() {
-                        e(slot)
-                    } else {
-                        format!("{}<span class=\"rooms\">{}</span>",
-                            e(slot), e(&a.room_names.join(", ")))
-                    }
-                }
-                None => {
-                    if a.room_names.is_empty() {
-                        String::new()
-                    } else {
-                        format!("<span class=\"rooms\">{}</span>",
-                            e(&a.room_names.join(", ")))
-                    }
-                }
-            };
-
-            let check = if a.is_completed {
-                "<span class=\"check-done\">&#x2713;</span>"
-            } else {
-                "<span class=\"check-box\"></span>"
-            };
-
-            tbody.push_str(&format!(
-                "<tr class=\"{cls}\">\
-                  <td class=\"col-week\"><span class=\"kw\">{wk}</span><span class=\"col-year\">{yr}</span></td>\
-                  <td class=\"col-dates\">{dates}</td>\
-                  <td class=\"col-area\">{area}</td>\
-                  <td class=\"col-name\">{name}</td>\
-                  <td class=\"col-check\">{check}</td>\
-                  <td class=\"col-notes\"></td>\
-                </tr>\n",
-                cls   = if a.is_completed { "done" } else if is_current { "current" } else { "" },
-                wk    = a.iso_week,
-                yr    = a.iso_year,
-                dates = e(&a.week_label),
-                area  = area,
-                name  = e(a.assignee_name()),
-                check = check,
-            ));
-        }
-
-        sections.push_str(&format!(
-            "<section class=\"group-section\" style=\"zoom:{zoom:.2}\">\n\
-              <div class=\"section-header\">\
-                <h2>{name}</h2>\
-                <p class=\"meta\">{range} &nbsp;&middot;&nbsp; Every {interval} week(s) &nbsp;&middot;&nbsp; Generated {gen}</p>\
-              </div>\n\
-              <table>\n\
-                <thead><tr>\
-                  <th class=\"col-week\">Week</th>\
-                  <th class=\"col-dates\">Dates</th>\
-                  <th class=\"col-area\">Area / Rooms</th>\
-                  <th class=\"col-name\">Responsible</th>\
-                  <th class=\"col-check\">&#x2713;</th>\
-                  <th class=\"col-notes\">Notes</th>\
-                </tr></thead>\n\
-                <tbody>\n{tbody}</tbody>\n\
-              </table>\n\
-              <p class=\"legend\">&#x25A1; = pending &nbsp;&middot;&nbsp; &#x2713; = done</p>\n\
-            </section>\n",
-            name     = e(group_name),
-            range    = date_range,
-            interval = snapshot.interval_weeks,
-            gen      = generated,
-            zoom     = zoom,
-            tbody    = tbody,
+        if gi > 0 { body.push_str("\n\\clearpage\n\n"); }
+        body.push_str(&group_section(
+            group_name, &date_range, snapshot.interval_weeks, &generated, &rows, cur_week,
         ));
     }
 
-    format!(r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Cleaning Schedule</title>
-<style>
-  @page {{ size: A4 portrait; margin: 14mm; }}
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: 'Helvetica Neue', Arial, Helvetica, sans-serif; color: #1a1a1a; background: #fff; }}
-
-  .group-section {{ page-break-after: always; }}
-  .group-section:last-child {{ page-break-after: auto; }}
-
-  /* Section header: coloured left border + light background */
-  .section-header {{
-    border-left: 4px solid #2c5f8a;
-    padding: 2.5mm 4mm;
-    margin-bottom: 3mm;
-    background: #f4f8fb;
-  }}
-  h2 {{ font-size: 13pt; font-weight: 700; color: #1a3a52; }}
-  p.meta {{ font-size: 7.5pt; color: #666; margin-top: 1mm; }}
-
-  table {{ width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 1mm; }}
-
-  /* Dark blue header band */
-  thead tr {{ background: #2c5f8a; }}
-  th {{
-    padding: 2mm 2.5mm;
-    font-size: 7pt;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    color: #fff;
-    text-align: left;
-    border: none;
-  }}
-
-  td {{
-    padding: 1.8mm 2.5mm;
-    font-size: 9pt;
-    border: none;
-    border-bottom: 1px solid #e8e8e8;
-    vertical-align: middle;
-    line-height: 1.3;
-    overflow: hidden;
-  }}
-
-  /* Alternating row shading */
-  tbody tr:nth-child(odd)  {{ background: #fff; }}
-  tbody tr:nth-child(even) {{ background: #f7f7f7; }}
-  tr.done    {{ background: #eaf6ea !important; }}
-  tr.current {{ background: #fff8e1 !important; }}
-
-  /* Column widths */
-  .col-week  {{ width: 11mm; text-align: center; }}
-  .kw        {{ display: block; font-weight: 700; font-size: 9.5pt; }}
-  .col-year  {{ display: block; font-size: 6pt; color: #999; font-weight: 400; }}
-  .col-dates {{ width: 27mm; font-size: 8pt; color: #555; }}
-  .col-area  {{ width: 40mm; font-size: 8.5pt; }}
-  .col-name  {{ font-size: 9.5pt; font-weight: 500; }}
-  .col-check {{ width: 10mm; text-align: center; }}
-  .col-notes {{ width: 32mm; }}
-
-  .rooms {{ display: block; color: #999; font-size: 7pt; margin-top: 0.5mm; }}
-
-  /* Checkbox: empty bordered square (pending) or green tick (done) */
-  .check-box {{
-    display: inline-block;
-    width: 5mm;
-    height: 5mm;
-    border: 1.5px solid #555;
-    border-radius: 1px;
-    vertical-align: middle;
-  }}
-  .check-done {{ font-size: 11pt; color: #2e7d32; vertical-align: middle; line-height: 1; }}
-
-  p.legend {{ font-size: 6.5pt; color: #bbb; margin-top: 2.5mm; text-align: right; }}
-
-  @media print {{
-    .group-section           {{ page-break-after: always; }}
-    .group-section:last-child {{ page-break-after: auto; }}
-    .section-header          {{ background: #f4f8fb !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    thead tr                 {{ background: #2c5f8a !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    th                       {{ color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    tbody tr:nth-child(even) {{ background: #f7f7f7 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    tr.done                  {{ background: #eaf6ea !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    tr.current               {{ background: #fff8e1 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    .check-done              {{ color: #2e7d32 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-  }}
-</style>
-</head>
-<body>
-{sections}</body>
-</html>"#,
-        sections = sections,
-    )
+    format!("{PREAMBLE}\n\n\\begin{{document}}\n{body}\n\\end{{document}}\n")
 }
 
-fn e(s: &str) -> String {
-    s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
+// ── Per-group section ─────────────────────────────────────────────────────────
+
+fn group_section(
+    group_name: &str,
+    date_range: &str,
+    interval:   u32,
+    generated:  &str,
+    rows:       &[&crate::schedule::AssignmentInstance],
+    cur_week:   (i32, u32),
+) -> String {
+    let (fsize, fskip) = font_size_for_rows(rows.len());
+    let mut s = String::new();
+
+    // Open font-size group so scaling doesn't bleed past this section.
+    s.push_str(&format!("{{\\fontsize{{{fsize}}}{{{fskip}}}\\selectfont\n"));
+
+    // Section heading.
+    s.push_str(&format!(
+        "{{\\fontsize{{14}}{{17}}\\selectfont\\bfseries\\color{{headerblue}} {}}}\\\\\n",
+        tex_esc(group_name),
+    ));
+
+    // Subtitle: date range · interval · generated.
+    s.push_str(&format!(
+        "{{\\fontsize{{7.5}}{{9.5}}\\selectfont\\color{{metagray}} \
+         {} $\\cdot$ Every {} week(s) $\\cdot$ Generated {}}}\n",
+        tex_esc(date_range), interval, tex_esc(generated),
+    ));
+    s.push_str("\\vspace{2.5mm}\n\n");
+
+    // Column spec: Week | Dates | Area/Rooms | Responsible (flex) | ✓ | Notes
+    s.push_str("\\begin{tabularx}{\\linewidth}{\n");
+    s.push_str("  >{\\centering\\arraybackslash}p{13mm}\n");
+    s.push_str("  >{\\raggedright\\arraybackslash}p{28mm}\n");
+    s.push_str("  >{\\raggedright\\arraybackslash}p{36mm}\n");
+    s.push_str("  >{\\raggedright\\arraybackslash}X\n");
+    s.push_str("  >{\\centering\\arraybackslash}p{9mm}\n");
+    s.push_str("  p{26mm}\n");
+    s.push_str("}\n");
+
+    // Header row (blue background, white text).
+    s.push_str("\\rowcolor{headerblue}\n");
+    s.push_str("{\\color{white}\\textbf{Week}} & ");
+    s.push_str("{\\color{white}\\textbf{Dates}} & ");
+    s.push_str("{\\color{white}\\textbf{Area / Rooms}} & ");
+    s.push_str("{\\color{white}\\textbf{Responsible}} & ");
+    s.push_str("{\\color{white}$\\checkmark$} & ");
+    s.push_str("{\\color{white}\\textbf{Notes}} \\\\\n");
+
+    // Data rows.
+    for (i, a) in rows.iter().enumerate() {
+        let is_current = (a.iso_year, a.iso_week) == cur_week;
+
+        let bg = if a.is_completed   { "donebg"    }
+                 else if is_current  { "currentbg" }
+                 else if i % 2 == 1 { "rowgray"   }
+                 else                { "white"     };
+
+        s.push_str(&format!("\\rowcolor{{{bg}}}\n"));
+
+        // Week cell: bold week number, tiny year below.
+        s.push_str(&format!(
+            "\\textbf{{{}}}{{\\newline{{\\tiny\\color{{yearfg}}{}}}}}",
+            a.iso_week, a.iso_year,
+        ));
+        s.push_str(" & ");
+
+        // Date range.
+        s.push_str(&tex_esc(&a.week_label));
+        s.push_str(" & ");
+
+        // Area / rooms cell.
+        let area = match &a.slot_name {
+            Some(slot) if !a.room_names.is_empty() => format!(
+                "{}\\newline{{\\tiny\\color{{roomfg}}{}}}",
+                tex_esc(slot),
+                tex_esc(&a.room_names.join(", ")),
+            ),
+            Some(slot) => tex_esc(slot),
+            None if !a.room_names.is_empty() => format!(
+                "{{\\tiny\\color{{roomfg}}{}}}",
+                tex_esc(&a.room_names.join(", ")),
+            ),
+            None => String::new(),
+        };
+        s.push_str(&area);
+        s.push_str(" & ");
+
+        // Responsible.
+        s.push_str(&tex_esc(a.assignee_name()));
+        s.push_str(" & ");
+
+        // Checkbox / tick.
+        if a.is_completed {
+            s.push_str("{\\textcolor{donegreen}{$\\checkmark$}}");
+        } else {
+            s.push_str("\\checkbox");
+        }
+        s.push_str(" & \\\\\n");
+    }
+
+    s.push_str("\\end{tabularx}\n\n");
+
+    // Legend.
+    s.push_str(
+        "{\\fontsize{6.5}{8}\\selectfont\\color{legendfg}\\hfill \
+         $\\square$ = pending \\quad $\\checkmark$ = done}\n"
+    );
+
+    s.push_str("}\n"); // close font-size group
+    s
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Select LaTeX font size based on row count so all rows fit on one A4 page.
+///
+/// Returns (font_size_pt, baseline_skip_pt).
+fn font_size_for_rows(n: usize) -> (&'static str, &'static str) {
+    match n {
+        0..=25 => ("10", "13"),
+        26..=34 => ("9",  "11"),
+        35..=45 => ("8",  "10"),
+        _       => ("7",  "9"),
+    }
+}
+
+/// Escape a string for safe use in LaTeX body text.
+fn tex_esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '&'  => out.push_str(r"\&"),
+            '%'  => out.push_str(r"\%"),
+            '$'  => out.push_str(r"\$"),
+            '#'  => out.push_str(r"\#"),
+            '_'  => out.push_str(r"\_"),
+            '{'  => out.push_str(r"\{"),
+            '}'  => out.push_str(r"\}"),
+            '~'  => out.push_str(r"\textasciitilde{}"),
+            '^'  => out.push_str(r"\textasciicircum{}"),
+            '\\' => out.push_str(r"\textbackslash{}"),
+            c    => out.push(c),
+        }
+    }
+    out
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -268,28 +260,29 @@ mod tests {
     }
 
     #[test]
-    fn pdf_output_is_deterministic() {
+    fn tex_output_is_deterministic() {
         let st  = make_state();
         let sn1 = build_schedule(&st, 1, 4);
         let sn2 = build_schedule(&st, 1, 4);
-        assert_eq!(render_pdf(&sn1), render_pdf(&sn2));
+        assert_eq!(render_tex(&sn1), render_tex(&sn2));
     }
 
     #[test]
-    fn pdf_contains_group_name() {
+    fn tex_contains_group_name() {
         let st  = make_state();
         let sn  = build_schedule(&st, 1, 2);
-        let html = render_pdf(&sn);
-        assert!(html.contains("Hallway"), "group name should appear in PDF");
+        let tex = render_tex(&sn);
+        assert!(tex.contains("Hallway"), "group name must appear in .tex output");
     }
 
     #[test]
-    fn pdf_title_is_english() {
-        let st   = make_state();
-        let sn   = build_schedule(&st, 1, 2);
-        let html = render_pdf(&sn);
-        assert!(html.contains("<title>Cleaning Schedule</title>"));
-        assert!(!html.contains("Putzplan"));
+    fn tex_column_headers_are_english() {
+        let st  = make_state();
+        let sn  = build_schedule(&st, 1, 2);
+        let tex = render_tex(&sn);
+        assert!(tex.contains("Responsible"), "column headers must be in English");
+        assert!(tex.contains("Area / Rooms"));
+        assert!(!tex.contains("Putzplan"));
     }
 
     #[test]
@@ -304,10 +297,19 @@ mod tests {
             g.member_ids.push(pid);
             st.cleaning_groups.push(g);
         }
-        let sn   = build_schedule(&st, 1, 2);
-        let html = render_pdf(&sn);
-        assert_eq!(html.matches("<section class=\"group-section\"").count(), 2);
-        assert!(html.contains("Floor A"));
-        assert!(html.contains("Floor B"));
+        let sn  = build_schedule(&st, 1, 2);
+        let tex = render_tex(&sn);
+        assert!(tex.contains("Floor A"));
+        assert!(tex.contains("Floor B"));
+        assert!(tex.contains(r"\clearpage"), "groups must be separated by \\clearpage");
+    }
+
+    #[test]
+    fn special_chars_are_escaped() {
+        assert_eq!(tex_esc("a & b"), r"a \& b");
+        assert_eq!(tex_esc("100%"), r"100\%");
+        assert_eq!(tex_esc("$price"), r"\$price");
+        assert_eq!(tex_esc("a_b"), r"a\_b");
+        assert_eq!(tex_esc("a#b"), r"a\#b");
     }
 }

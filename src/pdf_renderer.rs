@@ -1,66 +1,47 @@
-//! Headless Chromium → PDF renderer.
+//! LaTeX → PDF renderer via tectonic.
 //!
-//! Takes an HTML string, writes it to a temp file, invokes Chromium with
-//! `--print-to-pdf`, and returns the raw PDF bytes.
+//! Takes a `.tex` string, writes it to a temp directory, invokes tectonic,
+//! and returns the raw PDF bytes.
 //!
-//! Docker-safe flags used: --no-sandbox, --disable-dev-shm-usage, --disable-gpu.
+//! The first call in a freshly built Docker image may take a few seconds while
+//! tectonic reads its pre-cached package bundle.  Subsequent calls are fast.
 
 use anyhow::{Context, Result};
 
-const CHROME_CANDIDATES: &[&str] = &[
-    "chromium",
-    "chromium-browser",
-    "google-chrome",
-    "google-chrome-stable",
-];
-
-/// Convert an HTML string to a PDF byte vector using headless Chromium.
+/// Convert a LaTeX string to a PDF byte vector using tectonic.
 ///
-/// The caller is responsible for ensuring Chromium is installed.
-/// Returns an error if no Chromium binary is found or if Chromium exits non-zero.
-pub async fn html_to_pdf(html: &str) -> Result<Vec<u8>> {
-    let chrome = find_chrome().context(
-        "No Chromium binary found. Install chromium, chromium-browser, or google-chrome."
-    )?;
-
+/// tectonic must be on PATH.  Returns an error if the binary is not found
+/// or exits non-zero.
+pub async fn tex_to_pdf(tex: &str) -> Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("Failed to create temp dir")?;
-    let html_path = tmp.path().join("schedule.html");
-    let pdf_path  = tmp.path().join("schedule.pdf");
+    let tex_path = tmp.path().join("schedule.tex");
+    let pdf_path = tmp.path().join("schedule.pdf");
 
-    tokio::fs::write(&html_path, html.as_bytes()).await
-        .context("Failed to write temp HTML")?;
+    tokio::fs::write(&tex_path, tex.as_bytes()).await
+        .context("Failed to write temp .tex file")?;
 
-    let out = tokio::process::Command::new(&chrome)
+    let out = tokio::process::Command::new("tectonic")
         .args([
-            "--headless=new",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--run-all-compositor-stages-before-draw",
-            "--print-to-pdf-no-header",
-            &format!("--print-to-pdf={}", pdf_path.display()),
-            &format!("file://{}", html_path.display()),
+            "--outdir", tmp.path().to_str().unwrap(),
+            "--print",
+            tex_path.to_str().unwrap(),
         ])
         .output()
         .await
-        .with_context(|| format!("Failed to spawn {chrome}"))?;
+        .context("Failed to spawn tectonic — is it installed?")?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("Chromium exited {}: {}", out.status, stderr.trim());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let detail = [stderr.trim(), stdout.trim()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!("tectonic exited {}: {}", out.status, detail);
     }
 
     tokio::fs::read(&pdf_path).await
-        .context("PDF output file not found after Chromium run")
-}
-
-fn find_chrome() -> Option<String> {
-    CHROME_CANDIDATES.iter().find_map(|&bin| {
-        std::process::Command::new("which")
-            .arg(bin)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|_| bin.to_owned())
-    })
+        .context("tectonic succeeded but PDF output file not found")
 }
