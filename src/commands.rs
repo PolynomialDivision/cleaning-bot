@@ -153,12 +153,9 @@ fn load_icon(actual: f64, expected: f64) -> &'static str {
 }
 
 fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
-    if expected < f64::EPSILON {
-        return if actual < f64::EPSILON {
-            ("±0.0%".to_owned(), "balanced")
-        } else {
-            ("+∞%".to_owned(), "overloaded")
-        };
+    if expected < 0.01 {
+        // No expected history yet — can't compute a meaningful percentage.
+        return ("n/a".to_owned(), "balanced");
     }
     let pct = (actual - expected) / expected * 100.0;
     let pct_str = if pct.abs() < 0.05 {
@@ -1358,7 +1355,14 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     }
 
     let yrs = report.years_tracked;
-    let mut out = vec![format!("🏋️ **Load** · {:.1} yr", yrs)];
+    let history_note = if report.due_weeks == 0 {
+        " · ⚠️ no closed weeks yet — annual rates are estimates"
+    } else if report.due_weeks < 4 {
+        " · ⚠️ few weeks tracked — rates approximate"
+    } else {
+        ""
+    };
+    let mut out = vec![format!("🏋️ **Load** · {} wks · {:.2} yr{history_note}", report.due_weeks, yrs)];
 
     for e in &report.entries {
         let (pct, _) = load_delta_pct(e.actual_cli_per_year, e.expected_cli_per_year);

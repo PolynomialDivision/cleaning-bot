@@ -368,6 +368,8 @@ pub struct PersonWorkload {
 pub struct WorkloadReport {
     /// Sorted by expected_cli_per_year descending.
     pub entries:       Vec<PersonWorkload>,
+    /// Closed (past) schedule weeks used for the calculation.
+    pub due_weeks:     u32,
     pub years_tracked: f64,
     /// Top actual CLI/year.
     pub most_loaded:   Vec<String>,
@@ -588,7 +590,9 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
     let start = state.tracking_start();
     let all_due = all_due_weeks_in_range(start, (cur_y, cur_w), interval);
     let due_weeks = all_due.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).count() as f64;
-    let years_tracked = (due_weeks / 52.0).max(f64::EPSILON);
+    // Treat the period as at least 1 week so annual rates are always finite,
+    // but expose the raw week count so callers can warn when history is short.
+    let years_tracked = due_weeks.max(1.0) / 52.0;
 
     let models: std::collections::HashMap<GroupId, GroupLoadModel> = state.cleaning_groups.iter()
         .map(|g| (g.id.clone(), group_load_model(g, interval)))
@@ -644,7 +648,7 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
     let most_loaded  = by_actual.iter().take(3).map(|e| e.display_name.clone()).collect();
     let least_loaded = by_actual.iter().rev().take(3).map(|e| e.display_name.clone()).collect();
 
-    WorkloadReport { entries, years_tracked, most_loaded, least_loaded }
+    WorkloadReport { entries, due_weeks: due_weeks as u32, years_tracked, most_loaded, least_loaded }
 }
 
 /// All persons with stats, sorted by completion rate then streak.
