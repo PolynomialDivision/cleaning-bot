@@ -3,6 +3,10 @@ name = "cleaning-bot"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "state_debug"
+path = "src/bin/state_debug.rs"
+
 [dependencies]
 anyhow        = "1"
 tempfile      = "3"
