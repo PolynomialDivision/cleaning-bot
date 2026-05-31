@@ -43,6 +43,68 @@ mod validate;
 use config::Config;
 use state::{GreetingChoice, GreetingInfo, ReactionDone, State};
 
+/// Send the group-selection step of the greeting.
+///
+/// Called either directly for new users (no unlinked non-Matrix persons found)
+/// or as the second step after the user has confirmed their identity.
+async fn send_join_greeting(ctx: &BotContext, room: &Room, user_id: &str, intro: Option<String>) {
+    let groups: Vec<_> = { ctx.state.lock().await.cleaning_groups.clone() };
+    if groups.is_empty() { return; }
+
+    let number_emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"];
+    let mut choices: Vec<GreetingChoice> = Vec::new();
+    let mut lines: Vec<String> = if let Some(h) = intro {
+        vec![h, String::new()]
+    } else {
+        vec![]
+    };
+    lines.push("Please pick your cleaning group by reacting with the matching number:".to_owned());
+    lines.push(String::new());
+
+    for (i, group) in groups.iter().enumerate() {
+        let Some(emoji) = number_emojis.get(i) else { break };
+        let members_text = {
+            let state = ctx.state.lock().await;
+            let names: Vec<String> = state.members_of(&group).iter().map(|p| p.display_name.clone()).collect();
+            if names.is_empty() { String::new() } else { format!(" — {}", names.join(", ")) }
+        };
+        lines.push(format!("{emoji} **{}**{members_text}", group.name));
+        choices.push(GreetingChoice {
+            emoji:      emoji.to_string(),
+            group_id:   group.id.clone(),
+            group_name: group.name.clone(),
+            person_id:  None,
+        });
+    }
+
+    let content = format::mentionify_rich(&lines.join("\n"), room).await;
+    let resp = match room.send(content).await {
+        Ok(r) => r,
+        Err(e) => { tracing::error!("Failed to send join greeting: {e}"); return; }
+    };
+    let event_id_str = resp.response.event_id.to_string();
+    let greeting_eid = resp.response.event_id;
+
+    {
+        let mut state = ctx.state.lock().await;
+        state.greeting_event_ids.insert(event_id_str, GreetingInfo {
+            for_user:   user_id.to_owned(),
+            choices:    choices.clone(),
+            is_linking: false,
+        });
+        if let Err(e) = state.save(&ctx.state_path).await {
+            tracing::error!("Failed to save join greeting: {e}");
+        }
+    }
+
+    for choice in &choices {
+        let reaction = ReactionEventContent::new(Annotation::new(greeting_eid.clone(), choice.emoji.clone()));
+        if let Err(e) = room.send(reaction).await {
+            tracing::warn!("Failed to send self-reaction {}: {e}", choice.emoji);
+        }
+    }
+}
+
 fn add_thread_relation(content: &mut RoomMessageEventContent, root: OwnedEventId, reply_to: OwnedEventId) {
     content.relates_to = Some(Relation::Thread(Thread::reply(root, reply_to)));
 }
@@ -236,43 +298,87 @@ async fn main() -> Result<()> {
                 let emoji_key  = ev.content.relates_to.key.clone();
                 let sender_mxid = ev.sender.as_str().to_owned();
 
-                // ── Greeting number-reaction → join group ─────────────────────
+                // ── Greeting reaction handler ─────────────────────────────────
                 {
                     let mut state = ctx.state.lock().await;
                     if let Some(info) = state.greeting_event_ids.get(&reacted_to).cloned() {
                         if info.for_user == sender_mxid {
                             if let Some(choice) = info.choices.iter().find(|c| c.emoji == emoji_key) {
-                                let group_id   = choice.group_id.clone();
-                                let group_name = choice.group_name.clone();
+                                if info.is_linking {
+                                    // ── Identity linking step ─────────────────
+                                    state.greeting_event_ids.remove(&reacted_to);
 
-                                // Ensure Person exists (idempotent) then join group.
-                                let new_pid = uuid::Uuid::new_v4().to_string();
-                                let _ = state.apply_event(analytics::DomainEvent::PersonCreated {
-                                    person_id: new_pid,
-                                    display_name: sender_mxid.clone(),
-                                    matrix_id: Some(sender_mxid.clone()),
-                                });
-                                let person_id = state.person_by_matrix_id(&sender_mxid)
-                                    .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
-                                let already = state.group_by_id(&group_id)
-                                    .map(|g| g.member_ids.contains(&person_id)).unwrap_or(false);
-                                if !already {
-                                    let _ = state.apply_event(analytics::DomainEvent::PersonJoinedGroup {
-                                        person_id, group_id: group_id.clone(),
+                                    if let Some(person_id) = &choice.person_id {
+                                        // Link sender to existing non-Matrix person.
+                                        let person_id = person_id.clone();
+                                        let person_name = choice.group_name.clone();
+                                        let _ = state.apply_event(analytics::DomainEvent::PersonMatrixLinked {
+                                            person_id: person_id.clone(),
+                                            matrix_id: sender_mxid.clone(),
+                                        });
+                                        let person_groups: Vec<String> = state
+                                            .groups_for_person(&person_id)
+                                            .iter().map(|g| g.name.clone()).collect();
+                                        if let Err(e) = state.save(&ctx.state_path).await {
+                                            tracing::error!("Failed to save after identity link: {e}");
+                                        }
+                                        drop(state);
+
+                                        if let Some(r) = client.get_room(&ctx.room_id) {
+                                            if !person_groups.is_empty() {
+                                                let msg = format!(
+                                                    "✅ Welcome back, **{person_name}**! Your account is linked. You are in: {}",
+                                                    person_groups.join(", ")
+                                                );
+                                                r.send(format::mentionify_rich(&msg, &r).await).await.ok();
+                                            } else {
+                                                let msg = format!("✅ Linked as **{person_name}**!");
+                                                r.send(format::mentionify_rich(&msg, &r).await).await.ok();
+                                                send_join_greeting(&ctx, &r, &sender_mxid, None).await;
+                                            }
+                                        }
+                                    } else {
+                                        // "I'm new" — skip to group selection.
+                                        if let Err(e) = state.save(&ctx.state_path).await {
+                                            tracing::error!("Failed to save after 'I'm new': {e}");
+                                        }
+                                        drop(state);
+                                        if let Some(r) = client.get_room(&ctx.room_id) {
+                                            send_join_greeting(&ctx, &r, &sender_mxid, None).await;
+                                        }
+                                    }
+                                } else {
+                                    // ── Group joining step ────────────────────
+                                    let group_id   = choice.group_id.clone();
+                                    let group_name = choice.group_name.clone();
+
+                                    let new_pid = uuid::Uuid::new_v4().to_string();
+                                    let _ = state.apply_event(analytics::DomainEvent::PersonCreated {
+                                        person_id: new_pid,
+                                        display_name: sender_mxid.clone(),
+                                        matrix_id: Some(sender_mxid.clone()),
                                     });
-                                }
+                                    let person_id = state.person_by_matrix_id(&sender_mxid)
+                                        .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
+                                    let already = state.group_by_id(&group_id)
+                                        .map(|g| g.member_ids.contains(&person_id)).unwrap_or(false);
+                                    if !already {
+                                        let _ = state.apply_event(analytics::DomainEvent::PersonJoinedGroup {
+                                            person_id, group_id: group_id.clone(),
+                                        });
+                                    }
+                                    if let Err(e) = state.save(&ctx.state_path).await {
+                                        tracing::error!("Failed to save after greeting join: {e}");
+                                    }
+                                    state.greeting_event_ids.remove(&reacted_to);
+                                    drop(state);
 
-                                if let Err(e) = state.save(&ctx.state_path).await {
-                                    tracing::error!("Failed to save after greeting join: {e}");
-                                }
-                                state.greeting_event_ids.remove(&reacted_to);
-                                drop(state);
-
-                                if let Some(r) = client.get_room(&ctx.room_id) {
-                                    let msg = format!(
-                                        "✅ {sender_mxid} joined **{group_name}** — welcome to the cleaning crew! 🧹"
-                                    );
-                                    r.send(format::mentionify_rich(&msg, &r).await).await.ok();
+                                    if let Some(r) = client.get_room(&ctx.room_id) {
+                                        let msg = format!(
+                                            "✅ {sender_mxid} joined **{group_name}** — welcome to the cleaning crew! 🧹"
+                                        );
+                                        r.send(format::mentionify_rich(&msg, &r).await).await.ok();
+                                    }
                                 }
                             }
                         }
@@ -442,57 +548,76 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                let groups: Vec<_> = {
+                // Check for non-Matrix persons who might be this user.
+                let unlinked: Vec<_> = {
                     let state = ctx.state.lock().await;
-                    state.cleaning_groups.clone()
+                    state.persons.iter()
+                        .filter(|p| p.active && p.matrix_id.is_none())
+                        .cloned()
+                        .collect()
                 };
-                if groups.is_empty() { return; }
 
-                let number_emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"];
-                let mut choices: Vec<GreetingChoice> = Vec::new();
-                let mut lines = vec![
-                    format!("👋 Welcome, {user_id}!"),
-                    String::new(),
-                    "Please pick your cleaning group by reacting with the matching number:".to_owned(),
-                    String::new(),
-                ];
-
-                for (i, group) in groups.iter().enumerate() {
-                    let Some(emoji) = number_emojis.get(i) else { break };
-                    let members_text = {
-                        let state = ctx.state.lock().await;
-                        let names: Vec<String> = state.members_of(group).iter().map(|p| p.display_name.clone()).collect();
-                        if names.is_empty() { String::new() } else { format!(" — {}", names.join(", ")) }
-                    };
-                    lines.push(format!("{emoji} **{}**{members_text}", group.name));
+                if !unlinked.is_empty() {
+                    // Phase 1: ask who they are.
+                    let number_emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"];
+                    let mut choices: Vec<GreetingChoice> = Vec::new();
+                    let mut lines = vec![
+                        format!("👋 Welcome, {user_id}!"),
+                        String::new(),
+                        "Are you already on the cleaning plan? React with your name, or 🆕 if you are a new person:".to_owned(),
+                        String::new(),
+                    ];
+                    for (i, person) in unlinked.iter().enumerate() {
+                        let Some(emoji) = number_emojis.get(i) else { break };
+                        lines.push(format!("{emoji} **{}**", person.display_name));
+                        choices.push(GreetingChoice {
+                            emoji:      emoji.to_string(),
+                            group_id:   String::new(),
+                            group_name: person.display_name.clone(),
+                            person_id:  Some(person.id.clone()),
+                        });
+                    }
+                    lines.push(String::new());
+                    lines.push("🆕 I'm a new person".to_owned());
                     choices.push(GreetingChoice {
-                        emoji:      emoji.to_string(),
-                        group_id:   group.id.clone(),
-                        group_name: group.name.clone(),
+                        emoji:      "🆕".to_string(),
+                        group_id:   String::new(),
+                        group_name: String::new(),
+                        person_id:  None,
                     });
-                }
 
-                let content = format::mentionify_rich(&lines.join("\n"), &room).await;
-                let resp = match room.send(content).await {
-                    Ok(r) => r,
-                    Err(e) => { tracing::error!("Failed to send greeting: {e}"); return; }
-                };
-                let event_id_str = resp.response.event_id.to_string();
-                let greeting_eid = resp.response.event_id;
+                    let content = format::mentionify_rich(&lines.join("\n"), &room).await;
+                    let resp = match room.send(content).await {
+                        Ok(r) => r,
+                        Err(e) => { tracing::error!("Failed to send linking greeting: {e}"); return; }
+                    };
+                    let event_id_str = resp.response.event_id.to_string();
+                    let greeting_eid = resp.response.event_id;
 
-                {
-                    let mut state = ctx.state.lock().await;
-                    state.greeting_event_ids.insert(event_id_str, GreetingInfo { for_user: user_id.clone(), choices: choices.clone() });
-                    if let Err(e) = state.save(&ctx.state_path).await {
-                        tracing::error!("Failed to save greeting_event_ids: {e}");
+                    {
+                        let mut state = ctx.state.lock().await;
+                        state.greeting_event_ids.insert(event_id_str, GreetingInfo {
+                            for_user:   user_id.clone(),
+                            choices:    choices.clone(),
+                            is_linking: true,
+                        });
+                        if let Err(e) = state.save(&ctx.state_path).await {
+                            tracing::error!("Failed to save linking greeting: {e}");
+                        }
                     }
-                }
 
-                for choice in &choices {
-                    let reaction = ReactionEventContent::new(Annotation::new(greeting_eid.clone(), choice.emoji.clone()));
-                    if let Err(e) = room.send(reaction).await {
-                        tracing::warn!("Failed to send self-reaction {}: {e}", choice.emoji);
+                    for choice in &choices {
+                        let reaction = ReactionEventContent::new(Annotation::new(greeting_eid.clone(), choice.emoji.clone()));
+                        if let Err(e) = room.send(reaction).await {
+                            tracing::warn!("Failed to send self-reaction {}: {e}", choice.emoji);
+                        }
                     }
+                } else {
+                    // No unlinked persons — go straight to group selection.
+                    send_join_greeting(
+                        &ctx, &room, &user_id,
+                        Some(format!("👋 Welcome, {user_id}!")),
+                    ).await;
                 }
                 let _ = client;
             }

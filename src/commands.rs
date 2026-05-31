@@ -690,9 +690,6 @@ async fn cmd_linkmatrix(ctx: &BotContext, sender: &OwnedUserId, room: &Room, arg
         if p.matrix_id.is_some() {
             return Ok(Some(format!("«{}» already has a Matrix account linked.", p.display_name)));
         }
-        if state.person_by_matrix_id(&mxid).is_some() {
-            return Ok(Some(format!("{mxid} is already linked to another person.")));
-        }
         p.id.clone()
     };
 
@@ -704,6 +701,33 @@ async fn cmd_linkmatrix(ctx: &BotContext, sender: &OwnedUserId, room: &Room, arg
         .cloned();
 
     let mut state = ctx.state.lock().await;
+
+    // Auto-merge: if the MXID belongs to a stub person created by the greeting
+    // reaction (no cleaning history), remove it so the link can proceed cleanly.
+    if let Some(stub_id) = state.person_by_matrix_id(&mxid).map(|p| p.id.clone()) {
+        let has_history = state.completions.iter().any(|c| c.completed_by_id == stub_id);
+        if has_history {
+            return Ok(Some(format!(
+                "{mxid} is linked to another person who already has cleaning history. Cannot auto-merge."
+            )));
+        }
+        let stub_group_ids: Vec<String> = state.cleaning_groups.iter()
+            .filter(|g| g.member_ids.contains(&stub_id))
+            .map(|g| g.id.clone())
+            .collect();
+        for gid in &stub_group_ids {
+            state.apply_event(DomainEvent::PersonLeftGroup {
+                person_id: stub_id.clone(),
+                group_id:  gid.clone(),
+            })?;
+            unassign_and_rematerialize(ctx, &mut state, &stub_id, gid).await?;
+        }
+        if let Some(stub) = state.persons.iter_mut().find(|p| p.id == stub_id) {
+            stub.matrix_id = None;
+            stub.active    = false;
+        }
+    }
+
     state.apply_event(DomainEvent::PersonMatrixLinked {
         person_id: person_id.clone(),
         matrix_id: mxid.clone(),

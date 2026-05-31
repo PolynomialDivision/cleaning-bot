@@ -78,12 +78,18 @@ pub struct GreetingChoice {
     pub emoji:      String,
     pub group_id:   GroupId,
     pub group_name: String,
+    /// Set when this choice links the joining user to an existing non-Matrix person.
+    #[serde(default)]
+    pub person_id:  Option<PersonId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GreetingInfo {
     pub for_user: String,
     pub choices:  Vec<GreetingChoice>,
+    /// True during the identity-linking step (choosing which non-Matrix placeholder you are).
+    #[serde(default)]
+    pub is_linking: bool,
 }
 
 pub use crate::domain::CalendarToken;
