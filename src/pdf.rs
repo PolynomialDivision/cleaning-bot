@@ -121,7 +121,7 @@ fn group_section(
     // ── First-page header ────────────────────────────────────────────────────
     s.push_str("\\hline\n");
     s.push_str("\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
-                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Notes} \\\\\n");
+                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n");
     s.push_str("\\hline\\hline\n");
     s.push_str("\\endfirsthead\n");
 
@@ -132,7 +132,7 @@ fn group_section(
     ));
     s.push_str("\\hline\n");
     s.push_str("\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
-                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Notes} \\\\\n");
+                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n");
     s.push_str("\\hline\\hline\n");
     s.push_str("\\endhead\n");
 
@@ -199,7 +199,13 @@ fn group_section(
             if a.is_completed {
                 s.push_str("$\\checkmark$");
             }
-            s.push_str(" & \\\\\n");
+            s.push_str(" & ");
+
+            // Date cell: completion date when known, otherwise blank for manual entry.
+            if let Some(date) = a.completed_at {
+                s.push_str(&tex_esc(&date.format("%-d %b %Y").to_string()));
+            }
+            s.push_str(" \\\\\n");
 
             if k == j - 1 {
                 s.push_str("\\hline\n");

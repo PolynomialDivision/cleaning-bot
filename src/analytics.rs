@@ -567,7 +567,10 @@ pub fn group_load_model(group: &crate::domain::CleaningGroup, interval: u32) -> 
     };
 
     let load_per_assignment  = rooms_per_assignment * group.weight;
-    let assignments_per_year = 52.0 / interval as f64 / member_count as f64;
+    // Multi-slot groups assign one person per slot per cycle, so each person
+    // gets assigned num_slots times per rotation round.
+    let num_slots = if group.slots.is_empty() { 1 } else { group.slots.len() };
+    let assignments_per_year = 52.0 * num_slots as f64 / interval as f64 / member_count as f64;
 
     GroupLoadModel {
         group_name:           group.name.clone(),
@@ -626,14 +629,22 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
                 });
             }
 
+            // Structural expected rate: derived from group model, not from history.
+            // This answers "how much work is assigned to me per year" regardless
+            // of how long the bot has been running.
+            let structural_expected_per_year: f64 = groups.iter()
+                .filter_map(|g| models.get(&g.id))
+                .map(|m| m.cli_per_year)
+                .sum();
+
             Some(PersonWorkload {
                 display_name:          p.display_name.clone(),
                 group_names,
                 expected_cli,
                 actual_cli,
                 cli_deviation:         actual_cli - expected_cli,
-                expected_cli_per_year: expected_cli / years_tracked,
-                actual_cli_per_year:   actual_cli   / years_tracked,
+                expected_cli_per_year: structural_expected_per_year,
+                actual_cli_per_year:   if due_weeks > 0.0 { actual_cli / years_tracked } else { 0.0 },
                 contributions,
             })
         })

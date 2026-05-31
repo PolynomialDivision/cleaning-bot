@@ -1355,39 +1355,58 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     }
 
     let yrs = report.years_tracked;
-    let history_note = if report.due_weeks == 0 {
-        " · ⚠️ no closed weeks yet — annual rates are estimates"
-    } else if report.due_weeks < 4 {
-        " · ⚠️ few weeks tracked — rates approximate"
+    let has_history = report.due_weeks >= 4;
+    let header = if has_history {
+        format!("🏋️ **Load** · {} wks · {:.2} yr", report.due_weeks, yrs)
     } else {
-        ""
+        format!("🏋️ **Expected load** (structural · {} wks tracked)", report.due_weeks)
     };
-    let mut out = vec![format!("🏋️ **Load** · {} wks · {:.2} yr{history_note}", report.due_weeks, yrs)];
+    let mut out = vec![header];
+
+    // Normalize against house average so 1.0× = average resident.
+    let avg_expected = {
+        let sum: f64 = report.entries.iter().map(|e| e.expected_cli_per_year).sum();
+        let n = report.entries.len() as f64;
+        if n > 0.0 && sum > 0.0 { sum / n } else { 1.0 }
+    };
 
     for e in &report.entries {
-        let (pct, _) = load_delta_pct(e.actual_cli_per_year, e.expected_cli_per_year);
-        let icon = load_icon(e.actual_cli_per_year, e.expected_cli_per_year);
+        let ratio = e.expected_cli_per_year / avg_expected;
+        let ratio_str = format!("{:.2}×", ratio);
+
         let breakdown = if e.contributions.len() > 1 {
             let parts: Vec<String> = e.contributions.iter()
-                .map(|c| format!("{:.1}", c.expected_annual))
+                .map(|c| format!("{:.2}×", c.expected_annual / avg_expected))
                 .collect();
             format!(" ({})", parts.join("+"))
         } else {
             String::new()
         };
-        out.push(format!(
-            "{icon} **{}**  {} ({:.1}/{:.1}/yr) · {}{}",
-            e.display_name, pct,
-            e.actual_cli_per_year, e.expected_cli_per_year,
-            e.group_names.join(", "), breakdown,
-        ));
+
+        let line = if has_history {
+            let (pct, _) = load_delta_pct(e.actual_cli_per_year, e.expected_cli_per_year);
+            let icon = load_icon(e.actual_cli_per_year, e.expected_cli_per_year);
+            format!(
+                "{icon} **{}**  {} · exp {}{} · {}",
+                e.display_name, pct, ratio_str, breakdown,
+                e.group_names.join(", "),
+            )
+        } else {
+            format!(
+                "**{}**  {}{} · {}",
+                e.display_name, ratio_str, breakdown,
+                e.group_names.join(", "),
+            )
+        };
+        out.push(line);
     }
 
-    // Single footer: top extreme each side only.
-    let most = report.most_loaded.first().map(String::as_str).unwrap_or("-");
-    let least = report.least_loaded.first().map(String::as_str).unwrap_or("-");
-    if most != least {
-        out.push(format!("⬆ {most} · ⬇ {least}"));
+    if has_history {
+        let most = report.most_loaded.first().map(String::as_str).unwrap_or("-");
+        let least = report.least_loaded.first().map(String::as_str).unwrap_or("-");
+        if most != least {
+            out.push(format!("⬆ {most} · ⬇ {least}"));
+        }
     }
 
     Ok(Some(out.join("\n")))
@@ -1403,25 +1422,34 @@ async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
         return Ok(Some("No cleaning groups configured.".into()));
     }
 
-    let mut out = vec!["📊 **Groups**".to_owned()];
+    let models: Vec<_> = state.cleaning_groups.iter()
+        .map(|g| analytics::group_load_model(g, interval))
+        .collect();
 
-    for group in &state.cleaning_groups {
-        let m = analytics::group_load_model(group, interval);
-        let rooms = format!("{:.0}r", m.rooms_per_assignment);
+    let avg_cli = {
+        let sum: f64 = models.iter().map(|m| m.cli_per_year).sum();
+        let n = models.len() as f64;
+        if n > 0.0 && sum > 0.0 { sum / n } else { 1.0 }
+    };
+
+    let mut out = vec!["📊 **Groups**  (1.0× = avg load/person/yr)".to_owned()];
+
+    for (group, m) in state.cleaning_groups.iter().zip(models.iter()) {
+        let ratio = m.cli_per_year / avg_cli;
         let weight = if (m.group_weight - 1.0).abs() > 0.01 {
             format!(" · ×{:.1}", m.group_weight)
         } else {
             String::new()
         };
         out.push(format!(
-            "**{}**  {}p/{}wks · {}{} → {:.2} CLI · {:.2}/yr",
-            group.name, m.member_count, m.rotation_interval,
-            rooms, weight, m.load_per_assignment, m.cli_per_year,
+            "**{}**  {:.2}× · {}p/{}wks · {:.0}r{}",
+            group.name, ratio, m.member_count, m.rotation_interval,
+            m.rooms_per_assignment, weight,
         ));
         for slot in &group.slots {
             let sr = analytics::effective_rooms_pub(&slot.room_names, &slot.room_weights);
             let sw = if (slot.weight - 1.0).abs() > 0.01 { format!(" ×{:.1}", slot.weight) } else { String::new() };
-            out.push(format!("  └ {}  {:.0}r{} → {:.2} CLI", slot.name, sr, sw, sr * slot.weight));
+            out.push(format!("  └ {}  {:.0}r{}", slot.name, sr, sw));
         }
         let mut room_weights: Vec<String> = if group.slots.is_empty() {
             group.room_weights.iter().map(|(r, w)| format!("{r} ×{w:.1}")).collect()

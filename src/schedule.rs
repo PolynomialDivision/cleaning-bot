@@ -46,10 +46,12 @@ pub struct AssignmentInstance {
     pub week_label:  String,
     /// `None` means the group/slot exists but has no members this cycle.
     pub assignee:    Option<PersonDetails>,
-    pub is_completed: bool,
-    pub is_skipped:   bool,
+    pub is_completed:  bool,
+    pub is_skipped:    bool,
     /// Display name of whoever marked it done (may differ from assignee).
-    pub completed_by: Option<String>,
+    pub completed_by:  Option<String>,
+    /// Date the cleaning was marked done (for the PDF Date column).
+    pub completed_at:  Option<chrono::NaiveDate>,
 }
 
 impl AssignmentInstance {
@@ -163,6 +165,9 @@ pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSna
                     let completed_by = completion
                         .and_then(|c| state.person_by_id(&c.completed_by_id))
                         .map(|p| p.display_name.clone());
+                    let completed_at = completion
+                        .filter(|c| !c.skipped)
+                        .map(|c| c.completed_at.date_naive());
 
                     assignments.push(AssignmentInstance {
                         uid,
@@ -180,6 +185,7 @@ pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSna
                         is_completed,
                         is_skipped,
                         completed_by,
+                        completed_at,
                     });
                 }
             } else {
@@ -199,6 +205,9 @@ pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSna
                 let completed_by = completion
                     .and_then(|c| state.person_by_id(&c.completed_by_id))
                     .map(|p| p.display_name.clone());
+                let completed_at = completion
+                    .filter(|c| !c.skipped)
+                    .map(|c| c.completed_at.date_naive());
 
                 assignments.push(AssignmentInstance {
                     uid,
@@ -216,6 +225,7 @@ pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSna
                     is_completed,
                     is_skipped,
                     completed_by,
+                    completed_at,
                 });
             }
         }
