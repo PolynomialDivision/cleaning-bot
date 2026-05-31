@@ -37,11 +37,6 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
-    let cur_week = {
-        let d = chrono::Utc::now().date_naive();
-        use chrono::Datelike;
-        (d.iso_week().year(), d.iso_week().week())
-    };
     let generated = snapshot.state_timestamp.format("%d %b %Y").to_string();
 
     // Groups in first-appearance order.
@@ -71,7 +66,7 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
 
         if gi > 0 { body.push_str("\n\\clearpage\n\n"); }
         body.push_str(&group_section(
-            group_name, &date_range, snapshot.interval_weeks, &generated, &rows, cur_week,
+            group_name, &date_range, snapshot.interval_weeks, &generated, &rows,
         ));
     }
 
@@ -86,7 +81,6 @@ fn group_section(
     interval:   u32,
     generated:  &str,
     rows:       &[&crate::schedule::AssignmentInstance],
-    cur_week:   (i32, u32),
 ) -> String {
     let (fsize, fskip) = font_size_for_rows(rows.len());
     let mut s = String::new();
@@ -112,13 +106,13 @@ fn group_section(
     s.push_str("\\vspace{2mm}\n\n");
 
     // Column widths (total ≈ 182 mm = A4 210 mm − 28 mm margins):
-    //   13 + 28 + 35 + 55 + 9 + 24 = 164 mm content
+    //   13 + 28 + 45 + 45 + 9 + 24 = 164 mm content
     //   + 6 cols × 2 × 4 pt tabcolsep ≈ 17 mm padding  ≈ 181 mm
     let col_spec = concat!(
         "|>{\\centering\\arraybackslash}p{13mm}",
         "|>{\\raggedright\\arraybackslash}p{28mm}",
-        "|>{\\raggedright\\arraybackslash}p{35mm}",
-        "|>{\\raggedright\\arraybackslash}p{55mm}",
+        "|>{\\raggedright\\arraybackslash}p{45mm}",
+        "|>{\\raggedright\\arraybackslash}p{45mm}",
         "|>{\\centering\\arraybackslash}p{9mm}",
         "|p{24mm}|"
     );
@@ -147,50 +141,76 @@ fn group_section(
     s.push_str("\\endlastfoot\n");
 
     // ── Data rows ─────────────────────────────────────────────────────────────
-    for a in rows.iter() {
-        let is_current = (a.iso_year, a.iso_week) == cur_week;
-
-        // Week cell: ">> WW" marker for current week (no bold — keep all rows
-        // visually uniform as requested).
-        let week_prefix = if is_current { ">> " } else { "" };
-        s.push_str(&format!(
-            "{}\\textbf{{{}}}{{\\newline{{\\tiny {}}}}}",
-            week_prefix, a.iso_week, a.iso_year,
-        ));
-        s.push_str(" & ");
-
-        // Date range.
-        s.push_str(&tex_esc(&a.week_label));
-        s.push_str(" & ");
-
-        // Area / rooms cell.
-        let area = match &a.slot_name {
-            Some(slot) if !a.room_names.is_empty() => format!(
-                "{}\\newline{{\\tiny {}}}",
-                tex_esc(slot),
-                tex_esc(&a.room_names.join(", ")),
-            ),
-            Some(slot) => tex_esc(slot),
-            None if !a.room_names.is_empty() => format!(
-                "{{\\tiny {}}}",
-                tex_esc(&a.room_names.join(", ")),
-            ),
-            None => String::new(),
-        };
-        s.push_str(&area);
-        s.push_str(" & ");
-
-        // Responsible.
-        s.push_str(&tex_esc(a.assignee_name()));
-        s.push_str(" & ");
-
-        // ✓ cell: show checkmark when done, leave empty when pending
-        // (the column borders provide writing space — no widget needed).
-        if a.is_completed {
-            s.push_str("$\\checkmark$");
+    // Group consecutive rows that share the same (iso_year, iso_week).
+    // The week number and date range are printed only on the first row of each
+    // group; subsequent rows leave those cells blank so the group reads as a
+    // visual unit.  A full \hline closes the group; within the group only
+    // columns 3–6 get a \cline so columns 1–2 appear merged across the rows.
+    let mut i = 0;
+    while i < rows.len() {
+        let key = (rows[i].iso_year, rows[i].iso_week);
+        let mut j = i + 1;
+        while j < rows.len() && (rows[j].iso_year, rows[j].iso_week) == key {
+            j += 1;
         }
-        s.push_str(" & \\\\\n");
-        s.push_str("\\hline\n");
+
+        for k in i..j {
+            let a = rows[k];
+            if k == i {
+                s.push_str(&format!(
+                    "\\textbf{{{}}}{{\\newline{{\\tiny {}}}}}",
+                    a.iso_week, a.iso_year,
+                ));
+                s.push_str(" & ");
+                s.push_str(&tex_esc(&a.week_label));
+            } else {
+                // Blank week and date cells — visual merge with the row above.
+                s.push_str(" & ");
+            }
+            s.push_str(" & ");
+
+            // Area / rooms cell.
+            let area = match &a.slot_name {
+                Some(slot) if !a.room_names.is_empty() => format!(
+                    "{}\\newline{{\\tiny {}}}",
+                    tex_esc(slot),
+                    tex_esc(&a.room_names.join(", ")),
+                ),
+                // No sub-rooms: render at a readable size regardless of the
+                // table's scaled-down font.
+                Some(slot) => format!(
+                    "{{\\fontsize{{10}}{{13}}\\selectfont {}}}",
+                    tex_esc(slot),
+                ),
+                None if !a.room_names.is_empty() => format!(
+                    "{{\\tiny {}}}",
+                    tex_esc(&a.room_names.join(", ")),
+                ),
+                None => String::new(),
+            };
+            s.push_str(&area);
+            s.push_str(" & ");
+
+            // Responsible.
+            s.push_str(&tex_esc(a.assignee_name()));
+            s.push_str(" & ");
+
+            // ✓ cell: show checkmark when done, leave empty when pending.
+            if a.is_completed {
+                s.push_str("$\\checkmark$");
+            }
+            s.push_str(" & \\\\\n");
+
+            if k == j - 1 {
+                s.push_str("\\hline\n");
+            } else {
+                // Partial rule: separate the slot rows but keep Week/Dates
+                // visually grouped (no line under columns 1–2).
+                s.push_str("\\cline{3-6}\n");
+            }
+        }
+
+        i = j;
     }
 
     s.push_str("\\end{longtable}\n\n");
@@ -198,7 +218,7 @@ fn group_section(
     // Legend.
     s.push_str(
         "{\\fontsize{6.5}{8}\\selectfont\\hfill \
-         $\\square$ = pending \\quad $\\checkmark$ = done}\n"
+         $\\checkmark$ = done}\n"
     );
 
     s
