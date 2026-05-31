@@ -74,6 +74,10 @@ pub async fn handle(
 
     // Commands that need direct room access.
     match cmd {
+        "!linkmatrix" => {
+            let s = cmd_linkmatrix(ctx, sender, room, &args).await?;
+            return Ok(s.map(RoomMessageEventContent::text_plain));
+        }
         "!cleanplan"  => return cmd_cleanplan(ctx, sender, room, &args).await,
         "!remind"     => return cmd_remind(ctx, sender, room, &args).await,
         "!testnotify" => return cmd_testnotify(room).await,
@@ -633,6 +637,56 @@ async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str])
     unassign_and_rematerialize(ctx, &mut state, &person_id, &group_id).await?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Removed {query} from «{group_name}».")))
+}
+
+// ── Admin: !linkmatrix <name> <@user:server> ─────────────────────────────────
+
+async fn cmd_linkmatrix(ctx: &BotContext, sender: &OwnedUserId, room: &Room, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (name, mxid) = match (args.first(), args.get(1)) {
+        (Some(n), Some(m)) => (n.to_string(), m.to_string()),
+        _ => return Ok(Some("Usage: !linkmatrix <display_name> <@user:server>".into())),
+    };
+    if !mxid.starts_with('@') || !mxid.contains(':') {
+        return Ok(Some(format!("«{mxid}» does not look like a Matrix ID (@user:server).")));
+    }
+
+    let person_id = {
+        let state = ctx.state.lock().await;
+        let p = match state.find_person(&name) {
+            Some(p) => p,
+            None    => return Ok(Some(format!("No person named «{name}» found."))),
+        };
+        if p.matrix_id.is_some() {
+            return Ok(Some(format!("«{}» already has a Matrix account linked.", p.display_name)));
+        }
+        if state.person_by_matrix_id(&mxid).is_some() {
+            return Ok(Some(format!("{mxid} is already linked to another person.")));
+        }
+        p.id.clone()
+    };
+
+    // Fetch the Matrix display name immediately so the record looks the same
+    // as one created via !adduser from the start.
+    let fetched = format::fetch_names(room, &[mxid.as_str()]).await;
+    let display_name = fetched.get(mxid.as_str())
+        .filter(|n| !n.is_empty() && n.as_str() != mxid.as_str())
+        .cloned();
+
+    let mut state = ctx.state.lock().await;
+    state.apply_event(DomainEvent::PersonMatrixLinked {
+        person_id: person_id.clone(),
+        matrix_id: mxid.clone(),
+    })?;
+    if let Some(dn) = &display_name {
+        if let Some(p) = state.persons.iter_mut().find(|p| p.id == person_id) {
+            p.display_name = dn.clone();
+        }
+    }
+    state.save(&ctx.state_path).await?;
+
+    let shown = display_name.as_deref().unwrap_or(&name);
+    Ok(Some(format!("✅ {shown} ({mxid}) linked. All previous history preserved.")))
 }
 
 // ── Admin: !addfloor <name> ───────────────────────────────────────────────────

@@ -65,8 +65,9 @@ pub enum DomainEvent {
         #[serde(default)]
         matrix_id:    Option<String>,
     },
-    PersonJoinedGroup { person_id: PersonId, group_id: GroupId },
-    PersonLeftGroup   { person_id: PersonId, group_id: GroupId },
+    PersonJoinedGroup  { person_id: PersonId, group_id: GroupId },
+    PersonLeftGroup    { person_id: PersonId, group_id: GroupId },
+    PersonMatrixLinked { person_id: PersonId, matrix_id: String },
 
     // ── Cleaning operations ───────────────────────────────────────────────────
     CleaningCompleted {

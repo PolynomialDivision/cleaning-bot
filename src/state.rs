@@ -290,6 +290,16 @@ impl State {
                 g.member_ids.retain(|id| id != person_id);
                 g.member_ids.len() < before
             }
+            E::PersonMatrixLinked { person_id, matrix_id } => {
+                if self.persons.iter().any(|p| p.matrix_id.as_deref() == Some(matrix_id) && &p.id != person_id) {
+                    anyhow::bail!("{matrix_id} is already linked to another person");
+                }
+                let p = self.persons.iter_mut().find(|p| &p.id == person_id)
+                    .ok_or_else(|| anyhow::anyhow!("Person not found: {person_id}"))?;
+                if p.matrix_id.as_deref() == Some(matrix_id) { return Ok(()); }
+                p.matrix_id = Some(matrix_id.clone());
+                true
+            }
 
             // ── Cleaning ──────────────────────────────────────────────────────
             E::CleaningCompleted { group_id, slot_id, person_id, responsible_person_ids, iso_year, iso_week } => {
