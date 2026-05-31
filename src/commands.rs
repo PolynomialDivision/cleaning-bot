@@ -113,8 +113,11 @@ pub async fn handle(
         "!skip"         => cmd_skip(ctx, sender, &args).await,
         "!leaderboard"  => cmd_leaderboard(ctx).await,
         "!fairness"        => cmd_fairness(ctx, &args).await,
+        "!planfairness"    => cmd_fairness(ctx, &args).await,
         "!workload"        => cmd_workload(ctx).await,
+        "!groupstats"      => cmd_groupstats(ctx).await,
         "!setgroupweight"  => cmd_setgroupweight(ctx, sender, &args).await,
+        "!setroomweight"   => cmd_setroomweight(ctx, sender, &args).await,
         "!validate"     => cmd_validate(ctx, sender).await,
         "!absent"       => cmd_absent(ctx, sender, &args).await,
         "!back"         => cmd_back(ctx, sender, &args).await,
@@ -139,6 +142,29 @@ fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
 /// Returns the MXID or display_name depending on whether the person has Matrix.
 fn person_key(p: &Person) -> &str {
     p.matrix_id.as_deref().unwrap_or(&p.display_name)
+}
+
+/// Format a CLI deviation as a percentage and a human-readable label.
+///
+/// Thresholds:  > +10% → overloaded  |  < -10% → under-contributing  |  else → balanced
+fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
+    if expected < f64::EPSILON {
+        return if actual < f64::EPSILON {
+            ("±0.0%".to_owned(), "balanced")
+        } else {
+            ("+∞%".to_owned(), "overloaded")
+        };
+    }
+    let pct = (actual - expected) / expected * 100.0;
+    let pct_str = if pct.abs() < 0.05 {
+        "±0.0%".to_owned()
+    } else if pct > 0.0 {
+        format!("+{pct:.1}%")
+    } else {
+        format!("{pct:.1}%")
+    };
+    let label = if pct > 10.0 { "overloaded" } else if pct < -10.0 { "under-contributing" } else { "balanced" };
+    (pct_str, label)
 }
 
 /// After removing `person_id` from `group_id`, unassign any of their future
@@ -1303,18 +1329,17 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
         out.push(String::new());
 
         out.push(format!(
-            "  {:<20} {:>6}  {:>6}  {:>6}  {:>7}  {:>7}",
-            "Name", "Done", "Exp", "Δ", "CLI act", "CLI dev",
+            "  {:<20} {:>6}  {:>6}  {:>9}  {:<18}  {}",
+            "Name", "Done", "Exp", "Δ%", "Status", "(CLI act / exp)",
         ));
-        out.push(format!("  {}", "─".repeat(60)));
+        out.push(format!("  {}", "─".repeat(72)));
         for e in &report.entries {
-            let icon = if e.deviation > 0.5 { "🟢" } else if e.deviation < -0.5 { "🔴" } else { "🟡" };
-            let dev_sign  = if e.deviation      >= 0.0 { "+" } else { "" };
-            let load_sign = if e.load_deviation >= 0.0 { "+" } else { "" };
+            let (pct_str, label) = load_delta_pct(e.actual_load, e.expected_load);
+            let icon = if label == "overloaded" { "🟢" } else if label == "under-contributing" { "🔴" } else { "🟡" };
             out.push(format!(
-                "{icon} {:<20} {:>6}  {:>6.1}  {dev_sign}{:>5.1}  {:>7.2}  {load_sign}{:>6.2}",
-                e.display_name, e.actual, e.expected, e.deviation,
-                e.actual_load, e.load_deviation,
+                "{icon} {:<20} {:>6}  {:>6.1}  {:>9}  {:<18}  ({:.2} / {:.2})",
+                e.display_name, e.actual, e.expected, pct_str, label,
+                e.actual_load, e.expected_load,
             ));
         }
 
@@ -1341,33 +1366,167 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
         return Ok(Some("No members assigned to any group yet.".into()));
     }
 
-    let mut out = vec!["🏋️ **Cleaning Load Index**".to_owned(), String::new()];
-    out.push(format!(
-        "  {:<20} {:>10}  {:>10}  {:>9}  {}",
-        "Name", "Exp CLI", "Act CLI", "Δ", "Groups",
-    ));
-    out.push(format!("  {}", "─".repeat(70)));
+    let yrs = report.years_tracked;
+    let mut out = vec![
+        format!("🏋️ **Cleaning Load Index**  ({:.1} wks tracked · {:.2} yr)", yrs * 52.0, yrs),
+        String::new(),
+    ];
 
+    // ── Per-person summary ────────────────────────────────────────────────────
+    out.push(format!("  {:<20} {:>8}  {:>8}  {:>9}  {:<18}  {}", "Name", "Exp/yr", "Act/yr", "Δ%", "Status", "Groups"));
+    out.push(format!("  {}", "─".repeat(85)));
     for e in &report.entries {
-        let sign = if e.cli_deviation >= 0.0 { "+" } else { "" };
+        let (pct_str, label) = load_delta_pct(e.actual_cli_per_year, e.expected_cli_per_year);
         out.push(format!(
-            "  {:<20} {:>10.2}  {:>10.2}  {sign}{:>8.2}  {}",
-            e.display_name, e.expected_cli, e.actual_cli, e.cli_deviation,
+            "  {:<20} {:>8.2}  {:>8.2}  {:>9}  {:<18}  {}",
+            e.display_name,
+            e.expected_cli_per_year,
+            e.actual_cli_per_year,
+            pct_str,
+            label,
             e.group_names.join(", "),
         ));
     }
 
+    // ── Per-person group breakdown (only when someone is in multiple groups) ──
+    let multi_group: Vec<_> = report.entries.iter().filter(|e| e.contributions.len() > 1).collect();
+    if !multi_group.is_empty() {
+        out.push(String::new());
+        out.push("  **Group breakdown** (Exp CLI/yr per group)".to_owned());
+        for e in &multi_group {
+            let parts: Vec<String> = e.contributions.iter()
+                .map(|c| format!("{}: {:.2}", c.group_name, c.expected_annual))
+                .collect();
+            out.push(format!("  {}: {}", e.display_name, parts.join(" · ")));
+        }
+    }
+
+    // ── Balance highlights ────────────────────────────────────────────────────
     out.push(String::new());
+    out.push("  **Balance**".to_owned());
     if !report.most_loaded.is_empty() {
-        out.push(format!("Most loaded (actual):  {}", report.most_loaded.join(", ")));
+        out.push(format!("  Most loaded (actual):   {}", report.most_loaded.join(", ")));
     }
     if !report.least_loaded.is_empty() {
-        out.push(format!("Least loaded (actual): {}", report.least_loaded.join(", ")));
+        out.push(format!("  Least loaded (actual):  {}", report.least_loaded.join(", ")));
     }
+    if let Some(ref name) = report.biggest_surplus {
+        let e = report.entries.iter().find(|e| &e.display_name == name).unwrap();
+        let (pct, _) = load_delta_pct(e.actual_cli, e.expected_cli);
+        out.push(format!("  Biggest surplus:  {} ({pct}, +{:.2} CLI total)", name, e.cli_deviation));
+    }
+    if let Some(ref name) = report.biggest_deficit {
+        let e = report.entries.iter().find(|e| &e.display_name == name).unwrap();
+        let (pct, _) = load_delta_pct(e.actual_cli, e.expected_cli);
+        out.push(format!("  Biggest deficit:  {} ({pct}, {:.2} CLI total)", name, e.cli_deviation));
+    }
+
     out.push(String::new());
-    out.push("CLI = room-equivalents cleaned. Higher = more work assigned.".to_owned());
+    out.push("  CLI = weighted room-equivalents. Use !groupstats to see the load model.".to_owned());
 
     Ok(Some(out.join("\n")))
+}
+
+// ── !groupstats ───────────────────────────────────────────────────────────────
+
+async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
+    let state    = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+
+    if state.cleaning_groups.is_empty() {
+        return Ok(Some("No cleaning groups configured.".into()));
+    }
+
+    let mut out = vec!["📊 **Group Load Models**".to_owned(), String::new()];
+    out.push(format!(
+        "  {:<20} {:>7}  {:>8}  {:>7}  {:>10}  {:>8}  {:>10}",
+        "Group", "Members", "Interval", "Rooms", "CLI/assign", "Exp/yr", "ExpCLI/yr",
+    ));
+    out.push(format!("  {}", "─".repeat(80)));
+
+    for group in &state.cleaning_groups {
+        let m = analytics::group_load_model(group, interval);
+        let room_detail = if group.slots.is_empty() {
+            if group.room_names.is_empty() {
+                "1 (default)".to_owned()
+            } else if group.room_weights.is_empty() {
+                format!("{}", group.room_names.len())
+            } else {
+                format!("{:.1}w", m.rooms_per_assignment)
+            }
+        } else {
+            format!("{:.1}w", m.rooms_per_assignment)
+        };
+        out.push(format!(
+            "  {:<20} {:>7}  {:>6}wks  {:>7}  {:>10.2}  {:>8.2}  {:>10.2}",
+            group.name,
+            m.member_count,
+            m.rotation_interval,
+            room_detail,
+            m.load_per_assignment,
+            m.assignments_per_year,
+            m.cli_per_year,
+        ));
+        // Show per-slot detail for multi-slot groups.
+        for slot in &group.slots {
+            let slot_rooms = analytics::effective_rooms_pub(&slot.room_names, &slot.room_weights);
+            out.push(format!(
+                "    └ {:<18} {:>7}  rooms {:.1}w × {:.1}× = {:.2}",
+                slot.name, "", slot_rooms, slot.weight, slot_rooms * slot.weight,
+            ));
+        }
+        // Show room weights if any are non-default.
+        let weighted_rooms: Vec<String> = if group.slots.is_empty() {
+            group.room_weights.iter()
+                .map(|(r, w)| format!("{r}={w:.1}×"))
+                .collect()
+        } else { vec![] };
+        if !weighted_rooms.is_empty() {
+            out.push(format!("    Weights: {}", weighted_rooms.join(", ")));
+        }
+    }
+
+    Ok(Some(out.join("\n")))
+}
+
+// ── Admin: !setroomweight <group> <room> <weight> ────────────────────────────
+
+async fn cmd_setroomweight(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (group_name, room_name, weight_str) = match (args.first(), args.get(1), args.get(2)) {
+        (Some(g), Some(r), Some(w)) => (*g, *r, *w),
+        _ => return Ok(Some("Usage: !setroomweight <group> <room> <weight>  (e.g. 2.0 for twice the load)".into())),
+    };
+    let weight: f64 = match weight_str.parse() {
+        Ok(w) if w > 0.0 => w,
+        _ => return Ok(Some("Weight must be a positive number (e.g. 1.5 or 0.5).".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let (group_id, slot_id) = match state.group_by_name(group_name) {
+        Some(g) => {
+            // Check if the room exists in a slot or at group level.
+            let in_group = g.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name));
+            let slot = g.slots.iter().find(|s| s.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)));
+            match (in_group, slot) {
+                (true, _)       => (g.id.clone(), None),
+                (_, Some(s))    => (g.id.clone(), Some(s.id.clone())),
+                _               => return Ok(Some(format!("Room «{room_name}» not found in «{group_name}»."))),
+            }
+        }
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    // Canonicalize room name from actual stored name.
+    let canonical = {
+        let g = state.group_by_name(group_name).unwrap();
+        match &slot_id {
+            None    => g.room_names.iter().find(|r| r.eq_ignore_ascii_case(room_name)).unwrap().clone(),
+            Some(s) => g.slot_by_id(s).unwrap().room_names.iter()
+                .find(|r| r.eq_ignore_ascii_case(room_name)).unwrap().clone(),
+        }
+    };
+    state.apply_event(DomainEvent::RoomWeightSet { group_id, slot_id, room_name: canonical.clone(), weight })?;
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ Room «{canonical}» in «{group_name}» weight set to {weight:.2}×.")))
 }
 
 // ── Admin: !setgroupweight <group> <weight> ───────────────────────────────────

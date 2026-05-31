@@ -69,6 +69,14 @@ pub enum DomainEvent {
     PersonLeftGroup    { person_id: PersonId, group_id: GroupId },
     PersonMatrixLinked { person_id: PersonId, matrix_id: String },
     GroupWeightSet     { group_id:  GroupId,  weight: f64 },
+    RoomWeightSet      {
+        group_id:  GroupId,
+        /// `None` = single-slot group; `Some` = this specific slot.
+        #[serde(default)]
+        slot_id:   Option<SlotId>,
+        room_name: String,
+        weight:    f64,
+    },
 
     // ── Cleaning operations ───────────────────────────────────────────────────
     CleaningCompleted {
@@ -316,29 +324,54 @@ pub struct GroupLoadModel {
     pub cli_per_year:          f64,
 }
 
+/// One person's CLI contribution from a single group.
+#[derive(Debug, Clone)]
+pub struct GroupContribution {
+    pub group_name:       String,
+    /// Weighted room-units per visit for this group.
+    pub load_per_assign:  f64,
+    /// Expected CLI per year from this group alone.
+    pub expected_annual:  f64,
+    /// Expected CLI since tracking start.
+    pub expected_abs:     f64,
+    /// Actual CLI since tracking start.
+    pub actual_abs:       f64,
+}
+
 /// One person's total workload across all their groups.
 #[derive(Debug, Clone)]
 pub struct PersonWorkload {
-    pub person_id:     PersonId,
-    pub display_name:  String,
-    pub group_names:   Vec<String>,
-    /// Sum of expected_load across all groups (absolute since tracking start).
-    pub expected_cli:  f64,
-    /// Sum of actual_load across all groups.
-    pub actual_cli:    f64,
-    /// actual_cli − expected_cli  (positive = carried more than fair share).
-    pub cli_deviation: f64,
+    pub person_id:             PersonId,
+    pub display_name:          String,
+    pub group_names:           Vec<String>,
+    /// Sum of expected CLI across all groups (absolute since tracking start).
+    pub expected_cli:          f64,
+    /// Sum of actual CLI across all groups (absolute since tracking start).
+    pub actual_cli:            f64,
+    /// actual_cli − expected_cli (positive = carried more than fair share).
+    pub cli_deviation:         f64,
+    /// expected_cli annualised (÷ years_tracked).
+    pub expected_cli_per_year: f64,
+    /// actual_cli annualised (÷ years_tracked).
+    pub actual_cli_per_year:   f64,
+    /// Per-group breakdown.
+    pub contributions:         Vec<GroupContribution>,
 }
 
 /// Global workload ranking across all persons and groups.
 #[derive(Debug, Clone)]
 pub struct WorkloadReport {
-    /// Sorted by expected_cli descending (most burdened roles first).
-    pub entries:      Vec<PersonWorkload>,
-    /// Display names of the top 3 actual contributors.
-    pub most_loaded:  Vec<String>,
-    /// Display names of the bottom 3 actual contributors.
-    pub least_loaded: Vec<String>,
+    /// Sorted by expected_cli_per_year descending.
+    pub entries:          Vec<PersonWorkload>,
+    pub years_tracked:    f64,
+    /// Top 3 by actual CLI/year.
+    pub most_loaded:      Vec<String>,
+    /// Bottom 3 by actual CLI/year.
+    pub least_loaded:     Vec<String>,
+    /// Person carrying the largest positive deviation.
+    pub biggest_surplus:  Option<String>,
+    /// Person carrying the largest negative deviation.
+    pub biggest_deficit:  Option<String>,
 }
 
 // ── Query functions ───────────────────────────────────────────────────────────
@@ -498,14 +531,37 @@ pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Opti
 ///
 /// `rooms_per_assignment` is the average across slots (weighted by slot.weight).
 /// For a single-slot group it is just the group's room count (min 1).
+/// Sum effective room-units for a list of rooms, applying per-room weights.
+/// Falls back to 1.0 when the room list is empty (at minimum one unit of work).
+/// Public alias used by commands to display per-slot room detail.
+pub fn effective_rooms_pub(
+    room_names:   &[String],
+    room_weights: &std::collections::HashMap<String, f64>,
+) -> f64 {
+    effective_rooms(room_names, room_weights)
+}
+
+fn effective_rooms(
+    room_names:   &[String],
+    room_weights: &std::collections::HashMap<String, f64>,
+) -> f64 {
+    if room_names.is_empty() {
+        1.0
+    } else {
+        room_names.iter()
+            .map(|r| room_weights.get(r).copied().unwrap_or(1.0))
+            .sum()
+    }
+}
+
 pub fn group_load_model(group: &crate::domain::CleaningGroup, interval: u32) -> GroupLoadModel {
     let member_count = group.member_ids.len().max(1);
 
     let rooms_per_assignment = if group.slots.is_empty() {
-        group.room_names.len().max(1) as f64
+        effective_rooms(&group.room_names, &group.room_weights)
     } else {
         let total: f64 = group.slots.iter()
-            .map(|s| s.room_names.len().max(1) as f64 * s.weight)
+            .map(|s| effective_rooms(&s.room_names, &s.room_weights) * s.weight)
             .sum();
         total / group.slots.len() as f64
     };
@@ -535,8 +591,8 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
     let start = state.tracking_start();
     let all_due = all_due_weeks_in_range(start, (cur_y, cur_w), interval);
     let due_weeks = all_due.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).count() as f64;
+    let years_tracked = (due_weeks / 52.0).max(f64::EPSILON);
 
-    // Build load model for every group once.
     let models: std::collections::HashMap<GroupId, GroupLoadModel> = state.cleaning_groups.iter()
         .map(|g| (g.id.clone(), group_load_model(g, interval)))
         .collect();
@@ -548,6 +604,7 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
 
             let mut expected_cli = 0.0f64;
             let mut actual_cli   = 0.0f64;
+            let mut contributions = Vec::new();
             let group_names = groups.iter().map(|g| g.name.clone()).collect();
 
             for g in &groups {
@@ -556,31 +613,52 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
                 let actual_assignments   = state.completions.iter()
                     .filter(|c| c.group_id == g.id && c.completed_by_id == p.id && !c.skipped)
                     .count() as f64;
-                expected_cli += expected_assignments * m.load_per_assignment;
-                actual_cli   += actual_assignments   * m.load_per_assignment;
+                let exp_abs = expected_assignments * m.load_per_assignment;
+                let act_abs = actual_assignments   * m.load_per_assignment;
+                expected_cli += exp_abs;
+                actual_cli   += act_abs;
+                contributions.push(GroupContribution {
+                    group_name:      m.group_name.clone(),
+                    load_per_assign: m.load_per_assignment,
+                    expected_annual: m.cli_per_year,
+                    expected_abs:    exp_abs,
+                    actual_abs:      act_abs,
+                });
             }
 
             Some(PersonWorkload {
-                person_id:     p.id.clone(),
-                display_name:  p.display_name.clone(),
+                person_id:             p.id.clone(),
+                display_name:          p.display_name.clone(),
                 group_names,
                 expected_cli,
                 actual_cli,
-                cli_deviation: actual_cli - expected_cli,
+                cli_deviation:         actual_cli - expected_cli,
+                expected_cli_per_year: expected_cli / years_tracked,
+                actual_cli_per_year:   actual_cli   / years_tracked,
+                contributions,
             })
         })
         .collect();
 
-    // Sort by expected CLI descending — most burdened roles first.
-    entries.sort_by(|a, b| b.expected_cli.partial_cmp(&a.expected_cli).unwrap_or(std::cmp::Ordering::Equal));
+    entries.sort_by(|a, b| b.expected_cli_per_year.partial_cmp(&a.expected_cli_per_year)
+        .unwrap_or(std::cmp::Ordering::Equal));
 
-    // Most/least loaded by actual contribution.
     let mut by_actual = entries.clone();
-    by_actual.sort_by(|a, b| b.actual_cli.partial_cmp(&a.actual_cli).unwrap_or(std::cmp::Ordering::Equal));
+    by_actual.sort_by(|a, b| b.actual_cli_per_year.partial_cmp(&a.actual_cli_per_year)
+        .unwrap_or(std::cmp::Ordering::Equal));
     let most_loaded  = by_actual.iter().take(3).map(|e| e.display_name.clone()).collect();
     let least_loaded = by_actual.iter().rev().take(3).map(|e| e.display_name.clone()).collect();
 
-    WorkloadReport { entries, most_loaded, least_loaded }
+    let biggest_surplus = entries.iter()
+        .filter(|e| e.cli_deviation > 0.0)
+        .max_by(|a, b| a.cli_deviation.partial_cmp(&b.cli_deviation).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|e| e.display_name.clone());
+    let biggest_deficit = entries.iter()
+        .filter(|e| e.cli_deviation < 0.0)
+        .min_by(|a, b| a.cli_deviation.partial_cmp(&b.cli_deviation).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|e| e.display_name.clone());
+
+    WorkloadReport { entries, years_tracked, most_loaded, least_loaded, biggest_surplus, biggest_deficit }
 }
 
 /// All persons with stats, sorted by completion rate then streak.

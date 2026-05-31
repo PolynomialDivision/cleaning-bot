@@ -72,14 +72,23 @@ pub struct CleaningSlot {
     pub name:       String,
     #[serde(default)]
     pub room_names: Vec<String>,
-    /// Per-slot workload multiplier on top of room count (default 1.0).
+    /// Per-room workload multipliers; absent keys default to 1.0.
+    #[serde(default)]
+    pub room_weights: std::collections::HashMap<String, f64>,
+    /// Per-slot workload multiplier on top of room weights (default 1.0).
     #[serde(default = "default_weight")]
     pub weight:     f64,
 }
 
 impl CleaningSlot {
     pub fn new(name: &str) -> Self {
-        CleaningSlot { id: Uuid::new_v4().to_string(), name: name.to_owned(), room_names: Vec::new(), weight: 1.0 }
+        CleaningSlot {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_owned(),
+            room_names: Vec::new(),
+            room_weights: std::collections::HashMap::new(),
+            weight: 1.0,
+        }
     }
 }
 
@@ -94,12 +103,15 @@ pub struct CleaningGroup {
     /// Used in single-slot mode (slots is empty).
     #[serde(default)]
     pub room_names: Vec<String>,
+    /// Per-room workload multipliers for single-slot mode; absent keys default to 1.0.
+    #[serde(default)]
+    pub room_weights: std::collections::HashMap<String, f64>,
     /// When non-empty, enables multi-slot mode.
     #[serde(default)]
     pub slots:      Vec<CleaningSlot>,
-    /// Group-level workload multiplier on top of room count (default 1.0).
-    /// Use `!setgroupweight` to adjust for groups that are heavier/lighter
-    /// than their room count suggests (e.g. kitchen = 2.0, storage = 0.5).
+    /// Group-level workload multiplier stacked on top of room weights (default 1.0).
+    /// Use `!setgroupweight` to adjust for groups heavier/lighter than their
+    /// room count suggests (e.g. kitchen = 2.0, storage = 0.5).
     #[serde(default = "default_weight")]
     pub weight:     f64,
 }
@@ -110,12 +122,13 @@ pub fn default_weight() -> f64 { 1.0 }
 impl CleaningGroup {
     pub fn new(name: &str) -> Self {
         CleaningGroup {
-            id:         Uuid::new_v4().to_string(),
-            name:       name.to_owned(),
-            member_ids: Vec::new(),
-            room_names: Vec::new(),
-            slots:      Vec::new(),
-            weight:     1.0,
+            id:           Uuid::new_v4().to_string(),
+            name:         name.to_owned(),
+            member_ids:   Vec::new(),
+            room_names:   Vec::new(),
+            room_weights: std::collections::HashMap::new(),
+            slots:        Vec::new(),
+            weight:       1.0,
         }
     }
 

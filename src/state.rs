@@ -290,6 +290,21 @@ impl State {
                 g.member_ids.retain(|id| id != person_id);
                 g.member_ids.len() < before
             }
+            E::RoomWeightSet { group_id, slot_id, room_name, weight } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                let weights = match slot_id {
+                    Some(sid) => {
+                        let s = g.slots.iter_mut().find(|s| &s.id == sid)
+                            .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
+                        &mut s.room_weights
+                    }
+                    None => &mut g.room_weights,
+                };
+                if weights.get(room_name).copied() == Some(*weight) { return Ok(()); }
+                weights.insert(room_name.clone(), *weight);
+                true
+            }
             E::GroupWeightSet { group_id, weight } => {
                 let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
