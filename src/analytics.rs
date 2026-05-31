@@ -220,6 +220,7 @@ pub fn backfill_events(state: &State) -> Vec<LoggedEvent> {
 /// Per-person aggregated statistics.
 #[derive(Debug, Clone)]
 pub struct PersonStats {
+    #[allow(dead_code)]
     pub person_id:       PersonId,
     pub display_name:    String,
     /// Comma-joined names of all groups this person belongs to.
@@ -239,6 +240,7 @@ pub struct PersonStats {
     /// Swaps they accepted (took someone else's duty).
     pub swaps_taken:     u32,
     /// Total weeks marked absent (across all groups).
+    #[allow(dead_code)]
     pub absent_weeks:    u32,
     /// Current consecutive-completed streak for their primary group.
     pub streak:          u32,
@@ -247,48 +249,48 @@ pub struct PersonStats {
 /// Per-group aggregated statistics.
 #[derive(Debug, Clone)]
 pub struct GroupStats {
+    #[allow(dead_code)]
     pub group_id:        GroupId,
+    #[allow(dead_code)]
     pub group_name:      String,
     pub member_count:    u32,
     pub due_weeks:       u32,
     pub completed:       u32,
+    #[allow(dead_code)]
     pub skipped:         u32,
     /// due − completed − skipped.
     pub missed:          u32,
     pub completion_rate: f64,
     pub current_streak:  u32,
-    /// Total accepted swaps within this group.
+    #[allow(dead_code)]
     pub swap_count:      u32,
 }
 
 /// One person's share in a fairness report.
 #[derive(Debug, Clone)]
 pub struct FairnessEntry {
-    pub person_id:      PersonId,
-    pub display_name:   String,
+    pub display_name:  String,
     /// Ideal cleanings = due_weeks / member_count.
-    pub expected:       f64,
-    /// Actual completed cleanings (skipped weeks excluded from duty).
-    pub actual:         u32,
-    /// actual − expected  (positive = above fair share).
-    pub deviation:      f64,
-    /// Expected Cleaning Load Index contribution from this group.
-    pub expected_load:  f64,
-    /// Actual CLI contribution (completed assignments × load_per_assignment).
-    pub actual_load:    f64,
-    /// actual_load − expected_load.
-    pub load_deviation: f64,
+    pub expected:      f64,
+    /// Actual completed cleanings.
+    pub actual:        u32,
+    /// actual − expected (positive = above fair share).
+    pub deviation:     f64,
+    /// Expected CLI contribution from this group.
+    pub expected_load: f64,
+    /// Actual CLI contribution (completed × load_per_assignment).
+    pub actual_load:   f64,
 }
 
 /// Fairness distribution for an entire cleaning group.
 #[derive(Debug, Clone)]
 pub struct FairnessReport {
-    pub group_id:       GroupId,
     pub group_name:     String,
     pub due_weeks:      u32,
     /// Sorted by deviation descending (biggest contributor first).
     pub entries:        Vec<FairnessEntry>,
     /// Gini coefficient: 0.0 = perfect equality, 1.0 = one person did everything.
+    #[allow(dead_code)]
     pub gini:           f64,
     /// 100 − round(gini * 100): human-readable 0–100 fairness score.
     pub fairness_score: u8,
@@ -308,7 +310,6 @@ pub struct FairnessReport {
 /// extending `load_per_assignment` without changing any downstream structs.
 #[derive(Debug, Clone)]
 pub struct GroupLoadModel {
-    pub group_id:              GroupId,
     pub group_name:            String,
     pub member_count:          usize,
     pub rotation_interval:     u32,
@@ -319,6 +320,7 @@ pub struct GroupLoadModel {
     /// rooms_per_assignment × group_weight — the atomic load unit.
     pub load_per_assignment:   f64,
     /// Expected assignments per person per year = 52 / interval / member_count.
+    #[allow(dead_code)]
     pub assignments_per_year:  f64,
     /// Expected CLI per person per year = load_per_assignment × assignments_per_year.
     pub cli_per_year:          f64,
@@ -327,28 +329,31 @@ pub struct GroupLoadModel {
 /// One person's CLI contribution from a single group.
 #[derive(Debug, Clone)]
 pub struct GroupContribution {
-    pub group_name:       String,
-    /// Weighted room-units per visit for this group.
-    pub load_per_assign:  f64,
+    #[allow(dead_code)]
+    pub group_name:      String,
     /// Expected CLI per year from this group alone.
-    pub expected_annual:  f64,
+    pub expected_annual: f64,
     /// Expected CLI since tracking start.
-    pub expected_abs:     f64,
+    #[allow(dead_code)]
+    pub expected_abs:    f64,
     /// Actual CLI since tracking start.
-    pub actual_abs:       f64,
+    #[allow(dead_code)]
+    pub actual_abs:      f64,
 }
 
 /// One person's total workload across all their groups.
 #[derive(Debug, Clone)]
 pub struct PersonWorkload {
-    pub person_id:             PersonId,
     pub display_name:          String,
     pub group_names:           Vec<String>,
     /// Sum of expected CLI across all groups (absolute since tracking start).
+    #[allow(dead_code)]
     pub expected_cli:          f64,
     /// Sum of actual CLI across all groups (absolute since tracking start).
+    #[allow(dead_code)]
     pub actual_cli:            f64,
     /// actual_cli − expected_cli (positive = carried more than fair share).
+    #[allow(dead_code)]
     pub cli_deviation:         f64,
     /// expected_cli annualised (÷ years_tracked).
     pub expected_cli_per_year: f64,
@@ -362,16 +367,12 @@ pub struct PersonWorkload {
 #[derive(Debug, Clone)]
 pub struct WorkloadReport {
     /// Sorted by expected_cli_per_year descending.
-    pub entries:          Vec<PersonWorkload>,
-    pub years_tracked:    f64,
-    /// Top 3 by actual CLI/year.
-    pub most_loaded:      Vec<String>,
-    /// Bottom 3 by actual CLI/year.
-    pub least_loaded:     Vec<String>,
-    /// Person carrying the largest positive deviation.
-    pub biggest_surplus:  Option<String>,
-    /// Person carrying the largest negative deviation.
-    pub biggest_deficit:  Option<String>,
+    pub entries:       Vec<PersonWorkload>,
+    pub years_tracked: f64,
+    /// Top actual CLI/year.
+    pub most_loaded:   Vec<String>,
+    /// Bottom actual CLI/year.
+    pub least_loaded:  Vec<String>,
 }
 
 // ── Query functions ───────────────────────────────────────────────────────────
@@ -498,14 +499,12 @@ pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Opti
             let expected_load = expected_each * load_model.load_per_assignment;
             let actual_load   = actual as f64  * load_model.load_per_assignment;
             Some(FairnessEntry {
-                person_id:      pid.clone(),
-                display_name:   person.display_name.clone(),
-                expected:       expected_each,
+                display_name: person.display_name.clone(),
+                expected:     expected_each,
                 actual,
-                deviation:      actual as f64 - expected_each,
+                deviation:    actual as f64 - expected_each,
                 expected_load,
                 actual_load,
-                load_deviation: actual_load - expected_load,
             })
         })
         .collect();
@@ -517,7 +516,6 @@ pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Opti
     let fairness_score = (100.0 - (gini * 100.0).round()) as u8;
 
     Some(FairnessReport {
-        group_id: group_id.clone(),
         group_name: group.name.clone(),
         due_weeks,
         entries,
@@ -570,7 +568,6 @@ pub fn group_load_model(group: &crate::domain::CleaningGroup, interval: u32) -> 
     let assignments_per_year = 52.0 / interval as f64 / member_count as f64;
 
     GroupLoadModel {
-        group_id:             group.id.clone(),
         group_name:           group.name.clone(),
         member_count,
         rotation_interval:    interval,
@@ -619,7 +616,6 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
                 actual_cli   += act_abs;
                 contributions.push(GroupContribution {
                     group_name:      m.group_name.clone(),
-                    load_per_assign: m.load_per_assignment,
                     expected_annual: m.cli_per_year,
                     expected_abs:    exp_abs,
                     actual_abs:      act_abs,
@@ -627,7 +623,6 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
             }
 
             Some(PersonWorkload {
-                person_id:             p.id.clone(),
                 display_name:          p.display_name.clone(),
                 group_names,
                 expected_cli,
@@ -649,16 +644,7 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
     let most_loaded  = by_actual.iter().take(3).map(|e| e.display_name.clone()).collect();
     let least_loaded = by_actual.iter().rev().take(3).map(|e| e.display_name.clone()).collect();
 
-    let biggest_surplus = entries.iter()
-        .filter(|e| e.cli_deviation > 0.0)
-        .max_by(|a, b| a.cli_deviation.partial_cmp(&b.cli_deviation).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|e| e.display_name.clone());
-    let biggest_deficit = entries.iter()
-        .filter(|e| e.cli_deviation < 0.0)
-        .min_by(|a, b| a.cli_deviation.partial_cmp(&b.cli_deviation).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|e| e.display_name.clone());
-
-    WorkloadReport { entries, years_tracked, most_loaded, least_loaded, biggest_surplus, biggest_deficit }
+    WorkloadReport { entries, years_tracked, most_loaded, least_loaded }
 }
 
 /// All persons with stats, sorted by completion rate then streak.

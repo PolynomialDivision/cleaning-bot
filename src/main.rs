@@ -41,7 +41,6 @@ mod state;
 mod validate;
 
 use config::Config;
-use domain::Person;
 use state::{GreetingChoice, GreetingInfo, ReactionDone, State};
 
 fn add_thread_relation(content: &mut RoomMessageEventContent, root: OwnedEventId, reply_to: OwnedEventId) {

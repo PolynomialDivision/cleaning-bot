@@ -34,6 +34,7 @@ pub struct AssignmentInstance {
     pub group_id:    GroupId,
     pub group_name:  String,
     /// `Some` for multi-slot groups; `None` for single-slot groups.
+    #[allow(dead_code)]
     pub slot_id:     Option<SlotId>,
     pub slot_name:   Option<String>,
     pub room_names:  Vec<String>,

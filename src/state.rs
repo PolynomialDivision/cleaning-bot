@@ -3,7 +3,7 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, HashSet}, path::Path};
 
-use crate::domain::{AssignmentSource, CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId};
+use crate::domain::{CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId};
 
 // ── Scheduling records ────────────────────────────────────────────────────────
 
@@ -161,6 +161,7 @@ impl State {
     /// such as referencing a non-existent group or person.
     /// Low-level: append an already-applied backfill event without mutating state.
     /// Only called from `analytics::backfill_events` bootstrapping path.
+    #[allow(dead_code)]
     pub(crate) fn append_event(&mut self, event: crate::analytics::LoggedEvent) {
         self.event_log.push(event);
     }

@@ -1304,7 +1304,7 @@ async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
 async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     let state    = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
-    let (start_y, start_w) = state.tracking_start();
+    let (_, start_w) = state.tracking_start();
 
     let groups: Vec<crate::domain::GroupId> = if let Some(name) = args.first() {
         match state.group_by_name(name) {
