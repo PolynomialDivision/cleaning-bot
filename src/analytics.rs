@@ -68,6 +68,7 @@ pub enum DomainEvent {
     PersonJoinedGroup  { person_id: PersonId, group_id: GroupId },
     PersonLeftGroup    { person_id: PersonId, group_id: GroupId },
     PersonMatrixLinked { person_id: PersonId, matrix_id: String },
+    GroupWeightSet     { group_id:  GroupId,  weight: f64 },
 
     // ── Cleaning operations ───────────────────────────────────────────────────
     CleaningCompleted {
@@ -255,14 +256,20 @@ pub struct GroupStats {
 /// One person's share in a fairness report.
 #[derive(Debug, Clone)]
 pub struct FairnessEntry {
-    pub person_id:    PersonId,
-    pub display_name: String,
+    pub person_id:      PersonId,
+    pub display_name:   String,
     /// Ideal cleanings = due_weeks / member_count.
-    pub expected:     f64,
+    pub expected:       f64,
     /// Actual completed cleanings (skipped weeks excluded from duty).
-    pub actual:       u32,
+    pub actual:         u32,
     /// actual − expected  (positive = above fair share).
-    pub deviation:    f64,
+    pub deviation:      f64,
+    /// Expected Cleaning Load Index contribution from this group.
+    pub expected_load:  f64,
+    /// Actual CLI contribution (completed assignments × load_per_assignment).
+    pub actual_load:    f64,
+    /// actual_load − expected_load.
+    pub load_deviation: f64,
 }
 
 /// Fairness distribution for an entire cleaning group.
@@ -277,6 +284,61 @@ pub struct FairnessReport {
     pub gini:           f64,
     /// 100 − round(gini * 100): human-readable 0–100 fairness score.
     pub fairness_score: u8,
+    /// Workload model for this group.
+    pub load_model:     GroupLoadModel,
+}
+
+// ── Workload model ────────────────────────────────────────────────────────────
+
+/// How much cleaning load one assignment in a group represents.
+///
+/// Factors stacked (all default to neutral):
+///   rooms_per_assignment  – average room-units per visit (slot-level)
+///   group.weight          – manual group-level multiplier
+///
+/// Extensibility: add slot-level weights, room area, task types etc. by
+/// extending `load_per_assignment` without changing any downstream structs.
+#[derive(Debug, Clone)]
+pub struct GroupLoadModel {
+    pub group_id:              GroupId,
+    pub group_name:            String,
+    pub member_count:          usize,
+    pub rotation_interval:     u32,
+    /// Average room-units a person cleans per visit (weighted by slot.weight).
+    pub rooms_per_assignment:  f64,
+    /// Manual group-level multiplier (1.0 = no adjustment).
+    pub group_weight:          f64,
+    /// rooms_per_assignment × group_weight — the atomic load unit.
+    pub load_per_assignment:   f64,
+    /// Expected assignments per person per year = 52 / interval / member_count.
+    pub assignments_per_year:  f64,
+    /// Expected CLI per person per year = load_per_assignment × assignments_per_year.
+    pub cli_per_year:          f64,
+}
+
+/// One person's total workload across all their groups.
+#[derive(Debug, Clone)]
+pub struct PersonWorkload {
+    pub person_id:     PersonId,
+    pub display_name:  String,
+    pub group_names:   Vec<String>,
+    /// Sum of expected_load across all groups (absolute since tracking start).
+    pub expected_cli:  f64,
+    /// Sum of actual_load across all groups.
+    pub actual_cli:    f64,
+    /// actual_cli − expected_cli  (positive = carried more than fair share).
+    pub cli_deviation: f64,
+}
+
+/// Global workload ranking across all persons and groups.
+#[derive(Debug, Clone)]
+pub struct WorkloadReport {
+    /// Sorted by expected_cli descending (most burdened roles first).
+    pub entries:      Vec<PersonWorkload>,
+    /// Display names of the top 3 actual contributors.
+    pub most_loaded:  Vec<String>,
+    /// Display names of the bottom 3 actual contributors.
+    pub least_loaded: Vec<String>,
 }
 
 // ── Query functions ───────────────────────────────────────────────────────────
@@ -379,7 +441,7 @@ pub fn group_stats(state: &State, group_id: &GroupId, interval: u32) -> Option<G
 
 /// Compute how equitably cleaning is distributed within a group.
 ///
-/// Returns `None` if the group has no members or no history.
+/// Returns `None` if the group has no members.
 pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Option<FairnessReport> {
     let group = state.group_by_id(group_id)?;
     if group.member_ids.is_empty() { return None; }
@@ -392,6 +454,7 @@ pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Opti
 
     let n = group.member_ids.len() as f64;
     let expected_each = due_weeks as f64 / n;
+    let load_model = group_load_model(group, interval);
 
     let mut entries: Vec<FairnessEntry> = group.member_ids.iter()
         .filter_map(|pid| {
@@ -399,12 +462,17 @@ pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Opti
             let actual = state.completions.iter()
                 .filter(|c| c.group_id == *group_id && c.completed_by_id == *pid && !c.skipped)
                 .count() as u32;
+            let expected_load = expected_each * load_model.load_per_assignment;
+            let actual_load   = actual as f64  * load_model.load_per_assignment;
             Some(FairnessEntry {
-                person_id:    pid.clone(),
-                display_name: person.display_name.clone(),
-                expected:     expected_each,
+                person_id:      pid.clone(),
+                display_name:   person.display_name.clone(),
+                expected:       expected_each,
                 actual,
-                deviation:    actual as f64 - expected_each,
+                deviation:      actual as f64 - expected_each,
+                expected_load,
+                actual_load,
+                load_deviation: actual_load - expected_load,
             })
         })
         .collect();
@@ -416,13 +484,103 @@ pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Opti
     let fairness_score = (100.0 - (gini * 100.0).round()) as u8;
 
     Some(FairnessReport {
-        group_id:       group_id.clone(),
-        group_name:     group.name.clone(),
+        group_id: group_id.clone(),
+        group_name: group.name.clone(),
         due_weeks,
         entries,
         gini,
         fairness_score,
+        load_model,
     })
+}
+
+/// Build the workload model for a single group.
+///
+/// `rooms_per_assignment` is the average across slots (weighted by slot.weight).
+/// For a single-slot group it is just the group's room count (min 1).
+pub fn group_load_model(group: &crate::domain::CleaningGroup, interval: u32) -> GroupLoadModel {
+    let member_count = group.member_ids.len().max(1);
+
+    let rooms_per_assignment = if group.slots.is_empty() {
+        group.room_names.len().max(1) as f64
+    } else {
+        let total: f64 = group.slots.iter()
+            .map(|s| s.room_names.len().max(1) as f64 * s.weight)
+            .sum();
+        total / group.slots.len() as f64
+    };
+
+    let load_per_assignment  = rooms_per_assignment * group.weight;
+    let assignments_per_year = 52.0 / interval as f64 / member_count as f64;
+
+    GroupLoadModel {
+        group_id:             group.id.clone(),
+        group_name:           group.name.clone(),
+        member_count,
+        rotation_interval:    interval,
+        rooms_per_assignment,
+        group_weight:         group.weight,
+        load_per_assignment,
+        assignments_per_year,
+        cli_per_year:         load_per_assignment * assignments_per_year,
+    }
+}
+
+/// Global workload ranking across all persons and all their groups.
+///
+/// Compares persons who belong to different groups by normalising their
+/// respective loads onto the same scale (room-equivalents since tracking start).
+pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
+    let (cur_y, cur_w) = current_iso_week();
+    let start = state.tracking_start();
+    let all_due = all_due_weeks_in_range(start, (cur_y, cur_w), interval);
+    let due_weeks = all_due.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).count() as f64;
+
+    // Build load model for every group once.
+    let models: std::collections::HashMap<GroupId, GroupLoadModel> = state.cleaning_groups.iter()
+        .map(|g| (g.id.clone(), group_load_model(g, interval)))
+        .collect();
+
+    let mut entries: Vec<PersonWorkload> = state.persons.iter()
+        .filter_map(|p| {
+            let groups = state.groups_for_person(&p.id);
+            if groups.is_empty() { return None; }
+
+            let mut expected_cli = 0.0f64;
+            let mut actual_cli   = 0.0f64;
+            let group_names = groups.iter().map(|g| g.name.clone()).collect();
+
+            for g in &groups {
+                let Some(m) = models.get(&g.id) else { continue };
+                let expected_assignments = due_weeks / m.member_count as f64;
+                let actual_assignments   = state.completions.iter()
+                    .filter(|c| c.group_id == g.id && c.completed_by_id == p.id && !c.skipped)
+                    .count() as f64;
+                expected_cli += expected_assignments * m.load_per_assignment;
+                actual_cli   += actual_assignments   * m.load_per_assignment;
+            }
+
+            Some(PersonWorkload {
+                person_id:     p.id.clone(),
+                display_name:  p.display_name.clone(),
+                group_names,
+                expected_cli,
+                actual_cli,
+                cli_deviation: actual_cli - expected_cli,
+            })
+        })
+        .collect();
+
+    // Sort by expected CLI descending — most burdened roles first.
+    entries.sort_by(|a, b| b.expected_cli.partial_cmp(&a.expected_cli).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Most/least loaded by actual contribution.
+    let mut by_actual = entries.clone();
+    by_actual.sort_by(|a, b| b.actual_cli.partial_cmp(&a.actual_cli).unwrap_or(std::cmp::Ordering::Equal));
+    let most_loaded  = by_actual.iter().take(3).map(|e| e.display_name.clone()).collect();
+    let least_loaded = by_actual.iter().rev().take(3).map(|e| e.display_name.clone()).collect();
+
+    WorkloadReport { entries, most_loaded, least_loaded }
 }
 
 /// All persons with stats, sorted by completion rate then streak.

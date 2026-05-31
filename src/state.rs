@@ -290,6 +290,13 @@ impl State {
                 g.member_ids.retain(|id| id != person_id);
                 g.member_ids.len() < before
             }
+            E::GroupWeightSet { group_id, weight } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if (g.weight - weight).abs() < f64::EPSILON { return Ok(()); }
+                g.weight = *weight;
+                true
+            }
             E::PersonMatrixLinked { person_id, matrix_id } => {
                 if self.persons.iter().any(|p| p.matrix_id.as_deref() == Some(matrix_id) && &p.id != person_id) {
                     anyhow::bail!("{matrix_id} is already linked to another person");

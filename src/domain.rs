@@ -72,11 +72,14 @@ pub struct CleaningSlot {
     pub name:       String,
     #[serde(default)]
     pub room_names: Vec<String>,
+    /// Per-slot workload multiplier on top of room count (default 1.0).
+    #[serde(default = "default_weight")]
+    pub weight:     f64,
 }
 
 impl CleaningSlot {
     pub fn new(name: &str) -> Self {
-        CleaningSlot { id: Uuid::new_v4().to_string(), name: name.to_owned(), room_names: Vec::new() }
+        CleaningSlot { id: Uuid::new_v4().to_string(), name: name.to_owned(), room_names: Vec::new(), weight: 1.0 }
     }
 }
 
@@ -94,7 +97,15 @@ pub struct CleaningGroup {
     /// When non-empty, enables multi-slot mode.
     #[serde(default)]
     pub slots:      Vec<CleaningSlot>,
+    /// Group-level workload multiplier on top of room count (default 1.0).
+    /// Use `!setgroupweight` to adjust for groups that are heavier/lighter
+    /// than their room count suggests (e.g. kitchen = 2.0, storage = 0.5).
+    #[serde(default = "default_weight")]
+    pub weight:     f64,
 }
+
+/// Default workload multiplier — no adjustment.
+pub fn default_weight() -> f64 { 1.0 }
 
 impl CleaningGroup {
     pub fn new(name: &str) -> Self {
@@ -104,6 +115,7 @@ impl CleaningGroup {
             member_ids: Vec::new(),
             room_names: Vec::new(),
             slots:      Vec::new(),
+            weight:     1.0,
         }
     }
 

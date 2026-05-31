@@ -112,7 +112,9 @@ pub async fn handle(
         "!next"         => cmd_next(ctx, sender, &args).await,
         "!skip"         => cmd_skip(ctx, sender, &args).await,
         "!leaderboard"  => cmd_leaderboard(ctx).await,
-        "!fairness"     => cmd_fairness(ctx, &args).await,
+        "!fairness"        => cmd_fairness(ctx, &args).await,
+        "!workload"        => cmd_workload(ctx).await,
+        "!setgroupweight"  => cmd_setgroupweight(ctx, sender, &args).await,
         "!validate"     => cmd_validate(ctx, sender).await,
         "!absent"       => cmd_absent(ctx, sender, &args).await,
         "!back"         => cmd_back(ctx, sender, &args).await,
@@ -1273,7 +1275,6 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
     let interval = ctx.config.schedule.interval_weeks;
     let (start_y, start_w) = state.tracking_start();
 
-    // Collect target groups (named group or all groups).
     let groups: Vec<crate::domain::GroupId> = if let Some(name) = args.first() {
         match state.group_by_name(name) {
             Some(g) => vec![g.id.clone()],
@@ -1290,20 +1291,31 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
     let mut out = Vec::new();
     for group_id in &groups {
         let Some(report) = analytics::fairness_report(&state, group_id, interval) else { continue };
+        let m = &report.load_model;
         out.push(format!(
-            "⚖️ **Fairness · {}** · {} due weeks · since week {start_w} ({})",
+            "⚖️ **{}** · {} due weeks · since week {start_w} ({})",
             report.group_name, report.due_weeks, week_dates(start_y, start_w)
         ));
-        out.push(String::new());
-        out.push(format!("Expected per person: {:.1} cleanings", report.entries.first().map(|e| e.expected).unwrap_or(0.0)));
+        out.push(format!(
+            "Load model: {:.1} rooms/visit × {:.1}× weight = **{:.2} CLI/assignment** · {:.2} expected/year/person",
+            m.rooms_per_assignment, m.group_weight, m.load_per_assignment, m.cli_per_year,
+        ));
         out.push(String::new());
 
+        out.push(format!(
+            "  {:<20} {:>6}  {:>6}  {:>6}  {:>7}  {:>7}",
+            "Name", "Done", "Exp", "Δ", "CLI act", "CLI dev",
+        ));
+        out.push(format!("  {}", "─".repeat(60)));
         for e in &report.entries {
-            let icon = if e.deviation > 0.5 { "🟢" }
-                       else if e.deviation < -0.5 { "🔴" }
-                       else { "🟡" };
-            let sign = if e.deviation >= 0.0 { "+" } else { "" };
-            out.push(format!("  {icon} {}  done: {}  ({sign}{:.1})", e.display_name, e.actual, e.deviation));
+            let icon = if e.deviation > 0.5 { "🟢" } else if e.deviation < -0.5 { "🔴" } else { "🟡" };
+            let dev_sign  = if e.deviation      >= 0.0 { "+" } else { "" };
+            let load_sign = if e.load_deviation >= 0.0 { "+" } else { "" };
+            out.push(format!(
+                "{icon} {:<20} {:>6}  {:>6.1}  {dev_sign}{:>5.1}  {:>7.2}  {load_sign}{:>6.2}",
+                e.display_name, e.actual, e.expected, e.deviation,
+                e.actual_load, e.load_deviation,
+            ));
         }
 
         out.push(String::new());
@@ -1314,8 +1326,70 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
     if out.is_empty() {
         return Ok(Some("No history yet — run some cleaning cycles first.".into()));
     }
-    out.pop(); // remove trailing blank line
+    out.pop();
     Ok(Some(out.join("\n")))
+}
+
+// ── !workload ─────────────────────────────────────────────────────────────────
+
+async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
+    let state    = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+    let report   = analytics::workload_report(&state, interval);
+
+    if report.entries.is_empty() {
+        return Ok(Some("No members assigned to any group yet.".into()));
+    }
+
+    let mut out = vec!["🏋️ **Cleaning Load Index**".to_owned(), String::new()];
+    out.push(format!(
+        "  {:<20} {:>10}  {:>10}  {:>9}  {}",
+        "Name", "Exp CLI", "Act CLI", "Δ", "Groups",
+    ));
+    out.push(format!("  {}", "─".repeat(70)));
+
+    for e in &report.entries {
+        let sign = if e.cli_deviation >= 0.0 { "+" } else { "" };
+        out.push(format!(
+            "  {:<20} {:>10.2}  {:>10.2}  {sign}{:>8.2}  {}",
+            e.display_name, e.expected_cli, e.actual_cli, e.cli_deviation,
+            e.group_names.join(", "),
+        ));
+    }
+
+    out.push(String::new());
+    if !report.most_loaded.is_empty() {
+        out.push(format!("Most loaded (actual):  {}", report.most_loaded.join(", ")));
+    }
+    if !report.least_loaded.is_empty() {
+        out.push(format!("Least loaded (actual): {}", report.least_loaded.join(", ")));
+    }
+    out.push(String::new());
+    out.push("CLI = room-equivalents cleaned. Higher = more work assigned.".to_owned());
+
+    Ok(Some(out.join("\n")))
+}
+
+// ── Admin: !setgroupweight <group> <weight> ───────────────────────────────────
+
+async fn cmd_setgroupweight(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let (group_name, weight_str) = match (args.first(), args.get(1)) {
+        (Some(g), Some(w)) => (*g, *w),
+        _ => return Ok(Some("Usage: !setgroupweight <group> <weight>  (e.g. 2.0 for twice the load)".into())),
+    };
+    let weight: f64 = match weight_str.parse() {
+        Ok(w) if w > 0.0 => w,
+        _ => return Ok(Some("Weight must be a positive number (e.g. 1.5 or 0.5).".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let group_id = match state.group_by_name(group_name) {
+        Some(g) => g.id.clone(),
+        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+    };
+    state.apply_event(DomainEvent::GroupWeightSet { group_id, weight })?;
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ «{group_name}» workload weight set to {weight:.2}×.")))
 }
 
 // ── Admin: !absent <person> [group] [weeks] ───────────────────────────────────
