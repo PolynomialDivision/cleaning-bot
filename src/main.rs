@@ -366,6 +366,7 @@ async fn main() -> Result<()> {
                                         let _ = state.apply_event(analytics::DomainEvent::PersonJoinedGroup {
                                             person_id, group_id: group_id.clone(),
                                         });
+                                        commands::reset_and_rematerialize(&ctx, &mut state, &group_id).ok();
                                     }
                                     if let Err(e) = state.save(&ctx.state_path).await {
                                         tracing::error!("Failed to save after greeting join: {e}");

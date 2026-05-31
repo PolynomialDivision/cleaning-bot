@@ -149,7 +149,7 @@ fn person_key(p: &Person) -> &str {
 /// Thresholds:  > +10% → overloaded  |  < -10% → under-contributing  |  else → balanced
 fn load_icon(actual: f64, expected: f64) -> &'static str {
     let (_, label) = load_delta_pct(actual, expected);
-    if label == "overloaded" { "🟢" } else if label == "under-contributing" { "🔴" } else { "🟡" }
+    if label == "under-contributing" { "🔴" } else if label == "overloaded" { "🟠" } else { "🟢" }
 }
 
 fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
@@ -175,7 +175,7 @@ fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
 /// When someone joins a group, clear ALL future slot assignments for that group
 /// and rematerialize.  This redistributes future weeks across the full member list.
 /// Without this, any assignments frozen before the new person joined stay unchanged.
-fn reset_and_rematerialize(
+pub(crate) fn reset_and_rematerialize(
     ctx: &BotContext,
     state: &mut crate::state::State,
     group_id: &str,
@@ -465,7 +465,7 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
         for pid in &group.member_ids {
             if let Some(p) = state.person_by_id(pid) {
                 let cnt = state.completions.iter()
-                    .filter(|c| c.group_id == group.id && c.completed_by_id == *pid).count();
+                    .filter(|c| c.group_id == group.id && c.completed_by_id == *pid && !c.skipped).count();
                 lines.push(format!("  {}: {cnt}", p.display_name));
             }
         }
@@ -527,7 +527,8 @@ async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
     if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("You are already in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
+    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id: group_id.clone() })?;
+    reset_and_rematerialize(ctx, &mut state, &group_id)?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Joined «{group_name}».")))
 }
@@ -586,7 +587,8 @@ async fn cmd_adduser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> R
     if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{mxid} is already in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
+    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id: group_id.clone() })?;
+    reset_and_rematerialize(ctx, &mut state, &group_id)?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {mxid} to «{group_name}».")))
 }
@@ -638,7 +640,8 @@ async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
     if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
         return Ok(Some(format!("{name} is already in «{group_name}».")));
     }
-    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id })?;
+    state.apply_event(DomainEvent::PersonJoinedGroup { person_id, group_id: group_id.clone() })?;
+    reset_and_rematerialize(ctx, &mut state, &group_id)?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added {name} (no Matrix) to «{group_name}».")))
 }
