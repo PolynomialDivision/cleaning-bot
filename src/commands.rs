@@ -725,10 +725,7 @@ async fn cmd_linkmatrix(ctx: &BotContext, sender: &OwnedUserId, room: &Room, arg
             })?;
             unassign_and_rematerialize(ctx, &mut state, &stub_id, gid).await?;
         }
-        if let Some(stub) = state.persons.iter_mut().find(|p| p.id == stub_id) {
-            stub.matrix_id = None;
-            stub.active    = false;
-        }
+        state.persons.retain(|p| p.id != stub_id);
     }
 
     state.apply_event(DomainEvent::PersonMatrixLinked {
