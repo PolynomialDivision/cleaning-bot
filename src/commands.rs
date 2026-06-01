@@ -78,8 +78,10 @@ pub async fn handle(
             let s = cmd_linkmatrix(ctx, sender, room, &args).await?;
             return Ok(s.map(RoomMessageEventContent::text_plain));
         }
-        "!cleanplan"  => return cmd_cleanplan(ctx, sender, room, &args).await,
-        "!remind"     => return cmd_remind(ctx, sender, room, &args).await,
+        "!cleanplan"      => return cmd_cleanplan(ctx, sender, room, &args).await,
+        "!remind"         => return cmd_remind(ctx, sender, room, &args).await,
+        "!announceweek"   => return cmd_announceweek(ctx, sender, room).await,
+        "!repostplan"     => return cmd_announceweek(ctx, sender, room).await,
         "!testnotify" => return cmd_testnotify(room).await,
         "!pdf"        => return cmd_pdf(ctx, sender, room, &args, event_id, thread_root).await,
         "!ical"       => return cmd_ical(ctx, sender, room, &args).await,
@@ -118,6 +120,9 @@ pub async fn handle(
         "!groupstats"      => cmd_groupstats(ctx).await,
         "!setgroupweight"  => cmd_setgroupweight(ctx, sender, &args).await,
         "!setroomweight"   => cmd_setroomweight(ctx, sender, &args).await,
+        "!disablegroup" => cmd_disablegroup(ctx, sender, &args).await,
+        "!enablegroup"  => cmd_enablegroup(ctx, sender, &args).await,
+        "!listgroups"   => cmd_listgroups(ctx).await,
         "!validate"     => cmd_validate(ctx, sender).await,
         "!absent"       => cmd_absent(ctx, sender, &args).await,
         "!back"         => cmd_back(ctx, sender, &args).await,
@@ -369,12 +374,13 @@ async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
     let state    = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
 
-    if state.cleaning_groups.is_empty() {
-        return Ok(Some("No cleaning groups configured yet.".into()));
+    let active_groups: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    if active_groups.is_empty() {
+        return Ok(Some("No active cleaning groups configured yet.".into()));
     }
 
     let mut lines = vec![format!("📋 **Cleaning status** · week {week} ({})", week_dates(year, week))];
-    for group in &state.cleaning_groups {
+    for group in &active_groups {
         let done = state.is_completed(&group.id, year, week);
         let icon = if done { "✅" } else { "❌" };
         let who = if done {
@@ -418,14 +424,14 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
         completions.sort_by(|a,b| b.completed_at.cmp(&a.completed_at));
         let pct = (ps.completion_rate * 100.0).round() as u32;
         let streak_str = if ps.streak >= 2 { format!(" 🔥{}", ps.streak) } else { String::new() };
-        let swaps_str  = if ps.swaps_given > 0 || ps.swaps_taken > 0 {
-            format!(" · Swaps given: {} taken: {}", ps.swaps_given, ps.swaps_taken)
-        } else { String::new() };
         let mut lines = vec![
-            format!("📊 **Stats** · {} · since week {start_w} ({})", ps.display_name, week_dates(start_y, start_w)),
-            format!("Group: {} · {}/{} ({pct}%){streak_str}", ps.group_names, ps.completed, ps.due_weeks),
-            format!("Missed: {} · Skipped: {}{swaps_str}", ps.missed, ps.skipped),
+            format!("📊 **Stats** · {} · since W{start_w} ({})", ps.display_name, week_dates(start_y, start_w)),
+            format!("Group: {} · {}/{} ({}%){streak_str}", ps.group_names, ps.completed, ps.due_weeks, pct),
+            format!("Missed: {} · Skipped: {}", ps.missed, ps.skipped),
         ];
+        if ps.swaps_given > 0 || ps.swaps_taken > 0 {
+            lines.push(format!("Swaps: given {} · taken {}", ps.swaps_given, ps.swaps_taken));
+        }
         if let Some(last) = completions.first() {
             lines.push(format!("Last: week {} ({})", last.iso_week, week_dates(last.iso_year, last.iso_week)));
         }
@@ -441,13 +447,14 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
 
     // Group summary view.
     let mut lines = vec![format!("📊 **Cleaning stats** · since week {start_w} ({})", week_dates(start_y, start_w))];
-    if state.cleaning_groups.is_empty() {
-        lines.push("  No cleaning groups configured yet.".into());
+    let (cur_y, cur_w) = current_iso_week();
+    let active_groups: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    if active_groups.is_empty() {
+        lines.push("  No active cleaning groups configured yet.".into());
         return Ok(Some(lines.join("\n")));
     }
 
-    let (cur_y, cur_w) = current_iso_week();
-    for group in &state.cleaning_groups {
+    for group in &active_groups {
         let gs = match analytics::group_stats(&state, &group.id, interval) {
             Some(s) => s, None => continue,
         };
@@ -477,11 +484,12 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
 
 async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    if state.cleaning_groups.is_empty() {
-        return Ok(Some("No cleaning groups configured.".into()));
+    let active: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    if active.is_empty() {
+        return Ok(Some("No active cleaning groups configured.".into()));
     }
     let mut lines = vec!["🏢 Cleaning areas:".to_owned()];
-    for group in &state.cleaning_groups {
+    for group in &active {
         let members_text = if group.member_ids.is_empty() {
             "(no members)".to_owned()
         } else {
@@ -1198,7 +1206,7 @@ async fn cmd_skip(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
         }
     } else {
         state.cleaning_groups.iter()
-            .filter(|g| state.is_due(&g.id, year, week, interval))
+            .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval))
             .map(|g| g.id.clone())
             .collect()
     };
@@ -1248,11 +1256,11 @@ async fn cmd_remind(
         let state = ctx.state.lock().await;
         let groups = if let Some(name) = args.first() {
             state.cleaning_groups.iter()
-                .filter(|g| g.name.eq_ignore_ascii_case(name))
+                .filter(|g| g.is_active && g.name.eq_ignore_ascii_case(name))
                 .cloned().collect::<Vec<_>>()
         } else {
             state.cleaning_groups.iter()
-                .filter(|g| state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
+                .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
                 .cloned().collect()
         };
 
@@ -1314,8 +1322,8 @@ async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
         let streak  = if ps.streak >= 2 { format!("  🔥{}", ps.streak) } else { String::new() };
         let skips   = if ps.skipped > 0 { format!("  ⏭️{}", ps.skipped) } else { String::new() };
         let pct     = (ps.completion_rate * 100.0).round() as u32;
-        lines.push(format!("{medal} {}: {}/{} ({pct:>3}%){streak}{skips}",
-            ps.display_name, ps.completed, ps.due_weeks));
+        lines.push(format!("{medal} {}  {}/{} ({}%){streak}{skips}",
+            ps.display_name, ps.completed, ps.due_weeks, pct));
     }
     Ok(Some(lines.join("\n")))
 }
@@ -1333,7 +1341,7 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
             None    => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
-        state.cleaning_groups.iter().map(|g| g.id.clone()).collect()
+        state.cleaning_groups.iter().filter(|g| g.is_active).map(|g| g.id.clone()).collect()
     };
 
     if groups.is_empty() {
@@ -1343,19 +1351,17 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
     let mut out = Vec::new();
     for (i, group_id) in groups.iter().enumerate() {
         let Some(report) = analytics::fairness_report(&state, group_id, interval) else { continue };
-        let m = &report.load_model;
         if i > 0 { out.push(String::new()); }
         out.push(format!(
-            "⚖️ **{}** · {} wks · {:.2} CLI/assign · since W{start_w}",
-            report.group_name, report.due_weeks, m.load_per_assignment,
+            "⚖️ **{}** · {} wks · since W{start_w}",
+            report.group_name, report.due_weeks,
         ));
         for e in &report.entries {
             let (pct, _) = load_delta_pct(e.actual_load, e.expected_load);
             let icon = load_icon(e.actual_load, e.expected_load);
             out.push(format!(
-                "{icon} **{}**  {}/{:.0} ({} · {:.0}/{:.0} CLI)",
-                e.display_name, e.actual, e.expected,
-                pct, e.actual_load, e.expected_load,
+                "{icon} **{}**  {}/{:.0} ({})",
+                e.display_name, e.actual, e.expected as u32, pct,
             ));
         }
         out.push(format!("Score {}/100", report.fairness_score));
@@ -1398,27 +1404,18 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
         let ratio = e.expected_cli_per_year / avg_expected;
         let ratio_str = format!("{:.2}×", ratio);
 
-        let breakdown = if e.contributions.len() > 1 {
-            let parts: Vec<String> = e.contributions.iter()
-                .map(|c| format!("{:.2}×", c.expected_annual / avg_expected))
-                .collect();
-            format!(" ({})", parts.join("+"))
-        } else {
-            String::new()
-        };
-
         let line = if has_history {
             let (pct, _) = load_delta_pct(e.actual_cli_per_year, e.expected_cli_per_year);
             let icon = load_icon(e.actual_cli_per_year, e.expected_cli_per_year);
             format!(
-                "{icon} **{}**  {} · exp {}{} · {}",
-                e.display_name, pct, ratio_str, breakdown,
+                "{icon} **{}**  {} · {} · {}",
+                e.display_name, pct, ratio_str,
                 e.group_names.join(", "),
             )
         } else {
             format!(
-                "**{}**  {}{} · {}",
-                e.display_name, ratio_str, breakdown,
+                "**{}**  {} · {}",
+                e.display_name, ratio_str,
                 e.group_names.join(", "),
             )
         };
@@ -1442,11 +1439,12 @@ async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
     let state    = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
 
-    if state.cleaning_groups.is_empty() {
-        return Ok(Some("No cleaning groups configured.".into()));
+    let active: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    if active.is_empty() {
+        return Ok(Some("No active cleaning groups configured.".into()));
     }
 
-    let models: Vec<_> = state.cleaning_groups.iter()
+    let models: Vec<_> = active.iter()
         .map(|g| analytics::group_load_model(g, interval))
         .collect();
 
@@ -1458,7 +1456,7 @@ async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
 
     let mut out = vec!["📊 **Groups**  (1.0× = avg load/person/yr)".to_owned()];
 
-    for (group, m) in state.cleaning_groups.iter().zip(models.iter()) {
+    for (group, m) in active.iter().zip(models.iter()) {
         let ratio = m.cli_per_year / avg_cli;
         let weight = if (m.group_weight - 1.0).abs() > 0.01 {
             format!(" · ×{:.1}", m.group_weight)
@@ -1637,7 +1635,7 @@ async fn cmd_blame(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
 
 fn blame_all(state: &crate::state::State, year: i32, week: u32, interval: u32) -> String {
     let uncleaned: Vec<_> = state.cleaning_groups.iter()
-        .filter(|g| state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
+        .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
         .collect();
     if uncleaned.is_empty() {
         return "✅ All due groups are cleaned this week!".into();
@@ -2083,6 +2081,88 @@ async fn cmd_testnotify(room: &Room) -> Result<Option<RoomMessageEventContent>> 
     Ok(Some(RoomMessageEventContent::text_plain("⏱ @room notification in 5 minutes.")))
 }
 
+// ── Admin: !disablegroup <group> ─────────────────────────────────────────────
+
+async fn cmd_disablegroup(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let name = match args.first() {
+        Some(n) => n.to_string(),
+        None    => return Ok(Some("Usage: !disablegroup <group>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let group_id = match state.group_by_name(&name) {
+        Some(g) if !g.is_active => return Ok(Some(format!("«{name}» is already disabled."))),
+        Some(g) => g.id.clone(),
+        None    => return Ok(Some(format!("Group «{name}» not found."))),
+    };
+    state.apply_event(DomainEvent::GroupDisabled { group_id })?;
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("🚫 «{name}» disabled — excluded from scheduling and statistics.")))
+}
+
+// ── Admin: !enablegroup <group> ──────────────────────────────────────────────
+
+async fn cmd_enablegroup(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let name = match args.first() {
+        Some(n) => n.to_string(),
+        None    => return Ok(Some("Usage: !enablegroup <group>".into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let group_id = match state.group_by_name(&name) {
+        Some(g) if g.is_active => return Ok(Some(format!("«{name}» is already enabled."))),
+        Some(g) => g.id.clone(),
+        None    => return Ok(Some(format!("Group «{name}» not found."))),
+    };
+    state.apply_event(DomainEvent::GroupEnabled { group_id })?;
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!("✅ «{name}» enabled — now included in scheduling and statistics.")))
+}
+
+// ── !listgroups ───────────────────────────────────────────────────────────────
+
+async fn cmd_listgroups(ctx: &BotContext) -> Result<Option<String>> {
+    let state = ctx.state.lock().await;
+    if state.cleaning_groups.is_empty() {
+        return Ok(Some("No cleaning groups configured.".into()));
+    }
+    let active_count   = state.cleaning_groups.iter().filter(|g| g.is_active).count();
+    let disabled_count = state.cleaning_groups.len() - active_count;
+    let mut lines = vec![format!("🏢 Groups ({active_count} active, {disabled_count} disabled):")];
+    for group in &state.cleaning_groups {
+        let n = group.member_ids.len();
+        if group.is_active {
+            lines.push(format!("  ✅ **{}** ({n} members)", group.name));
+        } else {
+            lines.push(format!("  🚫 **{}** ({n} members) — disabled", group.name));
+        }
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+// ── Admin: !announceweek / !repostplan ───────────────────────────────────────
+//
+// Sends a fresh consolidated weekly plan for the current week.  Replaces the
+// previously active plan in state so reactions on old messages no longer
+// trigger completions.  Pins the new message and unpins old plan messages.
+
+async fn cmd_announceweek(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+) -> Result<Option<RoomMessageEventContent>> {
+    require_admin(ctx, sender)?;
+    let (year, week) = current_iso_week();
+    match crate::scheduler::announce_weekly_plan(ctx, room, year, week).await {
+        Ok(Some(_)) => Ok(Some(format::mentionify("📋 Weekly plan announced and pinned."))),
+        Ok(None)    => Ok(Some(format::mentionify("Nothing is due this week — no plan to announce."))),
+        Err(e)      => {
+            tracing::error!("!announceweek failed: {e}");
+            Ok(Some(format::mentionify(&format!("❌ Failed to announce weekly plan: {e}"))))
+        }
+    }
+}
+
 // ── Admin: !validate ──────────────────────────────────────────────────────────
 
 async fn cmd_validate(ctx: &BotContext, sender: &OwnedUserId) -> Result<Option<String>> {
@@ -2120,6 +2200,7 @@ fn help_text() -> String {
 
 Admin commands:
   !skip [group]                         · excuse this week (won't count as missed)
+  !announceweek                         · post (or repost) this week's cleaning plan and pin it
   !remind [group]                       · manually fire the cleaning reminder now
   !pdf [N]                              · generate printable HTML schedule (default 8 weeks)
   !absent <person> [weeks]              · mark person away (default 4 weeks)
@@ -2134,5 +2215,8 @@ Admin commands:
   !removeroom <group> <room>            · remove a room from a group
   !ical <person> [N]                    · get iCal for any person (admin)
   !icalreset <person>                   · reset iCal token for any person (admin)
+  !listgroups                           · list all groups with active/disabled status
+  !disablegroup <name>                  · exclude group from scheduling and stats
+  !enablegroup <name>                   · re-include a previously disabled group
   !validate                             · check state for consistency issues"#.to_owned()
 }

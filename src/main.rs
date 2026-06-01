@@ -390,13 +390,104 @@ async fn main() -> Result<()> {
                 if emoji_key != "✅" { return; }
 
                 let mut state = ctx.state.lock().await;
+                let interval = ctx.config.schedule.interval_weeks;
+
+                // ── Consolidated weekly plan / final-reminder reaction ─────────
+                if let Some((plan_year, plan_week)) = state.weekly_plan_event_ids.get(&reacted_to).copied() {
+                    let new_pid = uuid::Uuid::new_v4().to_string();
+                    if let Err(e) = state.apply_event(analytics::DomainEvent::PersonCreated {
+                        person_id: new_pid, display_name: sender_mxid.clone(), matrix_id: Some(sender_mxid.clone()),
+                    }) {
+                        tracing::error!("PersonCreated failed in plan reaction: {e}");
+                        return;
+                    }
+                    let sender_person_id = state.person_by_matrix_id(&sender_mxid)
+                        .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
+
+                    let groups_to_mark: Vec<_> = state.cleaning_groups.iter()
+                        .filter(|g| state.is_due(&g.id, plan_year, plan_week, interval))
+                        .filter(|g| {
+                            if g.is_multi_slot() {
+                                g.slots.iter().enumerate().any(|(i, _)|
+                                    state.slot_assignee(g, i, plan_year, plan_week, interval)
+                                        .map_or(false, |p| p.id == sender_person_id)
+                                )
+                            } else {
+                                state.responsible_person(g, plan_year, plan_week, interval)
+                                    .map_or(false, |p| p.id == sender_person_id)
+                            }
+                        })
+                        .cloned()
+                        .collect();
+
+                    let root_eid = ev.content.relates_to.event_id.clone();
+
+                    if groups_to_mark.is_empty() {
+                        drop(state);
+                        if let Some(r) = client.get_room(&ctx.room_id) {
+                            r.send(thread_reply(
+                                "You are not assigned to any group this week. Use !done GroupName to mark a specific group.",
+                                root_eid.clone(), root_eid,
+                            )).await.ok();
+                        }
+                        return;
+                    }
+
+                    let mut marked_names: Vec<String> = Vec::new();
+                    for group in &groups_to_mark {
+                        if group.is_multi_slot() {
+                            let mut any = false;
+                            for (slot_idx, slot) in group.slots.iter().enumerate() {
+                                if state.is_slot_completed(&group.id, &slot.id, plan_year, plan_week) { continue; }
+                                if state.slot_assignee(group, slot_idx, plan_year, plan_week, interval)
+                                    .map_or(false, |p| p.id == sender_person_id)
+                                {
+                                    state.apply_event(analytics::DomainEvent::CleaningCompleted {
+                                        group_id: group.id.clone(), slot_id: Some(slot.id.clone()),
+                                        person_id: sender_person_id.clone(),
+                                        responsible_person_ids: vec![sender_person_id.clone()],
+                                        iso_year: plan_year, iso_week: plan_week,
+                                    }).ok();
+                                    any = true;
+                                }
+                            }
+                            if any { marked_names.push(group.name.clone()); }
+                        } else {
+                            if state.is_completed(&group.id, plan_year, plan_week) { continue; }
+                            let resp_ids = state.responsible_person(group, plan_year, plan_week, interval)
+                                .map(|p| vec![p.id.clone()]).unwrap_or_default();
+                            state.apply_event(analytics::DomainEvent::CleaningCompleted {
+                                group_id: group.id.clone(), slot_id: None,
+                                person_id: sender_person_id.clone(),
+                                responsible_person_ids: resp_ids,
+                                iso_year: plan_year, iso_week: plan_week,
+                            }).ok();
+                            marked_names.push(group.name.clone());
+                        }
+                    }
+
+                    if let Err(e) = state.save(&ctx.state_path).await {
+                        tracing::error!("Failed to save after plan reaction: {e}");
+                    }
+                    drop(state);
+
+                    if let Some(r) = client.get_room(&ctx.room_id) {
+                        if !marked_names.is_empty() {
+                            let names = marked_names.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ");
+                            let msg = format!("✅ {sender_mxid} marked {names} as cleaned.");
+                            r.send(thread_reply(&msg, root_eid.clone(), root_eid)).await.ok();
+                        }
+                    }
+                    return;
+                }
+
+                // ── Per-group reminder reaction (legacy) ──────────────────────
                 let group_id = match state.reminder_event_ids.get(&reacted_to).cloned() {
                     Some(id) => id,
                     None     => return,
                 };
 
                 let (year, week) = state::current_iso_week();
-                let interval = ctx.config.schedule.interval_weeks;
 
                 if state.is_completed(&group_id, year, week) {
                     drop(state);

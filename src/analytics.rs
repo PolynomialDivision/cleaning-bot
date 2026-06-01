@@ -40,8 +40,10 @@ use crate::{
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DomainEvent {
     // ── Group management ──────────────────────────────────────────────────────
-    GroupCreated { group_id: GroupId, name: String },
-    GroupDeleted { group_id: GroupId },
+    GroupCreated  { group_id: GroupId, name: String },
+    GroupDeleted  { group_id: GroupId },
+    GroupDisabled { group_id: GroupId },
+    GroupEnabled  { group_id: GroupId },
     SlotAdded    { group_id: GroupId, slot_id: SlotId, slot_name: String },
     SlotRemoved  { group_id: GroupId, slot_id: SlotId },
     /// Frozen assignment: one person (or nobody) for one slot in one week.
@@ -294,7 +296,8 @@ pub struct FairnessReport {
     pub gini:           f64,
     /// 100 − round(gini * 100): human-readable 0–100 fairness score.
     pub fairness_score: u8,
-    /// Workload model for this group.
+    /// Workload model for this group (kept for future use; not shown in chat output).
+    #[allow(dead_code)]
     pub load_model:     GroupLoadModel,
 }
 
@@ -332,6 +335,7 @@ pub struct GroupContribution {
     #[allow(dead_code)]
     pub group_name:      String,
     /// Expected CLI per year from this group alone.
+    #[allow(dead_code)]
     pub expected_annual: f64,
     /// Expected CLI since tracking start.
     #[allow(dead_code)]
@@ -360,6 +364,7 @@ pub struct PersonWorkload {
     /// actual_cli annualised (÷ years_tracked).
     pub actual_cli_per_year:   f64,
     /// Per-group breakdown.
+    #[allow(dead_code)]
     pub contributions:         Vec<GroupContribution>,
 }
 
@@ -384,7 +389,8 @@ pub struct WorkloadReport {
 /// Returns `None` if the person is not registered or not in any group.
 pub fn person_stats(state: &State, person_id: &PersonId, interval: u32) -> Option<PersonStats> {
     let person = state.person_by_id(person_id)?;
-    let groups = state.groups_for_person(person_id);
+    let groups: Vec<_> = state.groups_for_person(person_id).into_iter()
+        .filter(|g| g.is_active).collect();
     if groups.is_empty() { return None; }
 
     let (cur_y, cur_w) = current_iso_week();
@@ -598,12 +604,14 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
     let years_tracked = due_weeks.max(1.0) / 52.0;
 
     let models: std::collections::HashMap<GroupId, GroupLoadModel> = state.cleaning_groups.iter()
+        .filter(|g| g.is_active)
         .map(|g| (g.id.clone(), group_load_model(g, interval)))
         .collect();
 
     let mut entries: Vec<PersonWorkload> = state.persons.iter()
         .filter_map(|p| {
-            let groups = state.groups_for_person(&p.id);
+            let groups: Vec<_> = state.groups_for_person(&p.id).into_iter()
+                .filter(|g| g.is_active).collect();
             if groups.is_empty() { return None; }
 
             let mut expected_cli = 0.0f64;

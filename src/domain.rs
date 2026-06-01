@@ -114,7 +114,13 @@ pub struct CleaningGroup {
     /// room count suggests (e.g. kitchen = 2.0, storage = 0.5).
     #[serde(default = "default_weight")]
     pub weight:     f64,
+    /// When false the group is excluded from scheduling, statistics, and all
+    /// bot output.  Defaults to true so existing state upgrades seamlessly.
+    #[serde(default = "default_active")]
+    pub is_active:  bool,
 }
+
+fn default_active() -> bool { true }
 
 /// Default workload multiplier — no adjustment.
 pub fn default_weight() -> f64 { 1.0 }
@@ -129,6 +135,7 @@ impl CleaningGroup {
             room_weights: std::collections::HashMap::new(),
             slots:        Vec::new(),
             weight:       1.0,
+            is_active:    true,
         }
     }
 

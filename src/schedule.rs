@@ -145,7 +145,7 @@ pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSna
             .unwrap_or_else(|| NaiveDate::from_ymd_opt(dy, 1, 4).unwrap());
         let sunday   = monday + chrono::Duration::days(6);
 
-        for group in &state.cleaning_groups {
+        for group in state.cleaning_groups.iter().filter(|g| g.is_active) {
             if group.is_multi_slot() {
                 // Emit one AssignmentInstance per slot.
                 for (slot_idx, slot) in group.slots.iter().enumerate() {

@@ -127,9 +127,15 @@ pub struct State {
     /// Updated on every save; used as deterministic DTSTAMP in ICS exports.
     #[serde(default)]
     pub last_modified: Option<DateTime<Utc>>,
-    /// event_id → group_id
+    /// event_id → group_id  (legacy per-group reminder messages)
     #[serde(default)]
     pub reminder_event_ids: HashMap<String, GroupId>,
+    /// event_id → (iso_year, iso_week)  (consolidated weekly plan / final-reminder messages)
+    #[serde(default)]
+    pub weekly_plan_event_ids: HashMap<String, (i32, u32)>,
+    /// "YEAR-Www" → canonical weekly plan event_id (initial plan only; used for pin/unpin and idempotency)
+    #[serde(default)]
+    pub weekly_plan_canonical: HashMap<String, String>,
     #[serde(default)]
     pub reaction_dones:     HashMap<String, ReactionDone>,
     #[serde(default)]
@@ -192,6 +198,20 @@ impl State {
                 if self.cleaning_groups.len() == before {
                     anyhow::bail!("Group not found: {group_id}");
                 }
+                true
+            }
+            E::GroupDisabled { group_id } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if !g.is_active { return Ok(()); }
+                g.is_active = false;
+                true
+            }
+            E::GroupEnabled { group_id } => {
+                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if g.is_active { return Ok(()); }
+                g.is_active = true;
                 true
             }
             E::SlotAdded { group_id, slot_id, slot_name } => {
