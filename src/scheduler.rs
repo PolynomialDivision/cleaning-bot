@@ -1,4 +1,4 @@
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use chrono_tz::Tz;
 use matrix_sdk::{
     Client, Room,
@@ -8,7 +8,7 @@ use matrix_sdk::{
             Mentions,
             reaction::ReactionEventContent,
             relation::Annotation,
-            room::message::RoomMessageEventContent,
+            room::message::{ReplacementMetadata, RoomMessageEventContent},
         },
     },
 };
@@ -42,10 +42,44 @@ pub async fn run(ctx: BotContext, client: Client) {
     }
 }
 
+/// Edit the pinned weekly plan message to reflect the current completion state.
+/// No-op if no plan has been sent for this week yet.
+pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32, week: u32) {
+    let week_key = format!("{year}-W{week:02}");
+    let interval = ctx.config.schedule.interval_weeks;
+
+    let (canonical_eid, msg, mxids) = {
+        let state = ctx.state.lock().await;
+        let eid_str = match state.weekly_plan_canonical.get(&week_key) {
+            Some(e) => e.clone(),
+            None    => return,
+        };
+        let eid = match eid_str.parse::<OwnedEventId>() {
+            Ok(e)  => e,
+            Err(_) => return,
+        };
+        let due_groups: Vec<_> = state.cleaning_groups.iter()
+            .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval))
+            .cloned()
+            .collect();
+        if due_groups.is_empty() { return; }
+        let (msg, mxids) = build_weekly_plan(&state, year, week, interval, &due_groups);
+        (eid, msg, mxids)
+    };
+
+    let content = mention_message(&msg, &mxids, room).await
+        .make_replacement(ReplacementMetadata::new(canonical_eid, None));
+    if let Err(e) = room.send(content).await {
+        warn!("Failed to refresh pinned plan: {e}");
+    }
+}
+
 async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     let tz: Tz        = ctx.config.schedule.timezone.parse().unwrap_or(chrono_tz::UTC);
     let local_now     = chrono::Utc::now().with_timezone(&tz);
     let local_weekday = local_now.weekday().num_days_from_monday() as u8;
+    let (remind_h, remind_m) = parse_hhmm(&ctx.config.schedule.reminder_time);
+    let after_hour = (local_now.hour() as u8, local_now.minute() as u8) >= (remind_h, remind_m);
     let (year, week)  = current_iso_week();
     let interval      = ctx.config.schedule.interval_weeks;
 
@@ -71,6 +105,7 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
 
     // ── Consolidated weekly plan (initial reminder) ───────────────────────────
     if local_weekday == ctx.config.schedule.reminder_weekday
+        && after_hour
         && !state.reminder_sent("*", year, week, &ReminderKind::Initial)
         && !any_per_group_sent
         && !canonical_exists
@@ -81,12 +116,6 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
         let plan_eid = resp.response.event_id.clone();
 
-        // Collect old plan event_ids (all weeks except this one) for unpinning.
-        let old_plan_eids: Vec<String> = state.weekly_plan_canonical.iter()
-            .filter(|(k, _)| **k != week_key)
-            .map(|(_, v)| v.clone())
-            .collect();
-
         state.weekly_plan_event_ids.insert(plan_eid.to_string(), (year, week));
         state.weekly_plan_canonical.insert(week_key, plan_eid.to_string());
         state.mark_reminder_sent("*", year, week, ReminderKind::Initial);
@@ -96,12 +125,13 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
 
         // Self-react ✅ (UI affordance) then update room pin.
         room.send(ReactionEventContent::new(Annotation::new(plan_eid.clone(), "✅".to_string()))).await.ok();
-        pin_weekly_plan(&room, &plan_eid, &old_plan_eids).await;
+        pin_weekly_plan(&room, &plan_eid).await;
         return Ok(());
     }
 
     // ── Consolidated final reminder ───────────────────────────────────────────
     if local_weekday == ctx.config.schedule.final_reminder_weekday
+        && after_hour
         && !state.reminder_sent("*", year, week, &ReminderKind::Final)
     {
         let pending: Vec<CleaningGroup> = due_groups.iter()
@@ -123,19 +153,6 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             return Ok(());
         } else {
             state.mark_reminder_sent("*", year, week, ReminderKind::Final);
-        }
-    }
-
-    // ── Weekly summary ────────────────────────────────────────────────────────
-    if let Some(summary_day) = ctx.config.schedule.summary_weekday {
-        if local_weekday == summary_day
-            && !state.reminder_sent("", year, week, &ReminderKind::WeeklySummary)
-        {
-            let (msg, missed_mxids) = build_summary(&state, year, week, interval);
-            room.send(mention_message(&msg, &missed_mxids, &room).await).await
-                .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
-            state.mark_reminder_sent("", year, week, ReminderKind::WeeklySummary);
-            info!("Sent weekly summary for week {week}/{year}");
         }
     }
 
@@ -164,16 +181,14 @@ pub(crate) async fn announce_weekly_plan(
     let week_key  = format!("{year}-W{week:02}");
 
     // ── Phase 1: build message (brief lock) ───────────────────────────────────
-    let (msg, mxids, old_canonical_eid) = {
+    let (msg, mxids) = {
         let state = ctx.state.lock().await;
         let due_groups: Vec<_> = state.cleaning_groups.iter()
             .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval))
             .cloned()
             .collect();
         if due_groups.is_empty() { return Ok(None); }
-        let old_eid = state.weekly_plan_canonical.get(&week_key).cloned();
-        let (msg, mxids) = build_weekly_plan(&state, year, week, interval, &due_groups);
-        (msg, mxids, old_eid)
+        build_weekly_plan(&state, year, week, interval, &due_groups)
     };
 
     // ── Phase 2: send message (no lock held) ─────────────────────────────────
@@ -182,7 +197,7 @@ pub(crate) async fn announce_weekly_plan(
     let new_eid = resp.response.event_id.clone();
 
     // ── Phase 3: update state (brief lock) ───────────────────────────────────
-    let eids_to_unpin = {
+    {
         let mut state = ctx.state.lock().await;
 
         // Remove ALL stale entries for this week so old reactions stop working.
@@ -195,34 +210,24 @@ pub(crate) async fn announce_weekly_plan(
             state.mark_reminder_sent("*", year, week, ReminderKind::Initial);
         }
         state.save(&ctx.state_path).await?;
-
-        // Collect event_ids to unpin: current week's old plan + all other weeks' plans.
-        let mut unpin: Vec<String> = state.weekly_plan_canonical.iter()
-            .filter(|(k, _)| **k != week_key)
-            .map(|(_, v)| v.clone())
-            .collect();
-        if let Some(old) = old_canonical_eid { unpin.push(old); }
-        unpin
     };
 
     // ── Phase 4: react + pin (no lock held) ──────────────────────────────────
     room.send(ReactionEventContent::new(Annotation::new(new_eid.clone(), "✅".to_string()))).await.ok();
-    pin_weekly_plan(room, &new_eid, &eids_to_unpin).await;
+    pin_weekly_plan(room, &new_eid).await;
 
     Ok(Some(new_eid))
 }
 
 // ── Room pin management ───────────────────────────────────────────────────────
 
-/// Pin `new_eid` and unpin every event_id in `old_eids` (previous weeks' plans).
-/// Uses the SDK's `pin_event`/`unpin_event` helpers, which preserve any other
-/// pinned messages already in the room.
-pub(crate) async fn pin_weekly_plan(room: &Room, new_eid: &OwnedEventId, old_eids: &[String]) {
-    for old_str in old_eids {
-        if let Ok(old_eid) = old_str.parse::<OwnedEventId>() {
-            if let Err(e) = room.unpin_event(&old_eid).await {
-                warn!("Failed to unpin old weekly plan {old_str}: {e}");
-            }
+/// Pin `new_eid` and unpin every currently pinned event in the room.
+/// Reads live room state so it catches messages pinned before state tracking began.
+pub(crate) async fn pin_weekly_plan(room: &Room, new_eid: &OwnedEventId) {
+    for old_eid in room.pinned_event_ids().unwrap_or_default() {
+        if old_eid == *new_eid { continue; }
+        if let Err(e) = room.unpin_event(&old_eid).await {
+            warn!("Failed to unpin {old_eid}: {e}");
         }
     }
     if let Err(e) = room.pin_event(new_eid).await {
@@ -257,7 +262,7 @@ pub(crate) fn build_weekly_plan(
                         if done {
                             lines.push(format!("✅ {}{rooms}", p.display_name));
                         } else {
-                            lines.push(format!("{}{rooms}", p.display_name));
+                            lines.push(format!("{}{rooms}", person_label(p)));
                         }
                     }
                 }
@@ -272,7 +277,7 @@ pub(crate) fn build_weekly_plan(
                     if done {
                         lines.push(format!("✅ {}{rooms}", p.display_name));
                     } else {
-                        lines.push(format!("{}{rooms}", p.display_name));
+                        lines.push(format!("{}{rooms}", person_label(p)));
                     }
                 }
             }
@@ -309,7 +314,7 @@ fn build_final_reminder(
                     None => lines.push(format!("  (nobody assigned){rooms}")),
                     Some(p) => {
                         if let Some(m) = &p.matrix_id { all_mxids.push(m.clone()); }
-                        lines.push(format!("  {}{rooms}", p.display_name));
+                        lines.push(format!("  {}{rooms}", person_label(p)));
                     }
                 }
             }
@@ -319,7 +324,7 @@ fn build_final_reminder(
                 None => lines.push(format!("❌ **{}** · (nobody assigned){rooms}", group.name)),
                 Some(p) => {
                     if let Some(m) = &p.matrix_id { all_mxids.push(m.clone()); }
-                    lines.push(format!("❌ **{}** · {}{rooms}", group.name, p.display_name));
+                    lines.push(format!("❌ **{}** · {}{rooms}", group.name, person_label(p)));
                 }
             }
         }
@@ -333,65 +338,17 @@ fn build_final_reminder(
     (lines.join("\n"), all_mxids)
 }
 
-fn build_summary(
-    state: &crate::state::State,
-    year: i32, week: u32, interval: u32,
-) -> (String, Vec<String>) {
-    let groups: Vec<_> = state.cleaning_groups.iter()
-        .filter(|g| g.is_active)
-        .cloned()
-        .collect();
-    let mut lines = vec![format!("📋 **Cleaning summary** · week {week} ({})", week_dates(year, week))];
-    lines.push(String::new());
-    let mut done_count = 0usize;
-    let mut due_count  = 0usize;
-    let mut mention_mxids: Vec<String> = Vec::new();
+/// Parse "HH:MM" → (hour, minute). Falls back to (9, 0) on bad input.
+fn parse_hhmm(s: &str) -> (u8, u8) {
+    let mut parts = s.splitn(2, ':');
+    let h = parts.next().and_then(|p| p.parse().ok()).unwrap_or(9u8);
+    let m = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0u8);
+    (h.min(23), m.min(59))
+}
 
-    for group in &groups {
-        if !state.is_due(&group.id, year, week, interval) { continue; }
-        due_count += 1;
-
-        if state.is_completed(&group.id, year, week) {
-            done_count += 1;
-            let by = state.completions.iter()
-                .find(|c| c.group_id == group.id && c.iso_year == year && c.iso_week == week)
-                .and_then(|c| state.person_by_id(&c.completed_by_id))
-                .map(|p| format!(" · {}", p.display_name))
-                .unwrap_or_default();
-            lines.push(format!("✅ **{}**{by}", group.name));
-        } else {
-            let resp = state.responsible_person(group, year, week, interval);
-            let resp_text = resp.map(|p| p.display_name.as_str()).unwrap_or("(nobody assigned)");
-            let rooms_str = group.rooms_text().map(|r| format!("\n  {r}")).unwrap_or_default();
-            lines.push(format!("❌ **{}** · {resp_text}{rooms_str}", group.name));
-            if let Some(mxid) = resp.and_then(|p| p.matrix_id.as_ref()) {
-                mention_mxids.push(mxid.clone());
-            }
-        }
-        let streak = state.streak_for(&group.id, interval);
-        if streak >= 3 && state.is_completed(&group.id, year, week) {
-            lines.push(format!("   🔥 {streak}-week streak!"));
-        }
-    }
-
-    lines.push(String::new());
-    if due_count > 0 {
-        lines.push(format!("{done_count}/{due_count} cleaned this week"));
-        let overdue: Vec<_> = groups.iter()
-            .filter(|g| state.missed_weeks_for(&g.id, interval).len() >= 2)
-            .collect();
-        if !overdue.is_empty() {
-            lines.push(String::new());
-            lines.push("⚠️ Repeatedly missed (2+ weeks in a row):".into());
-            for g in overdue {
-                lines.push(format!("   {} : {} weeks missed", g.name, state.missed_weeks_for(&g.id, interval).len()));
-            }
-        }
-    } else {
-        lines.push("No groups were scheduled this week.".into());
-    }
-
-    mention_mxids.sort();
-    mention_mxids.dedup();
-    (lines.join("\n"), mention_mxids)
+/// Returns the MXID if the person has one (so `mentionify_with_names` renders
+/// a pill and the Mentions field triggers a push notification), otherwise falls
+/// back to the plain display name (for non-Matrix users).
+fn person_label(p: &crate::domain::Person) -> &str {
+    p.matrix_id.as_deref().unwrap_or(&p.display_name)
 }

@@ -45,12 +45,13 @@ pub struct ScheduleConfig {
     /// Weekday to send the final "not done yet" reminder.
     #[serde(default = "default_final_reminder_weekday")]
     pub final_reminder_weekday: u8,
+    /// Local time (HH:MM) at or after which reminders are allowed to fire.
+    /// Default: "09:00".
+    #[serde(default = "default_reminder_time")]
+    pub reminder_time: String,
     /// IANA timezone string used for weekday calculations (e.g. "Europe/Berlin").
     #[serde(default = "default_timezone")]
     pub timezone: String,
-    /// Weekday to post a weekly stats summary (0 = Mon … 6 = Sun).
-    /// Omit or comment out to disable the automatic summary.
-    pub summary_weekday: Option<u8>,
     /// Assignment fill strategy.
     #[serde(default)]
     pub fill_strategy: FillStrategy,
@@ -74,4 +75,5 @@ fn default_interval_weeks() -> u32 { 1 }
 fn default_materialize_weeks() -> u32 { 26 }
 fn default_reminder_weekday() -> u8 { 0 }       // Monday
 fn default_final_reminder_weekday() -> u8 { 6 } // Sunday
+fn default_reminder_time() -> String { "09:00".to_owned() }
 fn default_timezone() -> String { "UTC".to_owned() }

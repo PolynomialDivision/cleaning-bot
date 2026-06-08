@@ -13,7 +13,7 @@ use matrix_sdk::{
 use uuid::Uuid;
 
 use crate::{
-    BotContext, format, resolver,
+    BotContext, format, resolver, scheduler,
     analytics::{self, DomainEvent},
     domain::{AssignmentSource, new_calendar_token, CalendarToken, CleaningGroup, Person},
     schedule::build_schedule,
@@ -130,6 +130,11 @@ pub async fn handle(
         "!help"         => Ok(Some(help_text())),
         _               => Ok(None),
     }?;
+
+    if matches!(cmd, "!done" | "!skip" | "!undo") {
+        let (year, week) = current_iso_week();
+        scheduler::refresh_pinned_plan(ctx, room, year, week).await;
+    }
 
     match reply {
         None    => Ok(None),

@@ -477,6 +477,7 @@ async fn main() -> Result<()> {
                             let msg = format!("✅ {sender_mxid} marked {names} as cleaned.");
                             r.send(thread_reply(&msg, root_eid.clone(), root_eid)).await.ok();
                         }
+                        scheduler::refresh_pinned_plan(&ctx, &r, plan_year, plan_week).await;
                     }
                     return;
                 }
@@ -567,6 +568,7 @@ async fn main() -> Result<()> {
                 if let Some(r) = client.get_room(&ctx.room_id) {
                     let msg = format!("✅ {sender_mxid} marked «{group_name}» as cleaned.");
                     r.send(thread_reply(&msg, root_eid.clone(), root_eid)).await.ok();
+                    scheduler::refresh_pinned_plan(&ctx, &r, year, week).await;
                 }
             }
         }
@@ -603,10 +605,12 @@ async fn main() -> Result<()> {
                     let group_name = state.group_by_id(&rd.group_id)
                         .map(|g| g.name.clone())
                         .unwrap_or_else(|| rd.group_id.clone());
+                    let (undo_year, undo_week) = (rd.iso_year, rd.iso_week);
                     drop(state);
                     if let Some(r) = client.get_room(&ctx.room_id) {
                         let msg = format!("↩️ {by} removed their ✅ — «{group_name}» marked undone.");
                         r.send(format::mentionify_rich(&msg, &r).await).await.ok();
+                        scheduler::refresh_pinned_plan(&ctx, &r, undo_year, undo_week).await;
                     }
                 }
             }
