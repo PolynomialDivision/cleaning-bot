@@ -5,8 +5,8 @@ use matrix_sdk::{
     ruma::{
         OwnedEventId, OwnedUserId, UInt,
         events::{
-            relation::Thread,
-            room::message::{FileInfo, FileMessageEventContent, MessageType, RoomMessageEventContent},
+            relation::{Reply, Thread},
+            room::message::{FileInfo, FileMessageEventContent, MessageType, Relation, RoomMessageEventContent},
         },
     },
 };
@@ -1257,7 +1257,7 @@ async fn cmd_remind(
     let (year, week) = current_iso_week();
     let interval     = ctx.config.schedule.interval_weeks;
 
-    let reminder_data: Vec<(String, String, Option<String>, Vec<String>)> = {
+    let (reminder_data, reply_to_plan): (Vec<(String, String, Option<String>, Vec<String>)>, Option<String>) = {
         let state = ctx.state.lock().await;
         let groups = if let Some(name) = args.first() {
             state.cleaning_groups.iter()
@@ -1269,12 +1269,15 @@ async fn cmd_remind(
                 .cloned().collect()
         };
 
-        groups.iter().map(|g| {
+        let week_key = format!("{year}-W{week:02}");
+        let reply_to_plan = state.weekly_plan_canonical.get(&week_key).cloned();
+        let reminder_data = groups.iter().map(|g| {
             let resp = state.responsible_person(g, year, week, interval);
             let mxids = resp.and_then(|p| p.matrix_id.as_ref().map(|m| vec![m.clone()])).unwrap_or_default();
             let _text = resp.map(|p| person_key(p).to_owned()).unwrap_or_else(|| "(nobody assigned)".into());
             (g.id.clone(), g.name.clone(), g.rooms_text(), mxids)
-        }).collect()
+        }).collect();
+        (reminder_data, reply_to_plan)
     };
 
     if reminder_data.is_empty() {
@@ -1282,25 +1285,26 @@ async fn cmd_remind(
     }
 
     let mut sent = vec![];
-    for (group_id, group_name, rooms_text, mxids) in &reminder_data {
+    for (_group_id, group_name, rooms_text, mxids) in &reminder_data {
         let users_text = if mxids.is_empty() { "(nobody assigned)".into() } else { mxids.join(", ") };
-        let rooms_line = rooms_text.as_ref().map(|r| format!("\n{r}")).unwrap_or_default();
+        let rooms_line = rooms_text.as_ref().map(|r| format!(" · {}", r.replace('\n', " · "))).unwrap_or_default();
         let msg = format!(
-            "🧹 **{group_name}** · week {week} ({})\n{users_text}{rooms_line}\n✅ React or type !done",
-            week_dates(year, week)
+            "⏰ **Reminder · Week {week}**\n**{group_name}** · {users_text}{rooms_line}"
         );
 
         let uid_refs: Vec<&str> = mxids.iter().map(String::as_str).collect();
         let names   = format::fetch_names(room, &uid_refs).await;
         let parsed: Vec<matrix_sdk::ruma::OwnedUserId> = mxids.iter().filter_map(|s| s.parse().ok()).collect();
-        let content = format::mentionify_with_names(&msg, &names)
+        let mut content = format::mentionify_with_names(&msg, &names)
             .add_mentions(matrix_sdk::ruma::events::Mentions::with_user_ids(parsed));
+        if let Some(plan_eid) = &reply_to_plan {
+            if let Ok(plan_eid) = plan_eid.parse::<OwnedEventId>() {
+                content.relates_to = Some(Relation::Reply(Reply::with_event_id(plan_eid)));
+            }
+        }
 
         match room.send(content).await {
-            Ok(resp) => {
-                let mut state = ctx.state.lock().await;
-                state.reminder_event_ids.insert(resp.response.event_id.to_string(), group_id.clone());
-                state.save(&ctx.state_path).await?;
+            Ok(_) => {
                 sent.push(group_name.clone());
             }
             Err(e) => tracing::warn!("!remind send failed for {group_name}: {e}"),
@@ -2185,7 +2189,6 @@ fn help_text() -> String {
   !help                        · show this help
   !status                      · this week's cleaned / not-cleaned overview
   !areas                       · list all cleaning groups and their members
-  !done [group]                · mark your cleaning done for this week
   !undo [group]                · undo this week's done mark
   !next [@user]                · when is your (or @user's) next due week?
   !stats [@user]               · completion statistics

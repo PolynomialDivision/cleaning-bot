@@ -426,17 +426,16 @@ async fn main() -> Result<()> {
                         drop(state);
                         if let Some(r) = client.get_room(&ctx.room_id) {
                             r.send(thread_reply(
-                                "You are not assigned to any group this week. Use !done GroupName to mark a specific group.",
+                                "You are not assigned to any open item in this plan.",
                                 root_eid.clone(), root_eid,
                             )).await.ok();
                         }
                         return;
                     }
 
-                    let mut marked_names: Vec<String> = Vec::new();
+                    let mut reaction_done: Option<ReactionDone> = None;
                     for group in &groups_to_mark {
                         if group.is_multi_slot() {
-                            let mut any = false;
                             for (slot_idx, slot) in group.slots.iter().enumerate() {
                                 if state.is_slot_completed(&group.id, &slot.id, plan_year, plan_week) { continue; }
                                 if state.slot_assignee(group, slot_idx, plan_year, plan_week, interval)
@@ -448,10 +447,14 @@ async fn main() -> Result<()> {
                                         responsible_person_ids: vec![sender_person_id.clone()],
                                         iso_year: plan_year, iso_week: plan_week,
                                     }).ok();
-                                    any = true;
+                                    reaction_done.get_or_insert_with(|| ReactionDone {
+                                        group_id:        group.id.clone(),
+                                        completed_by_id: sender_person_id.clone(),
+                                        iso_year:        plan_year,
+                                        iso_week:        plan_week,
+                                    });
                                 }
                             }
-                            if any { marked_names.push(group.name.clone()); }
                         } else {
                             if state.is_completed(&group.id, plan_year, plan_week) { continue; }
                             let resp_ids = state.responsible_person(group, plan_year, plan_week, interval)
@@ -462,21 +465,24 @@ async fn main() -> Result<()> {
                                 responsible_person_ids: resp_ids,
                                 iso_year: plan_year, iso_week: plan_week,
                             }).ok();
-                            marked_names.push(group.name.clone());
+                            reaction_done.get_or_insert_with(|| ReactionDone {
+                                group_id:        group.id.clone(),
+                                completed_by_id: sender_person_id.clone(),
+                                iso_year:        plan_year,
+                                iso_week:        plan_week,
+                            });
                         }
                     }
 
+                    if let Some(rd) = reaction_done {
+                        state.reaction_dones.insert(ev.event_id.to_string(), rd);
+                    }
                     if let Err(e) = state.save(&ctx.state_path).await {
                         tracing::error!("Failed to save after plan reaction: {e}");
                     }
                     drop(state);
 
                     if let Some(r) = client.get_room(&ctx.room_id) {
-                        if !marked_names.is_empty() {
-                            let names = marked_names.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ");
-                            let msg = format!("✅ {sender_mxid} marked {names} as cleaned.");
-                            r.send(thread_reply(&msg, root_eid.clone(), root_eid)).await.ok();
-                        }
                         scheduler::refresh_pinned_plan(&ctx, &r, plan_year, plan_week).await;
                     }
                     return;
@@ -599,17 +605,9 @@ async fn main() -> Result<()> {
                 }
 
                 if removed {
-                    let by = state.person_by_id(&rd.completed_by_id)
-                        .map(|p| p.display_name.clone())
-                        .unwrap_or_else(|| rd.completed_by_id.clone());
-                    let group_name = state.group_by_id(&rd.group_id)
-                        .map(|g| g.name.clone())
-                        .unwrap_or_else(|| rd.group_id.clone());
                     let (undo_year, undo_week) = (rd.iso_year, rd.iso_week);
                     drop(state);
                     if let Some(r) = client.get_room(&ctx.room_id) {
-                        let msg = format!("↩️ {by} removed their ✅ — «{group_name}» marked undone.");
-                        r.send(format::mentionify_rich(&msg, &r).await).await.ok();
                         scheduler::refresh_pinned_plan(&ctx, &r, undo_year, undo_week).await;
                     }
                 }

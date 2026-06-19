@@ -7,8 +7,8 @@ use matrix_sdk::{
         events::{
             Mentions,
             reaction::ReactionEventContent,
-            relation::Annotation,
-            room::message::{ReplacementMetadata, RoomMessageEventContent},
+            relation::{Annotation, Reply},
+            room::message::{Relation, ReplacementMetadata, RoomMessageEventContent},
         },
     },
 };
@@ -140,16 +140,18 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             .collect();
 
         if !pending.is_empty() {
-            let (msg, mxids) = build_final_reminder(&state, year, week, interval, &pending);
-            let resp = room.send(mention_message(&msg, &mxids, &room).await).await
+            let (msg, mxids, reply_to_plan) = build_final_reminder(&state, year, week, interval, &pending);
+            let mut content = mention_message(&msg, &mxids, &room).await;
+            if let Some(plan_eid) = reply_to_plan {
+                if let Ok(plan_eid) = plan_eid.parse::<OwnedEventId>() {
+                    content.relates_to = Some(Relation::Reply(Reply::with_event_id(plan_eid)));
+                }
+            }
+            room.send(content).await
                 .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
-            let final_eid = resp.response.event_id.clone();
-            state.weekly_plan_event_ids.insert(final_eid.to_string(), (year, week));
             state.mark_reminder_sent("*", year, week, ReminderKind::Final);
             state.save(&ctx.state_path).await?;
             info!("Sent consolidated final reminder for week {week}/{year}");
-            drop(state);
-            room.send(ReactionEventContent::new(Annotation::new(final_eid, "✅".to_string()))).await.ok();
             return Ok(());
         } else {
             state.mark_reminder_sent("*", year, week, ReminderKind::Final);
@@ -243,49 +245,48 @@ pub(crate) fn build_weekly_plan(
     due_groups: &[CleaningGroup],
 ) -> (String, Vec<String>) {
     let mut lines = vec![
-        format!("📋 **Cleaning Plan · Week {week} ({})**", week_dates(year, week)),
+        format!("🧹 **Week {week} · {}**", week_dates(year, week)),
+        "React ✅ when your part is done.".to_owned(),
         String::new(),
     ];
     let mut all_mxids: Vec<String> = Vec::new();
 
     for group in due_groups {
-        lines.push(format!("🧹 **{}**", group.name));
+        lines.push(format!("**{}**", group.name));
         if group.is_multi_slot() {
             for (slot_idx, slot) in group.slots.iter().enumerate() {
                 let done = state.is_slot_completed(&group.id, &slot.id, year, week);
                 let rooms = if slot.room_names.is_empty() { String::new() }
-                    else { format!("\nRooms: {}", slot.room_names.join(", ")) };
+                    else { format!(" · {}", slot.room_names.join(", ")) };
                 match state.slot_assignee(group, slot_idx, year, week, interval) {
-                    None => lines.push(format!("(nobody assigned){rooms}")),
+                    None => lines.push(format!("{} {}{rooms}", status_icon(done), slot.name)),
                     Some(p) => {
                         if let Some(m) = &p.matrix_id { all_mxids.push(m.clone()); }
                         if done {
-                            lines.push(format!("✅ {}{rooms}", p.display_name));
+                            lines.push(format!("✅ {} · cleaned{rooms}", p.display_name));
                         } else {
-                            lines.push(format!("{}{rooms}", person_label(p)));
+                            lines.push(format!("⬜ {} · {}{rooms}", slot.name, person_label(p)));
                         }
                     }
                 }
             }
         } else {
             let done = state.is_completed(&group.id, year, week);
-            let rooms = group.rooms_text().map(|r| format!("\n{r}")).unwrap_or_default();
+            let rooms = group.rooms_text().map(|r| format!(" · {}", r.replace('\n', " · "))).unwrap_or_default();
             match state.responsible_person(group, year, week, interval) {
-                None => lines.push(format!("(nobody assigned){rooms}")),
+                None => lines.push(format!("{} nobody assigned{rooms}", status_icon(done))),
                 Some(p) => {
                     if let Some(m) = &p.matrix_id { all_mxids.push(m.clone()); }
                     if done {
-                        lines.push(format!("✅ {}{rooms}", p.display_name));
+                        lines.push(format!("✅ {} · cleaned{rooms}", p.display_name));
                     } else {
-                        lines.push(format!("{}{rooms}", person_label(p)));
+                        lines.push(format!("⬜ {}{rooms}", person_label(p)));
                     }
                 }
             }
         }
         lines.push(String::new());
     }
-
-    lines.push("✅ React or use !done".to_string());
 
     all_mxids.sort();
     all_mxids.dedup();
@@ -296,46 +297,46 @@ fn build_final_reminder(
     state: &crate::state::State,
     year: i32, week: u32, interval: u32,
     pending: &[CleaningGroup],
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, Option<String>) {
     let mut lines = vec![
-        format!("⚠️ **Still pending · Week {week} ({})**", week_dates(year, week)),
+        format!("⏰ **Still open · Week {week}**"),
         String::new(),
     ];
     let mut all_mxids: Vec<String> = Vec::new();
 
     for group in pending {
         if group.is_multi_slot() {
-            lines.push(format!("❌ **{}**", group.name));
+            lines.push(format!("**{}**", group.name));
             for (slot_idx, slot) in group.slots.iter().enumerate() {
                 if state.is_slot_completed(&group.id, &slot.id, year, week) { continue; }
                 let rooms = if slot.room_names.is_empty() { String::new() }
-                    else { format!("\n  Rooms: {}", slot.room_names.join(", ")) };
+                    else { format!(" · {}", slot.room_names.join(", ")) };
                 match state.slot_assignee(group, slot_idx, year, week, interval) {
-                    None => lines.push(format!("  (nobody assigned){rooms}")),
+                    None => lines.push(format!("⬜ {}{rooms}", slot.name)),
                     Some(p) => {
                         if let Some(m) = &p.matrix_id { all_mxids.push(m.clone()); }
-                        lines.push(format!("  {}{rooms}", person_label(p)));
+                        lines.push(format!("⬜ {} · {}{rooms}", slot.name, person_label(p)));
                     }
                 }
             }
         } else {
-            let rooms = group.rooms_text().map(|r| format!("\n  {r}")).unwrap_or_default();
+            let rooms = group.rooms_text().map(|r| format!(" · {}", r.replace('\n', " · "))).unwrap_or_default();
             match state.responsible_person(group, year, week, interval) {
-                None => lines.push(format!("❌ **{}** · (nobody assigned){rooms}", group.name)),
+                None => lines.push(format!("**{}** · nobody assigned{rooms}", group.name)),
                 Some(p) => {
                     if let Some(m) = &p.matrix_id { all_mxids.push(m.clone()); }
-                    lines.push(format!("❌ **{}** · {}{rooms}", group.name, person_label(p)));
+                    lines.push(format!("**{}** · {}{rooms}", group.name, person_label(p)));
                 }
             }
         }
         lines.push(String::new());
     }
 
-    lines.push("✅ React or use !done · swap: !swap @user".to_string());
-
     all_mxids.sort();
     all_mxids.dedup();
-    (lines.join("\n"), all_mxids)
+    let week_key = format!("{year}-W{week:02}");
+    let reply_to_plan = state.weekly_plan_canonical.get(&week_key).cloned();
+    (lines.join("\n"), all_mxids, reply_to_plan)
 }
 
 /// Parse "HH:MM" → (hour, minute). Falls back to (9, 0) on bad input.
@@ -351,4 +352,8 @@ fn parse_hhmm(s: &str) -> (u8, u8) {
 /// back to the plain display name (for non-Matrix users).
 fn person_label(p: &crate::domain::Person) -> &str {
     p.matrix_id.as_deref().unwrap_or(&p.display_name)
+}
+
+fn status_icon(done: bool) -> &'static str {
+    if done { "✅" } else { "⬜" }
 }
