@@ -1,0 +1,418 @@
+//! Statistics: !leaderboard, !fairness, !workload, !groupstats, !blame.
+
+use super::*;
+
+// ── !leaderboard ─────────────────────────────────────────────────────────────
+
+pub(crate) async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
+    let state = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+
+    let board = analytics::global_leaderboard(&state, interval);
+    if board.is_empty() {
+        return Ok(Some("No members assigned to any group yet.".into()));
+    }
+
+    let mut lines = vec!["🏆 Cleaning Leaderboard".to_owned(), String::new()];
+    for (i, ps) in board.iter().enumerate() {
+        let medal = match i {
+            0 => "🥇",
+            1 => "🥈",
+            2 => "🥉",
+            _ => "  ",
+        };
+        let streak = if ps.streak >= 2 {
+            format!("  🔥{}", ps.streak)
+        } else {
+            String::new()
+        };
+        let skips = if ps.skipped > 0 {
+            format!("  ⏭️{}", ps.skipped)
+        } else {
+            String::new()
+        };
+        let pct = (ps.completion_rate * 100.0).round() as u32;
+        lines.push(format!(
+            "{medal} {}  {}/{} ({}%){streak}{skips}",
+            ps.display_name, ps.completed, ps.due_weeks, pct
+        ));
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+// ── !fairness [group] ─────────────────────────────────────────────────────────
+
+pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
+    let state = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+    let (_, start_w) = state.tracking_start();
+
+    let groups: Vec<crate::domain::GroupId> = if let Some(name) = args.first() {
+        match state.group_by_name(name) {
+            Some(g) => vec![g.id.clone()],
+            None => return Ok(Some(format!("Group «{name}» not found."))),
+        }
+    } else {
+        state
+            .cleaning_groups
+            .iter()
+            .filter(|g| g.is_active)
+            .map(|g| g.id.clone())
+            .collect()
+    };
+
+    if groups.is_empty() {
+        return Ok(Some("No cleaning groups configured yet.".into()));
+    }
+
+    let mut out = Vec::new();
+    for (i, group_id) in groups.iter().enumerate() {
+        let Some(report) = analytics::fairness_report(&state, group_id, interval) else {
+            continue;
+        };
+        if i > 0 {
+            out.push(String::new());
+        }
+        out.push(format!(
+            "⚖️ **{}** · {} wks · since W{start_w}",
+            report.group_name, report.due_weeks,
+        ));
+        for e in &report.entries {
+            let (pct, _) = load_delta_pct(e.actual_load, e.expected_load);
+            let icon = load_icon(e.actual_load, e.expected_load);
+            out.push(format!(
+                "{icon} **{}**  {}/{:.0} ({})",
+                e.display_name, e.actual, e.expected as u32, pct,
+            ));
+        }
+        out.push(format!("Score {}/100", report.fairness_score));
+    }
+
+    if out.is_empty() {
+        return Ok(Some(
+            "No history yet — run some cleaning cycles first.".into(),
+        ));
+    }
+    Ok(Some(out.join("\n")))
+}
+
+// ── !workload ─────────────────────────────────────────────────────────────────
+
+pub(crate) async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
+    let state = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+    let report = analytics::workload_report(&state, interval);
+
+    if report.entries.is_empty() {
+        return Ok(Some("No members assigned to any group yet.".into()));
+    }
+
+    let yrs = report.years_tracked;
+    let has_history = report.due_weeks >= 4;
+    let header = if has_history {
+        format!("🏋️ **Load** · {} wks · {:.2} yr", report.due_weeks, yrs)
+    } else {
+        format!(
+            "🏋️ **Expected load** (structural · {} wks tracked)",
+            report.due_weeks
+        )
+    };
+    let mut out = vec![header];
+
+    // Normalize against house average so 1.0× = average resident.
+    let avg_expected = {
+        let sum: f64 = report.entries.iter().map(|e| e.expected_cli_per_year).sum();
+        let n = report.entries.len() as f64;
+        if n > 0.0 && sum > 0.0 {
+            sum / n
+        } else {
+            1.0
+        }
+    };
+
+    for e in &report.entries {
+        let ratio = e.expected_cli_per_year / avg_expected;
+        let ratio_str = format!("{:.2}×", ratio);
+
+        let line = if has_history {
+            let (pct, _) = load_delta_pct(e.actual_cli_per_year, e.expected_cli_per_year);
+            let icon = load_icon(e.actual_cli_per_year, e.expected_cli_per_year);
+            format!(
+                "{icon} **{}**  {} · {} · {}",
+                e.display_name,
+                pct,
+                ratio_str,
+                e.group_names.join(", "),
+            )
+        } else {
+            format!(
+                "**{}**  {} · {}",
+                e.display_name,
+                ratio_str,
+                e.group_names.join(", "),
+            )
+        };
+        out.push(line);
+    }
+
+    if has_history {
+        let most = report
+            .most_loaded
+            .first()
+            .map(String::as_str)
+            .unwrap_or("-");
+        let least = report
+            .least_loaded
+            .first()
+            .map(String::as_str)
+            .unwrap_or("-");
+        if most != least {
+            out.push(format!("⬆ {most} · ⬇ {least}"));
+        }
+    }
+
+    Ok(Some(out.join("\n")))
+}
+
+// ── !groupstats ───────────────────────────────────────────────────────────────
+
+pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
+    let state = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+
+    let active: Vec<_> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active)
+        .collect();
+    if active.is_empty() {
+        return Ok(Some("No active cleaning groups configured.".into()));
+    }
+
+    let models: Vec<_> = active
+        .iter()
+        .map(|g| analytics::group_load_model(g, interval))
+        .collect();
+
+    let avg_cli = {
+        let sum: f64 = models.iter().map(|m| m.cli_per_year).sum();
+        let n = models.len() as f64;
+        if n > 0.0 && sum > 0.0 {
+            sum / n
+        } else {
+            1.0
+        }
+    };
+
+    let mut out = vec!["📊 **Groups**  (1.0× = avg load/person/yr)".to_owned()];
+
+    for (group, m) in active.iter().zip(models.iter()) {
+        let ratio = m.cli_per_year / avg_cli;
+        let weight = if (m.group_weight - 1.0).abs() > 0.01 {
+            format!(" · ×{:.1}", m.group_weight)
+        } else {
+            String::new()
+        };
+        out.push(format!(
+            "**{}**  {:.2}× · {}p/{}wks · {:.0}r{}",
+            group.name, ratio, m.member_count, m.rotation_interval, m.rooms_per_assignment, weight,
+        ));
+        for slot in &group.slots {
+            let sr = analytics::effective_rooms_pub(&slot.room_names, &slot.room_weights);
+            let sw = if (slot.weight - 1.0).abs() > 0.01 {
+                format!(" ×{:.1}", slot.weight)
+            } else {
+                String::new()
+            };
+            out.push(format!("  └ {}  {:.0}r{}", slot.name, sr, sw));
+        }
+        let mut room_weights: Vec<String> = if group.slots.is_empty() {
+            group
+                .room_weights
+                .iter()
+                .map(|(r, w)| format!("{r} ×{w:.1}"))
+                .collect()
+        } else {
+            vec![]
+        };
+        room_weights.sort();
+        if !room_weights.is_empty() {
+            out.push(format!("  weights: {}", room_weights.join(", ")));
+        }
+    }
+
+    Ok(Some(out.join("\n")))
+}
+
+// ── !blame [group / @user] ────────────────────────────────────────────────────
+
+pub(crate) async fn cmd_blame(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
+    let (cur_y, cur_w) = current_iso_week();
+    let state = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+
+    Ok(Some(match args.first() {
+        None => blame_all(&state, cur_y, cur_w, interval),
+        Some(arg) => {
+            if let Some(group) = state.group_by_name(arg) {
+                blame_group(&state, &group.clone(), cur_y, cur_w, interval)
+            } else if let Some(person) = state.find_person(arg).cloned() {
+                blame_person(&state, &person, interval)
+            } else {
+                format!("«{arg}» not found.")
+            }
+        }
+    }))
+}
+
+pub(crate) fn blame_all(
+    state: &crate::state::State,
+    year: i32,
+    week: u32,
+    interval: u32,
+) -> String {
+    let uncleaned: Vec<_> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| {
+            g.is_active
+                && state.is_due(&g.id, year, week, interval)
+                && !state.is_completed(&g.id, year, week)
+        })
+        .collect();
+    if uncleaned.is_empty() {
+        return "✅ All due groups are cleaned this week!".into();
+    }
+    let mut lines = vec![format!(
+        "😤 **Blame** · week {week} ({})",
+        week_dates(year, week)
+    )];
+    for g in uncleaned {
+        let members_text = state
+            .members_of(g)
+            .iter()
+            .map(|p| p.display_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n_due = state.all_due_weeks(interval, (year, week)).len();
+        let n_missed = state.missed_weeks_for(&g.id, interval).len();
+        lines.push(String::new());
+        lines.push(format!("❌ {}", g.name));
+        lines.push(format!("Members: {members_text}"));
+        lines.push(format!("Missed: {n_missed} of {n_due}"));
+    }
+    lines.join("\n")
+}
+
+pub(crate) fn blame_group(
+    state: &crate::state::State,
+    group: &CleaningGroup,
+    year: i32,
+    week: u32,
+    interval: u32,
+) -> String {
+    let due = state.all_due_weeks(interval, (year, week));
+    let closed: Vec<_> = due
+        .iter()
+        .filter(|&&(y, w)| (y, w) != (year, week))
+        .collect();
+    let n_due = closed.len();
+    let n_done = closed
+        .iter()
+        .filter(|(y, w)| state.is_completed(&group.id, *y, *w))
+        .count();
+    let pct = (100 * n_done).checked_div(n_due).unwrap_or(100);
+    let streak = state.streak_for(&group.id, interval);
+    let this = state.is_completed(&group.id, year, week);
+    let members_text = state
+        .members_of(group)
+        .iter()
+        .map(|p| p.display_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = vec![format!("😤 **Blame** · {}", group.name), String::new()];
+    lines.push(format!("Members: {members_text}"));
+    lines.push(format!(
+        "Completed: {n_done}/{n_due} ({pct}%) · Streak: {streak} · This week: {}",
+        if this { "✅" } else { "❌" }
+    ));
+    if let Some(last) = state.last_completion(&group.id) {
+        let by = state
+            .person_by_id(&last.completed_by_id)
+            .map(|p| p.display_name.as_str())
+            .unwrap_or("?");
+        lines.push(format!(
+            "Last: week {} ({}) by {by}",
+            last.iso_week,
+            week_dates(last.iso_year, last.iso_week)
+        ));
+    }
+    let missed = state.missed_weeks_for(&group.id, interval);
+    if !missed.is_empty() {
+        let shown: Vec<_> = missed
+            .iter()
+            .take(5)
+            .map(|(y, w)| format!("w{w} ({})", week_dates(*y, *w)))
+            .collect();
+        lines.push(format!(
+            "Missed: {}{}",
+            shown.join(", "),
+            if missed.len() > 5 {
+                format!(" (+{})", missed.len() - 5)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    lines.join("\n")
+}
+
+pub(crate) fn blame_person(state: &crate::state::State, person: &Person, interval: u32) -> String {
+    let (cur_y, cur_w) = current_iso_week();
+    let groups = state.groups_for_person(&person.id);
+    let group_name = groups
+        .first()
+        .map(|g| g.name.as_str())
+        .unwrap_or("(unassigned)");
+
+    let due = state.all_due_weeks(interval, (cur_y, cur_w));
+    let closed: Vec<_> = due
+        .iter()
+        .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
+        .collect();
+    let n_due = closed.len();
+    let n_done_by_person = state
+        .completions
+        .iter()
+        .filter(|c| c.completed_by_id == person.id)
+        .count()
+        .min(n_due);
+    let pct = (100 * n_done_by_person).checked_div(n_due).unwrap_or(100);
+    let streak = groups
+        .first()
+        .map(|g| state.streak_for(&g.id, interval))
+        .unwrap_or(0);
+
+    let mut lines = vec![
+        format!("😤 **Blame** · {}", person.display_name),
+        String::new(),
+    ];
+    lines.push(format!("Group: {group_name}"));
+    lines.push(format!(
+        "Personally cleaned: {n_done_by_person}/{n_due} ({pct}%) · Streak: {streak}"
+    ));
+    if let Some(last) = state
+        .completions
+        .iter()
+        .filter(|c| c.completed_by_id == person.id)
+        .max_by_key(|c| c.completed_at)
+    {
+        lines.push(format!(
+            "Last: week {} ({})",
+            last.iso_week,
+            week_dates(last.iso_year, last.iso_week)
+        ));
+    }
+    lines.join("\n")
+}

@@ -1,3 +1,6 @@
+// Tests build fixtures by tweaking `Default` values field by field.
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
+
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
@@ -70,7 +73,7 @@ async fn send_join_greeting(ctx: &BotContext, room: &Room, user_id: &str, intro:
         let members_text = {
             let state = ctx.state.lock().await;
             let names: Vec<String> = state
-                .members_of(&group)
+                .members_of(group)
                 .iter()
                 .map(|p| p.display_name.clone())
                 .collect();
@@ -281,7 +284,7 @@ async fn main() -> Result<()> {
                     .await
                     {
                         Ok(Some(reply)) => replies.push(reply),
-                        Err(e) if e.to_string() == "__not_admin__" => replies.push(
+                        Err(e) if e.is::<mxbot_common::admin::NotAdmin>() => replies.push(
                             format::mentionify("❌ This command requires admin privileges."),
                         ),
                         Ok(None) => {}
@@ -446,11 +449,11 @@ async fn main() -> Result<()> {
                             if g.is_multi_slot() {
                                 g.slots.iter().enumerate().any(|(i, _)|
                                     state.slot_assignee(g, i, plan_year, plan_week, interval)
-                                        .map_or(false, |p| p.id == sender_person_id)
+                                        .is_some_and(|p| p.id == sender_person_id)
                                 )
                             } else {
                                 state.responsible_person(g, plan_year, plan_week, interval)
-                                    .map_or(false, |p| p.id == sender_person_id)
+                                    .is_some_and(|p| p.id == sender_person_id)
                             }
                         })
                         .cloned()
@@ -475,7 +478,7 @@ async fn main() -> Result<()> {
                             for (slot_idx, slot) in group.slots.iter().enumerate() {
                                 if state.is_slot_completed(&group.id, &slot.id, plan_year, plan_week) { continue; }
                                 if state.slot_assignee(group, slot_idx, plan_year, plan_week, interval)
-                                    .map_or(false, |p| p.id == sender_person_id)
+                                    .is_some_and(|p| p.id == sender_person_id)
                                 {
                                     state.apply_event(analytics::DomainEvent::CleaningCompleted {
                                         group_id: group.id.clone(), slot_id: Some(slot.id.clone()),
@@ -700,5 +703,5 @@ async fn main() -> Result<()> {
 
     tokio::spawn(scheduler::run(ctx, client.clone()));
 
-    bot.sync_forever().await
+    bot.run().await
 }

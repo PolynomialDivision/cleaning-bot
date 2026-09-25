@@ -637,12 +637,7 @@ impl State {
                 });
                 true
             }
-            E::SwapApproved {
-                swap_id,
-                requester_id: _,
-                replacement_id: _,
-                ..
-            } => {
+            E::SwapApproved { swap_id, .. } => {
                 let req = self
                     .swap_requests
                     .iter_mut()

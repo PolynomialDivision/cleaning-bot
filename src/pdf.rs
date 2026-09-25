@@ -171,9 +171,8 @@ fn group_section(
             j += 1;
         }
 
-        for k in i..j {
-            let a = rows[k];
-            if k == i {
+        for (offset, &a) in rows[i..j].iter().enumerate() {
+            if offset == 0 {
                 s.push_str(&format!(
                     "\\textbf{{{}}}{{\\newline{{\\tiny {}}}}}",
                     a.iso_week, a.iso_year,
@@ -220,7 +219,7 @@ fn group_section(
             }
             s.push_str(" \\\\\n");
 
-            if k == j - 1 {
+            if offset == j - i - 1 {
                 s.push_str("\\hline\n");
             } else {
                 // Partial rule: separate the slot rows but keep Week/Dates
