@@ -215,7 +215,7 @@ async fn main() -> Result<()> {
 
     let bot = Bot::builder("cleaning-bot", env!("CARGO_PKG_VERSION"))
         .store_path(&store_path)
-        .admin_help("Any admin command of the cleaning plan (!help lists them), e.g. !adduser, !assign, !resetplan")
+        .admin_help("Any admin command of the cleaning plan (!help admin lists them), e.g. !member add, !plan assign, !groups")
         .start(&config.matrix, &config.security)
         .await?;
     let client = bot.client.clone();

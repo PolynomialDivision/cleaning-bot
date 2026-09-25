@@ -1,29 +1,8 @@
-//! Maintenance: !testnotify, group enable/disable, !listgroups, plan reposting, !validate.
+//! Maintenance: group enable/disable, plan announcing, !validate.
 
 use super::*;
 
-// ── !testnotify ───────────────────────────────────────────────────────────────
-
-pub(crate) async fn cmd_testnotify(room: &Room) -> Result<Option<RoomMessageEventContent>> {
-    let room = room.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(5 * 60)).await;
-        use matrix_sdk::ruma::events::Mentions;
-        let mut msg = RoomMessageEventContent::text_html(
-            "🔔 @room · test notification",
-            "🔔 @room · test notification",
-        );
-        let mut mentions = Mentions::new();
-        mentions.room = true;
-        msg = msg.add_mentions(mentions);
-        room.send(msg).await.ok();
-    });
-    Ok(Some(RoomMessageEventContent::text_plain(
-        "⏱ @room notification in 5 minutes.",
-    )))
-}
-
-// ── Admin: !disablegroup <group> ─────────────────────────────────────────────
+// ── Admin: !groups disable <group> ─────────────────────────────────────────────
 
 pub(crate) async fn cmd_disablegroup(
     ctx: &BotContext,
@@ -33,7 +12,7 @@ pub(crate) async fn cmd_disablegroup(
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !disablegroup <group>".into())),
+        None => return Ok(Some("Usage: !groups disable <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
@@ -48,7 +27,7 @@ pub(crate) async fn cmd_disablegroup(
     )))
 }
 
-// ── Admin: !enablegroup <group> ──────────────────────────────────────────────
+// ── Admin: !groups enable <group> ──────────────────────────────────────────────
 
 pub(crate) async fn cmd_enablegroup(
     ctx: &BotContext,
@@ -58,7 +37,7 @@ pub(crate) async fn cmd_enablegroup(
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !enablegroup <group>".into())),
+        None => return Ok(Some("Usage: !groups enable <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
@@ -73,30 +52,7 @@ pub(crate) async fn cmd_enablegroup(
     )))
 }
 
-// ── !listgroups ───────────────────────────────────────────────────────────────
-
-pub(crate) async fn cmd_listgroups(ctx: &BotContext) -> Result<Option<String>> {
-    let state = ctx.state.lock().await;
-    if state.cleaning_groups.is_empty() {
-        return Ok(Some("No cleaning groups configured.".into()));
-    }
-    let active_count = state.cleaning_groups.iter().filter(|g| g.is_active).count();
-    let disabled_count = state.cleaning_groups.len() - active_count;
-    let mut lines = vec![format!(
-        "🏢 Groups ({active_count} active, {disabled_count} disabled):"
-    )];
-    for group in &state.cleaning_groups {
-        let n = group.member_ids.len();
-        if group.is_active {
-            lines.push(format!("  ✅ **{}** ({n} members)", group.name));
-        } else {
-            lines.push(format!("  🚫 **{}** ({n} members) — disabled", group.name));
-        }
-    }
-    Ok(Some(lines.join("\n")))
-}
-
-// ── Admin: !announceweek / !repostplan ───────────────────────────────────────
+// ── Admin: !plan announce ───────────────────────────────────────
 //
 // Sends a fresh consolidated weekly plan for the current week.  Replaces the
 // previously active plan in state so reactions on old messages no longer
@@ -117,7 +73,7 @@ pub(crate) async fn cmd_announceweek(
             "Nothing is due this week — no plan to announce.",
         ))),
         Err(e) => {
-            tracing::error!("!announceweek failed: {e}");
+            tracing::error!("!plan announce failed: {e}");
             Ok(Some(format::mentionify(&format!(
                 "❌ Failed to announce weekly plan: {e}"
             ))))

@@ -947,25 +947,36 @@ async fn import_does_not_disturb_the_rotation_queue_and_round_robin_continues_af
 
 #[test]
 fn command_may_change_current_plan_includes_importplan() {
-    for cmd in [
-        "!done",
-        "!skip",
-        "!undo",
-        "!assign",
-        "!unassign",
-        "!takeover",
-        "!acceptswap",
-        "!importplan",
+    for (cmd, sub) in [
+        ("!done", None),
+        ("!undo", None),
+        ("!takeover", None),
+        ("!acceptswap", Some("3")),
+        ("!swap", Some("accept")),
+        ("!plan", Some("skip")),
+        ("!plan", Some("assign")),
+        ("!plan", Some("unassign")),
+        ("!plan", Some("reset")),
+        ("!plan", Some("import")),
     ] {
         assert!(
-            command_may_change_current_plan(cmd),
-            "{cmd} must trigger a pinned-plan refresh"
+            command_may_change_current_plan(cmd, sub),
+            "{cmd} {sub:?} must trigger a pinned-plan refresh"
         );
     }
-    for cmd in ["!status", "!help", "!stats", "!cleanplan", "!groups", ""] {
+    for (cmd, sub) in [
+        ("!status", None),
+        ("!help", None),
+        ("!stats", None),
+        ("!plan", None),
+        ("!plan", Some("6")),
+        ("!swap", Some("@bob:example.org")),
+        ("!groups", None),
+        ("", None),
+    ] {
         assert!(
-            !command_may_change_current_plan(cmd),
-            "{cmd} must not trigger a pinned-plan refresh"
+            !command_may_change_current_plan(cmd, sub),
+            "{cmd} {sub:?} must not trigger a pinned-plan refresh"
         );
     }
 }
@@ -3226,4 +3237,221 @@ async fn last_slot_assigned_event(
             _ => None,
         })
         .expect("expected a SlotAssigned event in the log")
+}
+
+// ── Command overhaul: status, groups, undo, done, renamed commands ───────────
+
+/// "Floor" with two slots cleaned by two people in the same week: Alice has
+/// Scharni, Bob has Colbe. Carol (no Matrix) is a third member.
+fn two_slot_week() -> (State, GroupId, PersonId, PersonId) {
+    let mut state = State::default();
+    let alice = Person::new_matrix("@alice:example.org");
+    let bob = Person::new_matrix("@bob:example.org");
+    let carol = Person::new_named("Carol");
+    let (alice_id, bob_id) = (alice.id.clone(), bob.id.clone());
+    let mut group = CleaningGroup::new("Floor");
+    let group_id = group.id.clone();
+    group.member_ids = vec![alice_id.clone(), bob_id.clone(), carol.id.clone()];
+    let mut scharni = CleaningSlot::new("Scharni");
+    scharni.id = "s0".into();
+    let mut colbe = CleaningSlot::new("Colbe");
+    colbe.id = "s1".into();
+    group.slots = vec![scharni, colbe];
+    state.persons = vec![alice, bob, carol];
+    state.cleaning_groups.push(group);
+    let (year, week) = current_iso_week();
+    for (slot_index, person_id) in [(0, &alice_id), (1, &bob_id)] {
+        state
+            .apply_event(DomainEvent::SlotAssigned {
+                group_id: group_id.clone(),
+                slot_index,
+                iso_year: year,
+                iso_week: week,
+                person_id: Some(person_id.clone()),
+                source: AssignmentSource::Assign,
+                actor_id: None,
+                previous_person_id: None,
+            })
+            .unwrap();
+    }
+    (state, group_id, alice_id, bob_id)
+}
+
+#[tokio::test]
+async fn status_lists_every_person_of_a_shared_week_with_their_own_state() {
+    let (state, _group_id, _alice_id, _bob_id) = two_slot_week();
+    let (ctx, path, _admin) = test_context(state);
+    let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
+
+    let before = cmd_status(&ctx).await.unwrap().unwrap();
+    assert!(before.contains("0 of 2 done"), "{before}");
+    assert!(before.contains("⬜ Scharni · alice"), "{before}");
+    assert!(before.contains("⬜ Colbe · bob"), "{before}");
+
+    cmd_done(&ctx, &alice, &[]).await.unwrap().unwrap();
+    let after = cmd_status(&ctx).await.unwrap().unwrap();
+    assert!(after.contains("1 of 2 done"), "{after}");
+    assert!(after.contains("✅ Scharni · alice"), "{after}");
+    assert!(after.contains("⬜ Colbe · bob"), "{after}");
+    // Status never pings: names, not Matrix IDs.
+    assert!(!after.contains("@alice:example.org"), "{after}");
+
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn status_shows_who_actually_cleaned_and_skips() {
+    let (state, group_id, _alice_id, bob_id) = two_slot_week();
+    let (ctx, path, admin) = test_context(state);
+    let (year, week) = current_iso_week();
+    {
+        let mut state = ctx.state.lock().await;
+        // Bob cleans Alice's slot.
+        state
+            .apply_event(DomainEvent::CleaningCompleted {
+                group_id: group_id.clone(),
+                slot_id: Some("s0".into()),
+                person_id: bob_id.clone(),
+                responsible_person_ids: vec![],
+                iso_year: year,
+                iso_week: week,
+            })
+            .unwrap();
+    }
+    cmd_skip(&ctx, &admin, &["Floor"]).await.unwrap();
+
+    let text = cmd_status(&ctx).await.unwrap().unwrap();
+    assert!(text.contains("✅ Scharni · alice (done by bob)"), "{text}");
+    assert!(text.contains("⏭️ Colbe · bob · skipped"), "{text}");
+    assert!(text.contains("2 of 2 done"), "{text}");
+
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn undo_in_a_shared_week_only_takes_back_the_senders_own_slot() {
+    let (state, group_id, _alice_id, _bob_id) = two_slot_week();
+    let (ctx, path, admin) = test_context(state);
+    let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
+    let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
+    let (year, week) = current_iso_week();
+
+    cmd_done(&ctx, &alice, &[]).await.unwrap();
+    cmd_done(&ctx, &bob, &[]).await.unwrap();
+    assert!(ctx.state.lock().await.is_completed(&group_id, year, week));
+
+    let reply = cmd_undo(&ctx, &alice, &[]).await.unwrap().unwrap();
+    assert!(reply.contains("Floor / Scharni"), "{reply}");
+    {
+        let state = ctx.state.lock().await;
+        assert!(!state.is_slot_completed(&group_id, &"s0".to_owned(), year, week));
+        assert!(
+            state.is_slot_completed(&group_id, &"s1".to_owned(), year, week),
+            "Bob's mark must survive Alice's undo"
+        );
+    }
+
+    // An admin naming the group clears the whole week.
+    cmd_undo(&ctx, &admin, &["Floor"]).await.unwrap();
+    assert!(!ctx
+        .state
+        .lock()
+        .await
+        .is_slot_completed(&group_id, &"s1".to_owned(), year, week));
+
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn bare_done_only_marks_what_is_open_for_the_sender() {
+    let (mut state, group_id, alice_id, bob_id) = two_slot_week();
+    // Bob is also in a plain group where it's Alice's turn.
+    let mut kitchen = CleaningGroup::new("Kitchen");
+    let kitchen_id = kitchen.id.clone();
+    kitchen.member_ids = vec![alice_id.clone(), bob_id.clone()];
+    state.cleaning_groups.push(kitchen);
+    let (year, week) = current_iso_week();
+    state
+        .apply_event(DomainEvent::SlotAssigned {
+            group_id: kitchen_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(alice_id),
+            source: AssignmentSource::Assign,
+            actor_id: None,
+            previous_person_id: None,
+        })
+        .unwrap();
+    let (ctx, path, _admin) = test_context(state);
+    let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
+    let stranger = OwnedUserId::try_from("@nobody:example.org").unwrap();
+
+    let reply = cmd_done(&ctx, &bob, &[]).await.unwrap().unwrap();
+    assert!(reply.contains("Floor / Colbe"), "{reply}");
+    {
+        let state = ctx.state.lock().await;
+        assert!(state.is_slot_completed(&group_id, &"s1".to_owned(), year, week));
+        assert!(!state.is_slot_completed(&group_id, &"s0".to_owned(), year, week));
+        assert!(
+            !state.is_completed(&kitchen_id, year, week),
+            "a group where nothing is open for Bob must not be marked"
+        );
+    }
+
+    let reply = cmd_done(&ctx, &stranger, &[]).await.unwrap().unwrap();
+    assert!(reply.contains("not registered"), "{reply}");
+
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn groups_overview_shows_every_group_with_its_members() {
+    let (mut state, _group_id, _alice_id, bob_id) = two_slot_week();
+    let mut storage = CleaningGroup::new("Storage");
+    storage.member_ids = vec![bob_id];
+    storage.is_active = false;
+    state.cleaning_groups.push(storage);
+    let (ctx, path, _admin) = test_context(state);
+
+    let text = cmd_groups(&ctx, None).await.unwrap().unwrap();
+    assert!(
+        text.contains("**Floor** (3) · alice, bob, Carol (no Matrix)"),
+        "{text}"
+    );
+    assert!(text.contains("Slots: Scharni · Colbe"), "{text}");
+    assert!(text.contains("🚫 Disabled: Storage"), "{text}");
+
+    let detail = cmd_groups(&ctx, Some("floor")).await.unwrap().unwrap();
+    assert!(detail.contains("🏢 **Floor**"), "{detail}");
+    assert!(detail.contains("⬜ Scharni · alice"), "{detail}");
+    assert!(detail.contains("@bob:example.org"), "{detail}");
+
+    let missing = cmd_groups(&ctx, Some("Attic")).await.unwrap().unwrap();
+    assert!(missing.contains("not found"), "{missing}");
+
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn old_command_names_point_to_their_replacement() {
+    assert!(renamed_command_hint("!cleanplan")
+        .unwrap()
+        .contains("!plan [N]"));
+    assert!(renamed_command_hint("!adduser")
+        .unwrap()
+        .contains("!member add"));
+    assert!(renamed_command_hint("!setroomweight")
+        .unwrap()
+        .contains("!groups weight"));
+    assert!(renamed_command_hint("!unknown").is_none());
+}
+
+#[test]
+fn help_is_short_and_admin_help_is_separate() {
+    let help = help_text();
+    assert!(help.lines().count() <= 16, "{help}");
+    assert!(help.contains("!groups"));
+    assert!(!help.contains("!plan assign"));
+    assert!(admin_help_text().contains("!plan assign"));
 }

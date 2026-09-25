@@ -11,7 +11,7 @@ device_id     = "REPLACE_ME"
 # Configured admins may always open a direct chat with the bot.
 allowed_inviters = ["@admin:example.org"]
 # Only these users may run admin commands, also privately in a direct chat
-# with the bot (!addgroup, !cleaning add, …).
+# with the bot (!groups add, !member add, …).
 admin_users = ["@admin:example.org"]
 # encryption_strategy = "identity_based"  # AllDevices | IdentityBased (default) | OnlyTrusted
 
@@ -35,16 +35,16 @@ timezone = "Europe/Berlin"
 # Comment out to disable.
 summary_weekday = 0   # Monday
 
-# ── Floors and users ───────────────────────────────────────────────────────────
-# Floors and users are managed at runtime via bot commands — not in this file.
+# ── Groups and members ─────────────────────────────────────────────────────────
+# Groups and members are managed at runtime via bot commands — not in this file.
 #
-# To set up floors after starting the bot, use:
-#   !addgroup <name>                         — create a cleaning group
-#   !cleaning add @user:server <group>       — add a Matrix user
-#   !cleaning remove @user:server <group>    — remove a Matrix user
-#   !cleaning people [group]                 — show ordered rotations
+# To set up groups after starting the bot, use:
+#   !groups add <name>                           — create a cleaning group
+#   !member add <@user:server | name> <group>    — add a Matrix user (or a person without Matrix)
+#   !member remove <@user:server | name> <group> — remove them again
+#   !groups                                      — all groups and their members
 #
-# Run !help in the bot room for the full command reference.
+# Run !help (everyone) and !help admin in the bot room for all commands.
 
 [security.verification]
 # Users allowed to complete first-time verification. If omitted or empty,

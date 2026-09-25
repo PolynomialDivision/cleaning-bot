@@ -33,6 +33,7 @@ mod exports;
 mod helpers;
 mod maintenance;
 mod member;
+mod overview;
 mod rotation;
 mod setup;
 mod stats;
@@ -45,6 +46,7 @@ use exports::*;
 pub(crate) use helpers::*;
 use maintenance::*;
 use member::*;
+use overview::*;
 use rotation::*;
 use setup::*;
 use stats::*;
@@ -52,7 +54,7 @@ use swaps::*;
 
 /// Shell-like tokenizer: splits on whitespace but keeps "quoted strings" together.
 /// Quotes are stripped from the resulting tokens.
-/// Example: `!addroom "2. Stock" "Scharni Toilette"` → ["!addroom", "2. Stock", "Scharni Toilette"]
+/// Example: `!groups room add "2. Stock" "Scharni Toilette"` → ["!groups", "room", "add", "2. Stock", "Scharni Toilette"]
 fn tokenize(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
@@ -111,75 +113,84 @@ pub async fn handle(
         }
     }
 
+    let sub = args.first().map(|a| a.to_ascii_lowercase());
+    let sub = sub.as_deref();
+    let rest = args.get(1..).unwrap_or_default();
+
     // Commands that need direct room access.
-    match cmd {
-        "!linkmatrix" => {
-            let s = cmd_linkmatrix(ctx, sender, room, &args).await?;
+    match (cmd, sub) {
+        ("!plan", None) => return cmd_cleanplan(ctx, sender, room, &args).await,
+        ("!plan", Some(n)) if n.parse::<usize>().is_ok() => {
+            return cmd_cleanplan(ctx, sender, room, &args).await
+        }
+        ("!plan", Some("remind")) => return cmd_remind(ctx, sender, room, rest).await,
+        ("!plan", Some("announce")) => return cmd_announceweek(ctx, sender, room).await,
+        ("!plan", Some("pdf")) => {
+            return cmd_pdf(ctx, sender, room, rest, event_id, thread_root).await
+        }
+        ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, room, rest).await,
+        ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
+        ("!member", Some("link")) => {
+            let s = cmd_linkmatrix(ctx, sender, room, rest).await?;
             return Ok(s.map(RoomMessageEventContent::text_plain));
         }
-        "!cleanplan" => return cmd_cleanplan(ctx, sender, room, &args).await,
-        "!remind" => return cmd_remind(ctx, sender, room, &args).await,
-        "!announceweek" => return cmd_announceweek(ctx, sender, room).await,
-        "!repostplan" => return cmd_announceweek(ctx, sender, room).await,
-        "!testnotify" => return cmd_testnotify(room).await,
-        "!pdf" => return cmd_pdf(ctx, sender, room, &args, event_id, thread_root).await,
-        "!ical" => return cmd_ical(ctx, sender, room, &args).await,
-        "!icalreset" => return cmd_icalreset(ctx, sender, room, &args).await,
         _ => {}
     }
 
-    let reply: Option<String> = match cmd {
-        "!done" => cmd_done(ctx, sender, &args).await,
-        "!status" => cmd_status(ctx).await,
-        "!stats" => cmd_stats(ctx, &args).await,
-        "!groups" => cmd_floors(ctx).await,
-        "!cleaning" => cmd_cleaning(ctx, sender, &args).await,
-        "!joingroup" => cmd_joinfloor(ctx, sender, &args).await,
-        "!leavegroup" => cmd_leavefloor(ctx, sender, &args).await,
-        "!swap" => cmd_swap(ctx, sender, &args).await,
-        "!acceptswap" => cmd_acceptswap(ctx, sender, &args).await,
-        "!rejectswap" => cmd_rejectswap(ctx, sender, &args).await,
-        "!assign" => cmd_assign(ctx, sender, &args).await,
-        "!unassign" => cmd_unassign(ctx, sender, &args).await,
-        "!importplan" => cmd_importplan(ctx, sender, &args).await,
-        "!takeover" => cmd_takeover(ctx, sender, &args).await,
-        "!adduser" => cmd_adduser(ctx, sender, &args).await,
-        "!removeuser" => cmd_removeuser(ctx, sender, &args).await,
-        "!addperson" => cmd_addperson(ctx, sender, &args).await,
-        "!removeperson" => cmd_removeperson(ctx, sender, &args).await,
-        "!addgroup" => cmd_addfloor(ctx, sender, &args).await,
-        "!removegroup" => cmd_removefloor(ctx, sender, &args).await,
-        "!resetplan" => cmd_resetplan(ctx, sender, &args).await,
-        "!addslot" => cmd_addslot(ctx, sender, &args).await,
-        "!removeslot" => cmd_removeslot(ctx, sender, &args).await,
-        "!addroom" => cmd_addroom(ctx, sender, &args).await,
-        "!removeroom" => cmd_removeroom(ctx, sender, &args).await,
-        "!undo" => cmd_undo(ctx, sender, &args).await,
-        "!next" => cmd_next(ctx, sender, &args).await,
-        "!skip" => cmd_skip(ctx, sender, &args).await,
-        "!leaderboard" => cmd_leaderboard(ctx).await,
-        "!fairness" => cmd_fairness(ctx, &args).await,
-        "!planfairness" => cmd_fairness(ctx, &args).await,
-        "!workload" => cmd_workload(ctx).await,
-        "!groupstats" => cmd_groupstats(ctx).await,
-        "!setgroupweight" => cmd_setgroupweight(ctx, sender, &args).await,
-        "!setroomweight" => cmd_setroomweight(ctx, sender, &args).await,
-        "!disablegroup" => cmd_disablegroup(ctx, sender, &args).await,
-        "!enablegroup" => cmd_enablegroup(ctx, sender, &args).await,
-        "!listgroups" => cmd_listgroups(ctx).await,
-        "!validate" => cmd_validate(ctx, sender).await,
-        "!absent" => cmd_absent(ctx, sender, &args).await,
-        "!back" => cmd_back(ctx, sender, &args).await,
-        "!blame" => cmd_blame(ctx, &args).await,
-        "!help" => Ok(Some(help_text())),
-        _ => Ok(None),
+    let reply: Option<String> = match (cmd, sub) {
+        // ── Everyone ──
+        ("!status", _) => cmd_status(ctx).await,
+        ("!done", _) => cmd_done(ctx, sender, &args).await,
+        ("!undo", _) => cmd_undo(ctx, sender, &args).await,
+        ("!groups", None) => cmd_groups(ctx, None).await,
+        ("!next", _) => cmd_next(ctx, sender, &args).await,
+        ("!takeover", _) => cmd_takeover(ctx, sender, &args).await,
+        ("!swap", Some("accept")) => cmd_acceptswap(ctx, sender, rest).await,
+        ("!swap", Some("reject")) => cmd_rejectswap(ctx, sender, rest).await,
+        ("!swap", _) => cmd_swap(ctx, sender, &args).await,
+        // Old swap messages in the room still name these.
+        ("!acceptswap", _) => cmd_acceptswap(ctx, sender, &args).await,
+        ("!rejectswap", _) => cmd_rejectswap(ctx, sender, &args).await,
+        ("!join", _) => cmd_joinfloor(ctx, sender, &args).await,
+        ("!leave", _) => cmd_leavefloor(ctx, sender, &args).await,
+        ("!stats", _) => cmd_stats_overview(ctx, &args).await,
+        ("!help", Some("admin")) => Ok(Some(admin_help_text())),
+        ("!help", _) => Ok(Some(help_text())),
+
+        // ── Admin: plan ──
+        ("!plan", Some("assign")) => cmd_assign(ctx, sender, rest).await,
+        ("!plan", Some("unassign")) => cmd_unassign(ctx, sender, rest).await,
+        ("!plan", Some("skip")) => cmd_skip(ctx, sender, rest).await,
+        ("!plan", Some("reset")) => cmd_resetplan(ctx, sender, rest).await,
+        ("!plan", Some("import")) => cmd_importplan(ctx, sender, rest).await,
+        ("!plan", Some(_)) => Ok(Some(PLAN_USAGE.to_owned())),
+
+        // ── Admin: members ──
+        ("!member", Some("add")) => cmd_member_add(ctx, sender, rest).await,
+        ("!member", Some("remove")) => cmd_member_remove(ctx, sender, rest).await,
+        ("!member", Some("away")) => cmd_absent(ctx, sender, rest).await,
+        ("!member", Some("back")) => cmd_back(ctx, sender, rest).await,
+        ("!member", _) => Ok(Some(MEMBER_USAGE.to_owned())),
+
+        // ── Admin: groups (the bare list is for everyone) ──
+        ("!groups", Some("add")) => cmd_addfloor(ctx, sender, rest).await,
+        ("!groups", Some("remove")) => cmd_removefloor(ctx, sender, rest).await,
+        ("!groups", Some("enable")) => cmd_enablegroup(ctx, sender, rest).await,
+        ("!groups", Some("disable")) => cmd_disablegroup(ctx, sender, rest).await,
+        ("!groups", Some("weight")) => cmd_weight(ctx, sender, rest).await,
+        ("!groups", Some("slot")) => cmd_groups_slot(ctx, sender, rest).await,
+        ("!groups", Some("room")) => cmd_groups_room(ctx, sender, rest).await,
+        ("!groups", Some(_)) => cmd_groups(ctx, Some(&args.join(" "))).await,
+        ("!validate", _) => cmd_validate(ctx, sender).await,
+
+        _ => Ok(renamed_command_hint(cmd)),
     }?;
 
     // Every mutation that can change who's responsible for, or the status
     // of, the running week's plan goes through this single refresh call —
     // the pinned Matrix message is re-rendered straight from `State`, never
     // patched in place, so it can never drift from the persisted domain state.
-    if command_may_change_current_plan(cmd) {
+    if command_may_change_current_plan(cmd, sub) {
         let (year, week) = current_iso_week();
         scheduler::refresh_pinned_plan(ctx, room, year, week).await;
     }
@@ -192,54 +203,102 @@ pub async fn handle(
 
 // ── help ─────────────────────────────────────────────────────────────────────
 
+const PLAN_USAGE: &str = "Usage: !plan [N] | !plan assign|unassign|skip|remind|announce|pdf|reset|import … (see !help admin)";
+const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person>";
+
 fn help_text() -> String {
-    r#"🧹 Cleaning bot commands:
+    r#"🧹 **Cleaning bot**
 
-  !help                        · show this help
-  !status                      · this week's cleaned / not-cleaned overview
-  !areas                       · list all cleaning groups and their members
-  !undo [group]                · undo this week's done mark
-  !next [@user]                · when is your (or @user's) next due week?
-  !stats [@user]               · completion statistics
-  !leaderboard                 · overall cleaning leaderboard with streaks
-  !fairness [group]            · fairness report — who's doing their share?
-  !cleanplan [N]               · show the next N due cleaning weeks (default 6)
-  !blame                       · all due but uncleaned groups this week
-  !blame @user                 · cleaning record for one person
-  !blame <group>               · cleaning record for a specific group
-  !joingroup <group>            · add yourself to a cleaning group
-  !leavegroup <group>           · remove yourself from a cleaning group
-  !swap @user [group] [week N] · propose a swap; !acceptswap / !rejectswap to respond
-  !acceptswap <id>             · accept a pending swap request
-  !rejectswap <id>             · reject a pending swap request
-  !takeover [group] [slot] [week N] · claim an already-assigned week for yourself right now (defaults to your own group)
-  !ical [N]                    · get your cleaning schedule as iCal (default 26 weeks)
-  !icalreset                   · revoke and regenerate your iCal feed URL
+!status · this week: who cleans what, done or open
+!done [group] · mark your part done (or react ✅ on the plan)
+!undo [group] · take back your done mark
+!groups · all groups and their members
+!plan [N] · the next N weeks (default 6)
+!next [person] · when is your next turn?
+!takeover [group] [slot] [week N] · take a task over yourself
+!swap @user [group] [week N] · ask someone to swap · !swap accept|reject <id>
+!join <group> · !leave <group>
+!stats [person | group | fairness | load]
+!ical [N] · calendar feed of your turns · !ical reset
 
-Admin commands:
-  !skip [group]                         · excuse this week (won't count as missed)
-  !announceweek                         · post (or repost) this week's cleaning plan and pin it
-  !remind [group]                       · manually fire the cleaning reminder now
-  !pdf [N]                              · generate printable HTML schedule (default 8 weeks)
-  !absent <person> [weeks]              · skip person in new rotation picks (default 4 weeks; already-frozen weeks are unaffected)
-  !back <person>                        · cancel an absence early
-  !addgroup <name>                      · create a new cleaning group
-  !removegroup <name>                   · delete a cleaning group
-  !cleaning add @user:server <group>    · append a Matrix user after the active week
-  !cleaning remove @user:server <group> · safely remove a Matrix user from future turns
-  !cleaning people [group]              · show ordered cleaning rotations
-  !adduser / !removeuser                · legacy aliases for the commands above
-  !addperson <name> <group>             · add a non-Matrix person to a group
-  !removeperson <name> <group>          · remove a non-Matrix person from a group
-  !addroom <group> <room>               · add a room to clean in a group
-  !removeroom <group> <room>            · remove a room from a group
-  !ical <person> [N]                    · get iCal for any person (admin)
-  !icalreset <person>                   · reset iCal token for any person (admin)
-  !listgroups                           · list all groups with active/disabled status
-  !disablegroup <name>                  · exclude group from scheduling and stats
-  !enablegroup <name>                   · re-include a previously disabled group
-  !assign <group> [slot] <person> [week N]   · directly assign/change who cleans one week
-  !unassign <group> [slot] [week N]          · clear who cleans one week (leave unassigned)
-  !importplan [--replace] <YYYY-Www> <group>[/slot] <person> [; ...]  · one-time import of upcoming weeks from the old paper plan (--replace overrides already-frozen weeks)
-  !validate                             · check state for consistency issues"#.to_owned()
+Admins: !help admin"#
+        .to_owned()
+}
+
+fn admin_help_text() -> String {
+    r#"🔧 **Admin commands**
+
+**Members**
+!member add <@user:server | name> <group> · name = person without Matrix
+!member remove <@user:server | name> <group>
+!member link <name> <@user:server> · connect a name-only person to Matrix
+!member away <person> [weeks] · skip in new rotation picks (default 4)
+!member back <person>
+
+**This week & plan**
+!plan skip [group] · excuse this week (not counted as missed)
+!plan remind [group] · send the reminder now
+!plan announce · (re)post and pin this week's plan
+!plan assign <group> [slot] <person> [week N]
+!plan unassign <group> [slot] [week N]
+!plan reset <group> · redistribute future weeks from the rotation
+!plan import [--replace] <YYYY-Www> <group>[/slot] <person> [; …]
+!plan pdf [N] [group] · printable plan
+
+**Groups**
+!groups <group> · details: turn order, slots, rooms, weights
+!groups add|remove|enable|disable <group>
+!groups slot add|remove <group> <slot>
+!groups room add|remove <group> [slot] <room>
+!groups weight <group> [room] <factor>
+
+**Other**
+!ical <person> [N] · !ical reset <person>
+!validate · check the saved state for problems
+!admin · bot administration (verification, settings)"#
+        .to_owned()
+}
+
+/// Commands that were renamed or merged: answer with the replacement instead
+/// of silently ignoring the old name.
+fn renamed_command_hint(cmd: &str) -> Option<String> {
+    let new = match cmd {
+        "!cleanplan" => "!plan [N]",
+        "!areas" | "!listgroups" | "!floors" => "!groups",
+        "!cleaning" => "!groups (list) or !member add|remove (changes)",
+        "!joingroup" => "!join <group>",
+        "!leavegroup" => "!leave <group>",
+        "!icalreset" => "!ical reset",
+        "!leaderboard" => "!stats",
+        "!fairness" | "!planfairness" => "!stats fairness [group]",
+        "!workload" | "!groupstats" => "!stats load",
+        "!blame" => "!status (this week) or !stats <person | group>",
+        "!adduser" | "!addperson" => "!member add <@user:server | name> <group>",
+        "!removeuser" | "!removeperson" => "!member remove <@user:server | name> <group>",
+        "!linkmatrix" => "!member link <name> <@user:server>",
+        "!absent" => "!member away <person> [weeks]",
+        "!back" => "!member back <person>",
+        "!assign" => "!plan assign <group> [slot] <person> [week N]",
+        "!unassign" => "!plan unassign <group> [slot] [week N]",
+        "!importplan" => "!plan import …",
+        "!resetplan" => "!plan reset <group>",
+        "!skip" => "!plan skip [group]",
+        "!remind" => "!plan remind [group]",
+        "!announceweek" | "!repostplan" => "!plan announce",
+        "!pdf" => "!plan pdf [N]",
+        "!addgroup" => "!groups add <group>",
+        "!removegroup" => "!groups remove <group>",
+        "!enablegroup" => "!groups enable <group>",
+        "!disablegroup" => "!groups disable <group>",
+        "!addslot" => "!groups slot add <group> <slot>",
+        "!removeslot" => "!groups slot remove <group> <slot>",
+        "!addroom" => "!groups room add <group> [slot] <room>",
+        "!removeroom" => "!groups room remove <group> [slot] <room>",
+        "!setgroupweight" => "!groups weight <group> <factor>",
+        "!setroomweight" => "!groups weight <group> <room> <factor>",
+        _ => return None,
+    };
+    Some(format!(
+        "{cmd} was renamed — use {new}. (!help lists all commands)"
+    ))
 }

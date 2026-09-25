@@ -80,7 +80,7 @@ pub enum DomainEvent {
         #[serde(default)]
         source: AssignmentSource,
         /// Matrix ID of whoever triggered this change (admin for
-        /// `!assign`/`!unassign`, the claimant for `!takeover`, the accepter
+        /// `!plan assign`/`!plan unassign`, the claimant for `!takeover`, the accepter
         /// for a swap). `None` for automatic rotation, where nobody "did" it.
         #[serde(default)]
         actor_id: Option<String>,
@@ -164,6 +164,9 @@ pub enum DomainEvent {
         group_id: GroupId,
         iso_year: i32,
         iso_week: u32,
+        /// Only this slot's mark; `None` = every mark of the group that week.
+        #[serde(default)]
+        slot_id: Option<SlotId>,
     },
 
     // ── Swaps ─────────────────────────────────────────────────────────────────
@@ -338,6 +341,7 @@ pub struct GroupStats {
     pub group_id: GroupId,
     #[allow(dead_code)]
     pub group_name: String,
+    #[allow(dead_code)]
     pub member_count: u32,
     pub due_weeks: u32,
     pub completed: u32,

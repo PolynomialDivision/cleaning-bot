@@ -604,10 +604,14 @@ impl State {
                 group_id,
                 iso_year,
                 iso_week,
+                slot_id,
             } => {
                 let before = self.completions.len();
                 self.completions.retain(|c| {
-                    !(&c.group_id == group_id && c.iso_year == *iso_year && c.iso_week == *iso_week)
+                    !(&c.group_id == group_id
+                        && c.iso_year == *iso_year
+                        && c.iso_week == *iso_week
+                        && (slot_id.is_none() || c.slot_id == *slot_id))
                 });
                 self.completions.len() < before
             }
@@ -1034,7 +1038,7 @@ pub fn all_due_weeks_in_range(
 }
 /// The configured wall-clock timezone (`schedule.timezone`), set once at
 /// startup by `main` before any command runs. Everything that decides "what
-/// week is it" — `!done`, `!skip`, materialize, the scheduler tick, etc. —
+/// week is it" — `!done`, `!plan skip`, materialize, the scheduler tick, etc. —
 /// goes through `current_iso_week()`, so this is the single place that needs
 /// to know about local time rather than threading `Config` through every
 /// call site. Falls back to UTC when unset (e.g. in unit tests), which keeps

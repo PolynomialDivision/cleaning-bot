@@ -1,63 +1,8 @@
-//! Rotation management commands.
+//! Adding and removing Matrix users (!member add/remove @user:server).
 
 use super::*;
 
 // ── Rotation management ───────────────────────────────────────────────────────
-
-pub(crate) async fn cmd_cleaning(
-    ctx: &BotContext,
-    sender: &OwnedUserId,
-    args: &[&str],
-) -> Result<Option<String>> {
-    let subcommand = args.first().map(|value| value.to_ascii_lowercase());
-    match subcommand.as_deref() {
-        Some("add") => add_matrix_participant(ctx, sender, &args[1..]).await,
-        Some("remove") => remove_matrix_participant(ctx, sender, &args[1..]).await,
-        Some("people") => cmd_cleaning_people(ctx, &args[1..]).await,
-        _ => Ok(Some(
-            "Usage: !cleaning add @user:server <group> | remove @user:server <group> | people [group]"
-                .to_owned(),
-        )),
-    }
-}
-
-pub(crate) async fn cmd_cleaning_people(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
-    let state = ctx.state.lock().await;
-    let groups: Vec<&CleaningGroup> = match args.first() {
-        Some(group_name) => match state.group_by_name(group_name) {
-            Some(group) => vec![group],
-            None => return Ok(Some(format!("Group «{group_name}» not found."))),
-        },
-        None => state
-            .cleaning_groups
-            .iter()
-            .filter(|group| group.is_active)
-            .collect(),
-    };
-
-    if groups.is_empty() {
-        return Ok(Some("No active cleaning groups.".to_owned()));
-    }
-
-    let mut sections = Vec::new();
-    for group in groups {
-        let mut lines = vec![format!("🔁 **{}**", group.name)];
-        if group.member_ids.is_empty() {
-            lines.push("Rotation is empty.".to_owned());
-        } else {
-            for (index, person_id) in group.member_ids.iter().enumerate() {
-                let label = state
-                    .person_by_id(person_id)
-                    .map(person_label)
-                    .unwrap_or_else(|| format!("unknown ({person_id})"));
-                lines.push(format!("{}. {label}", index + 1));
-            }
-            lines.push(next_assignment_summary(&state, &group.id));
-        }
-        sections.push(lines.join("\n"));
-    }
-    Ok(Some(sections.join("\n\n")))
-}
 
 pub(crate) async fn add_matrix_participant(
     ctx: &BotContext,
@@ -67,7 +12,7 @@ pub(crate) async fn add_matrix_participant(
     require_admin(ctx, sender)?;
     let (mxid, group_name) = match (args.first(), args.get(1)) {
         (Some(mxid), Some(group)) => (*mxid, *group),
-        _ => return Ok(Some("Usage: !cleaning add @user:server <group>".to_owned())),
+        _ => return Ok(Some("Usage: !member add @user:server <group>".to_owned())),
     };
     if let Err(message) = validate_matrix_user_id(mxid) {
         return Ok(Some(message));
@@ -122,7 +67,7 @@ pub(crate) async fn remove_matrix_participant(
         (Some(mxid), Some(group)) => (*mxid, *group),
         _ => {
             return Ok(Some(
-                "Usage: !cleaning remove @user:server <group>".to_owned(),
+                "Usage: !member remove @user:server <group>".to_owned(),
             ))
         }
     };

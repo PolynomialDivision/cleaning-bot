@@ -1,4 +1,4 @@
-//! Member commands: !done, !status, !stats, !floors, !joinfloor, !leavefloor.
+//! Member commands: !done, !stats <person>, !join, !leave.
 
 use super::*;
 
@@ -17,31 +17,59 @@ pub(crate) async fn cmd_done(
     let sender_person_id = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
         Some(id) => id,
         None => {
-            return Ok(Some(format!(
-                "You are not registered. Ask an admin to run !adduser {sender_mxid} <group>."
-            )))
+            return Ok(Some(
+                "You are not registered. Join a group with !join <group>.".into(),
+            ))
         }
     };
 
-    // Determine target group(s).
-    let target_group_ids: Vec<String> = if let Some(name) = args.first() {
-        match state.group_by_name(name) {
+    let interval = ctx.config.schedule.interval_weeks;
+
+    // Determine target group(s): a named group, or else whatever is open for
+    // the sender this week (their own slots/turns, including takeovers).
+    let target_group_ids: Vec<String> = if !args.is_empty() {
+        let name = args.join(" ");
+        match state.group_by_name(&name) {
             Some(g) => vec![g.id.clone()],
             None => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
-        state
-            .groups_for_person(&sender_person_id)
+        let open: Vec<String> = state
+            .cleaning_groups
             .iter()
+            .filter(|g| g.is_active)
+            .filter(|g| {
+                !current_open_assignments(&state, &g.id, &sender_person_id, interval).is_empty()
+            })
             .map(|g| g.id.clone())
-            .collect()
+            .collect();
+        if open.is_empty() {
+            // Not on the hook anywhere: a member of a single plain group may
+            // still mark it (e.g. after cleaning for someone else).
+            let own: Vec<String> = state
+                .groups_for_person(&sender_person_id)
+                .iter()
+                .filter(|g| {
+                    g.is_active && !g.is_multi_slot() && state.is_due(&g.id, year, week, interval)
+                })
+                .map(|g| g.id.clone())
+                .collect();
+            if own.len() == 1 {
+                own
+            } else if state.groups_for_person(&sender_person_id).is_empty() {
+                return Ok(Some("You are not in any cleaning group.".into()));
+            } else {
+                return Ok(Some(
+                    "Nothing open for you this week. (!status shows who cleans what; \
+                     !done <group> marks a group you cleaned for someone else.)"
+                        .into(),
+                ));
+            }
+        } else {
+            open
+        }
     };
 
-    if target_group_ids.is_empty() {
-        return Ok(Some("You are not assigned to any cleaning group.".into()));
-    }
-
-    let interval = ctx.config.schedule.interval_weeks;
     let mut marked = vec![];
     let mut already_done = vec![];
 
@@ -50,7 +78,7 @@ pub(crate) async fn cmd_done(
         let is_member = group.member_ids.contains(&sender_person_id);
         // Whoever currently holds *any* slot for this week may mark it done,
         // even if they're not a formal member — covers a takeover (!takeover,
-        // !assign) or an accepted swap, both of which update the same frozen
+        // !plan assign) or an accepted swap, both of which update the same frozen
         // assignment `!done` reads here. Based on the *current* assignment,
         // never the original round-robin pick.
         let is_current_assignee = if group.is_multi_slot() {
@@ -146,53 +174,7 @@ pub(crate) async fn cmd_done(
     Ok(Some(lines.join("\n")))
 }
 
-// ── !status ───────────────────────────────────────────────────────────────────
-
-pub(crate) async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
-    let (year, week) = current_iso_week();
-    let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
-
-    let active_groups: Vec<_> = state
-        .cleaning_groups
-        .iter()
-        .filter(|g| g.is_active)
-        .collect();
-    if active_groups.is_empty() {
-        return Ok(Some("No active cleaning groups configured yet.".into()));
-    }
-
-    let mut lines = vec![format!(
-        "📋 **Cleaning status** · week {week} ({})",
-        week_dates(year, week)
-    )];
-    for group in &active_groups {
-        let done = state.is_completed(&group.id, year, week);
-        let icon = if done { "✅" } else { "❌" };
-        let who = if done {
-            state
-                .completions
-                .iter()
-                .find(|c| c.group_id == group.id && c.iso_year == year && c.iso_week == week)
-                .and_then(|c| state.person_by_id(&c.completed_by_id))
-                .map(|p| format!(" · {}", p.display_name))
-                .unwrap_or_default()
-        } else {
-            match state.responsible_person(group, year, week, interval) {
-                Some(p) => format!(" · {}", person_key(p)),
-                None => " · (nobody assigned)".into(),
-            }
-        };
-        let rooms_str = group
-            .rooms_text()
-            .map(|r| format!("\n  {r}"))
-            .unwrap_or_default();
-        lines.push(format!("{icon} **{}**{who}{rooms_str}", group.name));
-    }
-    Ok(Some(lines.join("\n")))
-}
-
-// ── !stats [@user] ────────────────────────────────────────────────────────────
+// ── !stats <person> ────────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
@@ -263,108 +245,12 @@ pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<
         return Ok(Some(lines.join("\n")));
     }
 
-    // Group summary view.
-    let mut lines = vec![format!(
-        "📊 **Cleaning stats** · since week {start_w} ({})",
-        week_dates(start_y, start_w)
-    )];
-    let (cur_y, cur_w) = current_iso_week();
-    let active_groups: Vec<_> = state
-        .cleaning_groups
-        .iter()
-        .filter(|g| g.is_active)
-        .collect();
-    if active_groups.is_empty() {
-        lines.push("  No active cleaning groups configured yet.".into());
-        return Ok(Some(lines.join("\n")));
-    }
-
-    for group in &active_groups {
-        let gs = match analytics::group_stats(&state, &group.id, interval) {
-            Some(s) => s,
-            None => continue,
-        };
-        let pct = (gs.completion_rate * 100.0).round() as u32;
-        let this_week = state.is_completed(&group.id, cur_y, cur_w);
-        lines.push(String::new());
-        lines.push(format!("🏢 {} ({} members)", group.name, gs.member_count));
-        lines.push(format!(
-            "Completed: {}/{} ({pct}%) · Missed: {}",
-            gs.completed, gs.due_weeks, gs.missed
-        ));
-        lines.push(format!(
-            "Streak: {} · This week: {}",
-            gs.current_streak,
-            if this_week { "✅" } else { "❌" }
-        ));
-        if let Some(last) = state.last_completion(&group.id) {
-            let by = state
-                .person_by_id(&last.completed_by_id)
-                .map(|p| p.display_name.as_str())
-                .unwrap_or("?");
-            lines.push(format!(
-                "Last: week {} ({}) by {by}",
-                last.iso_week,
-                week_dates(last.iso_year, last.iso_week)
-            ));
-        }
-        // Per-member counts
-        for pid in &group.member_ids {
-            if let Some(p) = state.person_by_id(pid) {
-                let cnt = state
-                    .completions
-                    .iter()
-                    .filter(|c| c.group_id == group.id && c.completed_by_id == *pid && !c.skipped)
-                    .count();
-                lines.push(format!("  {}: {cnt}", p.display_name));
-            }
-        }
-    }
-    Ok(Some(lines.join("\n")))
+    Ok(Some(
+        "Usage: !stats [person | group | fairness | load]".into(),
+    ))
 }
 
-// ── !floors / !areas ─────────────────────────────────────────────────────────
-
-pub(crate) async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
-    let state = ctx.state.lock().await;
-    let active: Vec<_> = state
-        .cleaning_groups
-        .iter()
-        .filter(|g| g.is_active)
-        .collect();
-    if active.is_empty() {
-        return Ok(Some("No active cleaning groups configured.".into()));
-    }
-    let mut lines = vec!["🏢 Cleaning areas:".to_owned()];
-    for group in &active {
-        let members_text = if group.member_ids.is_empty() {
-            "(no members)".to_owned()
-        } else {
-            group
-                .member_ids
-                .iter()
-                .filter_map(|id| state.person_by_id(id))
-                .map(|p| {
-                    if p.matrix_id.is_some() {
-                        p.display_name.clone()
-                    } else {
-                        format!("{} (no Matrix)", p.display_name)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let rooms_str = if group.room_names.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", group.room_names.join(", "))
-        };
-        lines.push(format!("  • **{}**: {members_text}{rooms_str}", group.name));
-    }
-    Ok(Some(lines.join("\n")))
-}
-
-// ── !joinfloor <group> ────────────────────────────────────────────────────────
+// ── !join <group> ────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_joinfloor(
     ctx: &BotContext,
@@ -373,7 +259,7 @@ pub(crate) async fn cmd_joinfloor(
 ) -> Result<Option<String>> {
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !joingroup <group>".into())),
+        None => return Ok(Some("Usage: !join <group>".into())),
     };
     let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
@@ -402,7 +288,7 @@ pub(crate) async fn cmd_joinfloor(
     Ok(Some(format!("✅ Joined «{group_name}».")))
 }
 
-// ── !leavefloor <group> ───────────────────────────────────────────────────────
+// ── !leave <group> ───────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_leavefloor(
     ctx: &BotContext,
@@ -411,7 +297,7 @@ pub(crate) async fn cmd_leavefloor(
 ) -> Result<Option<String>> {
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !leavegroup <group>".into())),
+        None => return Ok(Some("Usage: !leave <group>".into())),
     };
     let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;

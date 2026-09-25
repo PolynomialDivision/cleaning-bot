@@ -1,8 +1,8 @@
-//! Statistics: !leaderboard, !fairness, !workload, !groupstats, !blame.
+//! Statistics shown by !stats: leaderboard, fairness, load, group records.
 
 use super::*;
 
-// ── !leaderboard ─────────────────────────────────────────────────────────────
+// ── !stats ─────────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
@@ -40,7 +40,7 @@ pub(crate) async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> 
     Ok(Some(lines.join("\n")))
 }
 
-// ── !fairness [group] ─────────────────────────────────────────────────────────
+// ── !stats fairness [group] ─────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
@@ -96,7 +96,7 @@ pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Opti
     Ok(Some(out.join("\n")))
 }
 
-// ── !workload ─────────────────────────────────────────────────────────────────
+// ── !stats load ─────────────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
@@ -174,7 +174,7 @@ pub(crate) async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     Ok(Some(out.join("\n")))
 }
 
-// ── !groupstats ───────────────────────────────────────────────────────────────
+// ── !stats load ───────────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
@@ -244,65 +244,7 @@ pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
     Ok(Some(out.join("\n")))
 }
 
-// ── !blame [group / @user] ────────────────────────────────────────────────────
-
-pub(crate) async fn cmd_blame(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
-    let (cur_y, cur_w) = current_iso_week();
-    let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
-
-    Ok(Some(match args.first() {
-        None => blame_all(&state, cur_y, cur_w, interval),
-        Some(arg) => {
-            if let Some(group) = state.group_by_name(arg) {
-                blame_group(&state, &group.clone(), cur_y, cur_w, interval)
-            } else if let Some(person) = state.find_person(arg).cloned() {
-                blame_person(&state, &person, interval)
-            } else {
-                format!("«{arg}» not found.")
-            }
-        }
-    }))
-}
-
-pub(crate) fn blame_all(
-    state: &crate::state::State,
-    year: i32,
-    week: u32,
-    interval: u32,
-) -> String {
-    let uncleaned: Vec<_> = state
-        .cleaning_groups
-        .iter()
-        .filter(|g| {
-            g.is_active
-                && state.is_due(&g.id, year, week, interval)
-                && !state.is_completed(&g.id, year, week)
-        })
-        .collect();
-    if uncleaned.is_empty() {
-        return "✅ All due groups are cleaned this week!".into();
-    }
-    let mut lines = vec![format!(
-        "😤 **Blame** · week {week} ({})",
-        week_dates(year, week)
-    )];
-    for g in uncleaned {
-        let members_text = state
-            .members_of(g)
-            .iter()
-            .map(|p| p.display_name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let n_due = state.all_due_weeks(interval, (year, week)).len();
-        let n_missed = state.missed_weeks_for(&g.id, interval).len();
-        lines.push(String::new());
-        lines.push(format!("❌ {}", g.name));
-        lines.push(format!("Members: {members_text}"));
-        lines.push(format!("Missed: {n_missed} of {n_due}"));
-    }
-    lines.join("\n")
-}
+// ── Group record (!stats <group>) ─────────────────────────────────────────────
 
 pub(crate) fn blame_group(
     state: &crate::state::State,
@@ -331,7 +273,7 @@ pub(crate) fn blame_group(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let mut lines = vec![format!("😤 **Blame** · {}", group.name), String::new()];
+    let mut lines = vec![format!("📊 **{}**", group.name), String::new()];
     lines.push(format!("Members: {members_text}"));
     lines.push(format!(
         "Completed: {n_done}/{n_due} ({pct}%) · Streak: {streak} · This week: {}",
@@ -363,55 +305,6 @@ pub(crate) fn blame_group(
             } else {
                 String::new()
             }
-        ));
-    }
-    lines.join("\n")
-}
-
-pub(crate) fn blame_person(state: &crate::state::State, person: &Person, interval: u32) -> String {
-    let (cur_y, cur_w) = current_iso_week();
-    let groups = state.groups_for_person(&person.id);
-    let group_name = groups
-        .first()
-        .map(|g| g.name.as_str())
-        .unwrap_or("(unassigned)");
-
-    let due = state.all_due_weeks(interval, (cur_y, cur_w));
-    let closed: Vec<_> = due
-        .iter()
-        .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
-        .collect();
-    let n_due = closed.len();
-    let n_done_by_person = state
-        .completions
-        .iter()
-        .filter(|c| c.completed_by_id == person.id)
-        .count()
-        .min(n_due);
-    let pct = (100 * n_done_by_person).checked_div(n_due).unwrap_or(100);
-    let streak = groups
-        .first()
-        .map(|g| state.streak_for(&g.id, interval))
-        .unwrap_or(0);
-
-    let mut lines = vec![
-        format!("😤 **Blame** · {}", person.display_name),
-        String::new(),
-    ];
-    lines.push(format!("Group: {group_name}"));
-    lines.push(format!(
-        "Personally cleaned: {n_done_by_person}/{n_due} ({pct}%) · Streak: {streak}"
-    ));
-    if let Some(last) = state
-        .completions
-        .iter()
-        .filter(|c| c.completed_by_id == person.id)
-        .max_by_key(|c| c.completed_at)
-    {
-        lines.push(format!(
-            "Last: week {} ({})",
-            last.iso_week,
-            week_dates(last.iso_year, last.iso_week)
         ));
     }
     lines.join("\n")

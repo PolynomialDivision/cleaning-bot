@@ -1,17 +1,17 @@
-//! Assignments: !assign, !unassign, !importplan, !takeover, !undo, !next, !skip, !remind.
+//! Assignments: !plan assign, !plan unassign, !plan import, !takeover, !undo, !next, !plan skip, !plan remind.
 
 use super::*;
 
-// ── Admin: !assign <group> [<slot>] <person> [week <N>] ──────────────────────
+// ── Admin: !plan assign <group> [<slot>] <person> [week <N>] ──────────────────────
 //
 // Directly sets who is responsible for one group/slot in one specific week
 // (default: the current week), overriding the round-robin rotation for that
 // week only.  Stored as a frozen `SlotAssignment` with `AssignmentSource::Manual`
-// — the same record the resolver produces, so !cleanplan, !status, !remind,
+// — the same record the resolver produces, so !plan, !status, !plan remind,
 // the PDF/iCal exports and the pinned weekly plan all pick it up for free.
 //
-// This does not touch group membership (`!cleaning add/remove`, `!addperson`,
-// `!removeperson` own that) — it only edits who is on the hook for one week,
+// This does not touch group membership (`!member add/remove`, `!member add`,
+// `!member remove` own that) — it only edits who is on the hook for one week,
 // which is why the target person does not need to already be a rotation
 // member.
 
@@ -21,7 +21,7 @@ pub(crate) async fn cmd_assign(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let usage = "Usage: !assign <group> [<slot>] <person> [week <1-53>]";
+    let usage = "Usage: !plan assign <group> [<slot>] <person> [week <1-53>]";
     let Some(group_name) = args.first() else {
         return Ok(Some(usage.into()));
     };
@@ -50,8 +50,8 @@ pub(crate) async fn cmd_assign(
         Some(p) => p.clone(),
         None => {
             return Ok(Some(format!(
-            "«{person_query}» is not registered. Use !adduser or !addperson to register them first."
-        )))
+                "«{person_query}» is not registered. Add them with !member add first."
+            )))
         }
     };
 
@@ -111,12 +111,12 @@ pub(crate) async fn cmd_assign(
     )))
 }
 
-// ── Admin: !unassign <group> [<slot>] [week <N>] ─────────────────────────────
+// ── Admin: !plan unassign <group> [<slot>] [week <N>] ─────────────────────────────
 //
 // Clears whoever is responsible for one group/slot in one specific week
 // (default: the current week), leaving it unassigned until reassigned via
-// !assign or the next materialization pass. Uses the same manual-override
-// mechanism as !assign.
+// !plan assign or the next materialization pass. Uses the same manual-override
+// mechanism as !plan assign.
 
 pub(crate) async fn cmd_unassign(
     ctx: &BotContext,
@@ -124,7 +124,7 @@ pub(crate) async fn cmd_unassign(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let usage = "Usage: !unassign <group> [<slot>] [week <1-53>]";
+    let usage = "Usage: !plan unassign <group> [<slot>] [week <1-53>]";
     let Some(group_name) = args.first() else {
         return Ok(Some(usage.into()));
     };
@@ -185,12 +185,12 @@ pub(crate) async fn cmd_unassign(
     )))
 }
 
-// ── Admin: !importplan [--replace] <entry>[ ; <entry>]* ──────────────────────
+// ── Admin: !plan import [--replace] <entry>[ ; <entry>]* ──────────────────────
 //
 // One-time migration helper: freeze the remaining upcoming weeks of the old
 // paper cleaning plan into the bot. Each entry names one already-decided
 // assignment; entries are frozen via the exact same `SlotAssigned` event and
-// upsert semantics as `!assign` (`AssignmentSource::Import` only for a
+// upsert semantics as `!plan assign` (`AssignmentSource::Import` only for a
 // clearer audit trail), so imported weeks behave exactly like a normal
 // manual assignment and — crucially — never touch `rotation_queue`. Normal
 // round-robin scheduling (`resolver::materialize`) simply skips every
@@ -201,7 +201,7 @@ pub(crate) async fn cmd_unassign(
 //
 // Entry syntax:   <ISO year>-W<week> <group>[/<slot>] <person>
 // Multiple entries share one command line, separated by a standalone `;`:
-//   !importplan 2025-W36 Kitchen @alice:example.org ; 2025-W36 Bathroom/Sink @bob:example.org
+//   !plan import 2025-W36 Kitchen @alice:example.org ; 2025-W36 Bathroom/Sink @bob:example.org
 //
 // Every entry is validated — ISO week format, future/current week, known
 // group/slot, known person, no two entries fighting over the same slot, and
@@ -242,7 +242,7 @@ pub(crate) async fn cmd_importplan(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let usage = "Usage: !importplan [--replace] <YYYY-Www> <group>[/<slot>] <person> [; <YYYY-Www> <group>[/<slot>] <person> ...]";
+    let usage = "Usage: !plan import [--replace] <YYYY-Www> <group>[/<slot>] <person> [; <YYYY-Www> <group>[/<slot>] <person> ...]";
     let replace_mode = args.contains(&"--replace");
     let args: Vec<&str> = args.iter().copied().filter(|&a| a != "--replace").collect();
     if args.is_empty() {
@@ -306,7 +306,7 @@ pub(crate) async fn cmd_importplan(
         }
         let Some(person) = state.find_person(person_query) else {
             errors.push(format!(
-                "«{raw}»: «{person_query}» is not registered. Use !adduser or !addperson first."
+                "«{raw}»: «{person_query}» is not registered. Use !member add first."
             ));
             continue;
         };
@@ -346,7 +346,7 @@ pub(crate) async fn cmd_importplan(
     }
 
     // Conflicts against whatever is already persisted (round-robin, a prior
-    // manual !assign, or an earlier import). A slot with no record at all is
+    // manual !plan assign, or an earlier import). A slot with no record at all is
     // always safe to fill; one that already matches this entry exactly is a
     // no-op either way; anything else is only writable under `--replace` —
     // and never at all if the slot/week is already completed or skipped,
@@ -404,7 +404,7 @@ pub(crate) async fn cmd_importplan(
                     .map(person_label)
                     .unwrap_or_else(|| "nobody".into());
                 errors.push(format!(
-                    "«{}»: {}{} for week {} ({}) is already assigned to {holder} — use !importplan --replace to override, or !unassign it first.",
+                    "«{}»: {}{} for week {} ({}) is already assigned to {holder} — use !plan import --replace to override, or !plan unassign it first.",
                     p.raw, p.group_name, p.slot_suffix, p.week, week_dates(p.year, p.week)
                 ));
             }
@@ -482,7 +482,7 @@ pub(crate) async fn cmd_importplan(
 // Self-service handoff for the currently running (or a future) week: the
 // sender claims responsibility away from whoever currently has it, whether
 // that's the regular rotation pick or an earlier manual assignment. Uses the
-// exact same manual-override mechanism as !assign (a frozen `SlotAssigned`
+// exact same manual-override mechanism as !plan assign (a frozen `SlotAssigned`
 // with `source: Manual`), so it never touches `rotation_queue` or any other
 // week — "frozen" only means the automatic rotation won't re-decide this
 // week; an explicit handoff like this always may.
@@ -611,6 +611,11 @@ pub(crate) async fn cmd_takeover(
 }
 
 // ── !undo [group] ─────────────────────────────────────────────────────────────
+//
+// Takes back this week's done mark. In a group with slots, several people
+// clean the same week, so a member only takes back *their own* slot(s) —
+// the ones they hold or marked — never someone else's. An admin naming the
+// group explicitly clears the whole group's week (including skips).
 
 pub(crate) async fn cmd_undo(
     ctx: &BotContext,
@@ -618,76 +623,113 @@ pub(crate) async fn cmd_undo(
     args: &[&str],
 ) -> Result<Option<String>> {
     let (year, week) = current_iso_week();
-    let sender_mxid = sender.as_str();
+    let interval = ctx.config.schedule.interval_weeks;
     let is_admin = ctx.admin_users.contains(sender);
     let mut state = ctx.state.lock().await;
+    let sender_pid = state
+        .person_by_matrix_id(sender.as_str())
+        .map(|p| p.id.clone());
 
-    let sender_pid = state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone());
-
-    let target_group_ids: Vec<String> = if let Some(name) = args.first() {
-        match state.group_by_name(name) {
-            Some(g) => vec![g.id.clone()],
+    let explicit = !args.is_empty();
+    let groups: Vec<CleaningGroup> = if explicit {
+        let name = args.join(" ");
+        match state.group_by_name(&name) {
+            Some(g) => vec![g.clone()],
             None => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
         match &sender_pid {
             Some(pid) => state
-                .groups_for_person(pid)
+                .cleaning_groups
                 .iter()
-                .map(|g| g.id.clone())
+                .filter(|g| {
+                    g.member_ids.contains(pid)
+                        || holds_any_slot(&state, g, pid, year, week, interval)
+                })
+                .cloned()
                 .collect(),
-            None => return Ok(Some("You are not assigned to any group.".into())),
+            None => Vec::new(),
         }
     };
-
-    if target_group_ids.is_empty() {
+    if groups.is_empty() {
         return Ok(Some("You are not assigned to any group.".into()));
     }
 
     let mut undone = vec![];
     let mut not_done = vec![];
     let mut no_perm = vec![];
-
-    for group_id in &target_group_ids {
+    for group in &groups {
         let is_member = sender_pid
             .as_ref()
-            .map(|pid| {
-                state
-                    .cleaning_groups
-                    .iter()
-                    .find(|g| &g.id == group_id)
-                    .map(|g| g.member_ids.contains(pid))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-
-        if !is_member && !is_admin {
-            let name = state
-                .group_by_id(group_id)
-                .map(|g| g.name.clone())
-                .unwrap_or_default();
-            no_perm.push(name);
+            .is_some_and(|pid| group.member_ids.contains(pid));
+        let holds = sender_pid
+            .as_ref()
+            .is_some_and(|pid| holds_any_slot(&state, group, pid, year, week, interval));
+        if !is_member && !holds && !is_admin {
+            no_perm.push(group.name.clone());
             continue;
         }
 
-        let name = state
-            .group_by_id(group_id)
-            .map(|g| g.name.clone())
-            .unwrap_or_default();
-        let had_completion = state.is_completed(group_id, year, week);
-        state.apply_event(DomainEvent::CleaningUndone {
-            group_id: group_id.clone(),
-            iso_year: year,
-            iso_week: week,
-        })?;
-        if had_completion {
-            // Infrastructure cleanup: remove matching reaction_done trackers.
+        // `None` = the whole group's week; otherwise just these slots.
+        let targets: Vec<Option<(String, String)>> =
+            if !group.is_multi_slot() || (is_admin && explicit) {
+                vec![None]
+            } else {
+                group
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, slot)| {
+                        let Some(pid) = &sender_pid else {
+                            return false;
+                        };
+                        let marked_by_sender = state.completions.iter().any(|c| {
+                            c.group_id == group.id
+                                && c.slot_id.as_deref() == Some(slot.id.as_str())
+                                && (c.iso_year, c.iso_week) == (year, week)
+                                && &c.completed_by_id == pid
+                        });
+                        marked_by_sender
+                            || state
+                                .slot_assignee(group, *i, year, week, interval)
+                                .is_some_and(|p| &p.id == pid)
+                    })
+                    .map(|(_, slot)| Some((slot.id.clone(), slot.name.clone())))
+                    .collect()
+            };
+
+        for target in targets {
+            let (slot_id, label) = match target {
+                Some((id, name)) => (Some(id), format!("{} / {name}", group.name)),
+                None => (None, group.name.clone()),
+            };
+            let was_marked = match &slot_id {
+                Some(id) => state.is_slot_completed(&group.id, id, year, week),
+                None => state
+                    .completions
+                    .iter()
+                    .any(|c| c.group_id == group.id && (c.iso_year, c.iso_week) == (year, week)),
+            };
+            if !was_marked {
+                not_done.push(label);
+                continue;
+            }
+            state.apply_event(DomainEvent::CleaningUndone {
+                group_id: group.id.clone(),
+                iso_year: year,
+                iso_week: week,
+                slot_id: slot_id.clone(),
+            })?;
+            // Infrastructure cleanup: forget ✅-reaction trackers for what was
+            // undone (for a single slot: the sender's own trackers only).
             state.reaction_dones.retain(|_, rd| {
-                !(rd.group_id == *group_id && rd.iso_year == year && rd.iso_week == week)
+                !(rd.group_id == group.id
+                    && rd.iso_year == year
+                    && rd.iso_week == week
+                    && (slot_id.is_none()
+                        || sender_pid.as_deref() == Some(rd.completed_by_id.as_str())))
             });
-            undone.push(name);
-        } else {
-            not_done.push(name);
+            undone.push(label);
         }
     }
 
@@ -697,12 +739,40 @@ pub(crate) async fn cmd_undo(
         lines.push(format!("↩️ Undone: {}", undone.join(", ")));
     }
     if !not_done.is_empty() {
-        lines.push(format!("Not done this week: {}", not_done.join(", ")));
+        lines.push(format!(
+            "Not marked done this week: {}",
+            not_done.join(", ")
+        ));
     }
     if !no_perm.is_empty() {
         lines.push(format!("❌ Not your group: {}", no_perm.join(", ")));
     }
+    if lines.is_empty() {
+        lines.push("Nothing of yours to undo this week.".into());
+    }
     Ok(Some(lines.join("\n")))
+}
+
+/// True when `person_id` holds any slot of `group` in the given week.
+pub(crate) fn holds_any_slot(
+    state: &crate::state::State,
+    group: &CleaningGroup,
+    person_id: &PersonId,
+    year: i32,
+    week: u32,
+    interval: u32,
+) -> bool {
+    if group.is_multi_slot() {
+        (0..group.slots.len()).any(|i| {
+            state
+                .slot_assignee(group, i, year, week, interval)
+                .is_some_and(|p| &p.id == person_id)
+        })
+    } else {
+        state
+            .responsible_person(group, year, week, interval)
+            .is_some_and(|p| &p.id == person_id)
+    }
 }
 
 // ── !next [@user] ─────────────────────────────────────────────────────────────
@@ -748,7 +818,7 @@ pub(crate) async fn cmd_next(
     )))
 }
 
-// ── Admin: !skip [group] ─────────────────────────────────────────────────────
+// ── Admin: !plan skip [group] ─────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_skip(
     ctx: &BotContext,
@@ -811,10 +881,10 @@ pub(crate) async fn cmd_skip(
     Ok(Some(lines.join("\n")))
 }
 
-// ── Admin: !remind [group] ────────────────────────────────────────────────────
+// ── Admin: !plan remind [group] ────────────────────────────────────────────────────
 
-/// One group to remind: (group id, group name, rooms text, mentioned MXIDs).
-type ReminderRow = (String, String, Option<String>, Vec<String>);
+/// One group to remind: (group name, rooms text, mentioned MXIDs, who text).
+type ReminderRow = (String, Option<String>, Vec<String>, String);
 
 pub(crate) async fn cmd_remind(
     ctx: &BotContext,
@@ -851,17 +921,44 @@ pub(crate) async fn cmd_remind(
 
         let week_key = format!("{year}-W{week:02}");
         let reply_to_plan = state.weekly_plan_canonical.get(&week_key).cloned();
+        // Everyone with an open task: one person per open slot in a group
+        // with slots, the single responsible person otherwise.
         let reminder_data = groups
             .iter()
             .map(|g| {
-                let resp = state.responsible_person(g, year, week, interval);
-                let mxids = resp
-                    .and_then(|p| p.matrix_id.as_ref().map(|m| vec![m.clone()]))
-                    .unwrap_or_default();
-                let _text = resp
-                    .map(|p| person_key(p).to_owned())
-                    .unwrap_or_else(|| "(nobody assigned)".into());
-                (g.id.clone(), g.name.clone(), g.rooms_text(), mxids)
+                let open: Vec<(Option<&str>, Option<&Person>)> = if g.is_multi_slot() {
+                    g.slots
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, slot)| !state.is_slot_completed(&g.id, &slot.id, year, week))
+                        .map(|(i, slot)| {
+                            (
+                                Some(slot.name.as_str()),
+                                state.slot_assignee(g, i, year, week, interval),
+                            )
+                        })
+                        .collect()
+                } else {
+                    vec![(None, state.responsible_person(g, year, week, interval))]
+                };
+                let mxids = open
+                    .iter()
+                    .filter_map(|(_, p)| p.and_then(|p| p.matrix_id.clone()))
+                    .collect();
+                let who = open
+                    .iter()
+                    .map(|(slot, p)| {
+                        let person = p
+                            .map(|p| person_key(p).to_owned())
+                            .unwrap_or_else(|| "(nobody assigned)".into());
+                        match slot {
+                            Some(slot) => format!("{slot}: {person}"),
+                            None => person,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (g.name.clone(), g.rooms_text(), mxids, who)
             })
             .collect();
         (reminder_data, reply_to_plan)
@@ -874,12 +971,7 @@ pub(crate) async fn cmd_remind(
     }
 
     let mut sent = vec![];
-    for (_group_id, group_name, rooms_text, mxids) in &reminder_data {
-        let users_text = if mxids.is_empty() {
-            "(nobody assigned)".into()
-        } else {
-            mxids.join(", ")
-        };
+    for (group_name, rooms_text, mxids, users_text) in &reminder_data {
         let rooms_line = rooms_text
             .as_ref()
             .map(|r| format!(" · {}", r.replace('\n', " · ")))
@@ -903,7 +995,7 @@ pub(crate) async fn cmd_remind(
             Ok(_) => {
                 sent.push(group_name.clone());
             }
-            Err(e) => tracing::warn!("!remind send failed for {group_name}: {e}"),
+            Err(e) => tracing::warn!("!plan remind send failed for {group_name}: {e}"),
         }
     }
 

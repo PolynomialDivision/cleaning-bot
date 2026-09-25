@@ -1,8 +1,8 @@
-//! Plan exports: !cleanplan, !pdf, !ical, !icalreset.
+//! Plan exports: !plan [N], !plan pdf, !ical, !ical reset.
 
 use super::*;
 
-// ── !cleanplan [N] ────────────────────────────────────────────────────────────
+// ── !plan [N] ────────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_cleanplan(
     ctx: &BotContext,
@@ -118,7 +118,7 @@ pub(crate) async fn cmd_cleanplan(
     )))
 }
 
-// ── Admin: !pdf [N] ───────────────────────────────────────────────────────────
+// ── Admin: !plan pdf [N] ───────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_pdf(
     ctx: &BotContext,
@@ -129,7 +129,7 @@ pub(crate) async fn cmd_pdf(
     thread_root: OwnedEventId,
 ) -> Result<Option<RoomMessageEventContent>> {
     require_admin(ctx, sender)?;
-    // !pdf [weeks] [group name]
+    // !plan pdf [weeks] [group name]
     // First arg: either a number (weeks) or start of group name.
     let (n, group_filter) = {
         let weeks = args.first().and_then(|s| s.parse::<usize>().ok());
@@ -249,8 +249,8 @@ pub(crate) async fn cmd_ical(
                     Some(id) => id,
                     None => {
                         return Ok(Some(format::mentionify(&format!(
-                            "You ({sender_mxid}) are not registered. Ask an admin to use !adduser."
-                        ))))
+                        "You ({sender_mxid}) are not registered. Join a group with !join <group>."
+                    ))))
                     }
                 };
                 (pid, 26)
@@ -304,7 +304,7 @@ pub(crate) async fn cmd_ical(
         if has_token {
             return Ok(Some(format::mentionify(
                 "📅 You already have an active calendar feed.\n\
-                 Use !icalreset to get a new URL (this invalidates the old subscription).",
+                 Use !ical reset to get a new URL (this invalidates the old subscription).",
             )));
         }
 
@@ -377,7 +377,7 @@ pub(crate) async fn cmd_ical(
     }
 }
 
-// ── !icalreset [person] ───────────────────────────────────────────────────────
+// ── !ical reset [person] ───────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_icalreset(
     ctx: &BotContext,

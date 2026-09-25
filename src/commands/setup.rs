@@ -2,25 +2,77 @@
 
 use super::*;
 
-// ── Admin: legacy Matrix participant aliases ──────────────────────────────────
+// ── Admin: !member add|remove <@user:server | name> <group> ──────────────────
+//
+// One command for both kinds of people: a Matrix ID adds/removes that Matrix
+// user, anything else a person without Matrix (by name).
 
-pub(crate) async fn cmd_adduser(
+pub(crate) async fn cmd_member_add(
     ctx: &BotContext,
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<String>> {
-    add_matrix_participant(ctx, sender, args).await
+    match args.first() {
+        Some(who) if who.starts_with('@') => add_matrix_participant(ctx, sender, args).await,
+        _ => cmd_addperson(ctx, sender, args).await,
+    }
 }
 
-pub(crate) async fn cmd_removeuser(
+pub(crate) async fn cmd_member_remove(
     ctx: &BotContext,
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<String>> {
-    remove_matrix_participant(ctx, sender, args).await
+    match args.first() {
+        Some(who) if who.starts_with('@') => remove_matrix_participant(ctx, sender, args).await,
+        _ => cmd_removeperson(ctx, sender, args).await,
+    }
 }
 
-// ── Admin: !addperson <name> <group> ─────────────────────────────────────────
+// ── Admin: !groups slot|room|weight … ─────────────────────────────────────────
+
+pub(crate) async fn cmd_groups_slot(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+        Some("add") => cmd_addslot(ctx, sender, &args[1..]).await,
+        Some("remove") => cmd_removeslot(ctx, sender, &args[1..]).await,
+        _ => Ok(Some("Usage: !groups slot add|remove <group> <slot>".into())),
+    }
+}
+
+pub(crate) async fn cmd_groups_room(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+        Some("add") => cmd_addroom(ctx, sender, &args[1..]).await,
+        Some("remove") => cmd_removeroom(ctx, sender, &args[1..]).await,
+        _ => Ok(Some(
+            "Usage: !groups room add|remove <group> [<slot>] <room>".into(),
+        )),
+    }
+}
+
+/// `!groups weight <group> <factor>` or `!groups weight <group> <room> <factor>`.
+pub(crate) async fn cmd_weight(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    match args.len() {
+        2 => cmd_setgroupweight(ctx, sender, args).await,
+        3 => cmd_setroomweight(ctx, sender, args).await,
+        _ => Ok(Some(
+            "Usage: !groups weight <group> [<room>] <factor>  (e.g. 2.0 = twice the work; quote names with spaces)".into(),
+        )),
+    }
+}
+
+// ── Admin: !member add <name> <group> ─────────────────────────────────────────
 
 pub(crate) async fn cmd_addperson(
     ctx: &BotContext,
@@ -30,7 +82,11 @@ pub(crate) async fn cmd_addperson(
     require_admin(ctx, sender)?;
     let (name, group_name) = match (args.first(), args.get(1)) {
         (Some(n), Some(f)) => (n.to_string(), f.to_string()),
-        _ => return Ok(Some("Usage: !addperson <display_name> <group>".into())),
+        _ => {
+            return Ok(Some(
+                "Usage: !member add <@user:server | name> <group>".into(),
+            ))
+        }
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
@@ -69,7 +125,7 @@ pub(crate) async fn cmd_addperson(
     )))
 }
 
-// ── Admin: !removeperson <name> <group> ──────────────────────────────────────
+// ── Admin: !member remove <name> <group> ──────────────────────────────────────
 
 pub(crate) async fn cmd_removeperson(
     ctx: &BotContext,
@@ -79,7 +135,11 @@ pub(crate) async fn cmd_removeperson(
     require_admin(ctx, sender)?;
     let (query, group_name) = match (args.first(), args.get(1)) {
         (Some(n), Some(f)) => (n.to_string(), f.to_string()),
-        _ => return Ok(Some("Usage: !removeperson <name> <group>".into())),
+        _ => {
+            return Ok(Some(
+                "Usage: !member remove <@user:server | name> <group>".into(),
+            ))
+        }
     };
     let mut state = ctx.state.lock().await;
     let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
@@ -126,7 +186,7 @@ pub(crate) async fn cmd_removeperson(
     )))
 }
 
-// ── Admin: !linkmatrix <name> <@user:server> ─────────────────────────────────
+// ── Admin: !member link <name> <@user:server> ─────────────────────────────────
 //
 // Normally refuses when `name` already has a Matrix ID linked — but if that
 // *existing* matrix_id doesn't even parse as a valid Matrix user ID (data
@@ -145,11 +205,7 @@ pub(crate) async fn cmd_linkmatrix(
     require_admin(ctx, sender)?;
     let (name, mxid) = match (args.first(), args.get(1)) {
         (Some(n), Some(m)) => (n.to_string(), m.to_string()),
-        _ => {
-            return Ok(Some(
-                "Usage: !linkmatrix <display_name> <@user:server>".into(),
-            ))
-        }
+        _ => return Ok(Some("Usage: !member link <name> <@user:server>".into())),
     };
     if !mxid.starts_with('@') || !mxid.contains(':') {
         return Ok(Some(format!(
@@ -158,7 +214,7 @@ pub(crate) async fn cmd_linkmatrix(
     }
 
     // Fetch the Matrix display name immediately so the record looks the same
-    // as one created via !adduser from the start. This is the only step that
+    // as one created via !member add from the start. This is the only step that
     // needs a live `Room` — everything else is pure state mutation, split out
     // into `apply_linkmatrix` so that logic (including the repair path) is
     // directly unit-testable without a `Room`.
@@ -194,7 +250,7 @@ pub(crate) fn person_has_activity(state: &crate::state::State, person_id: &str) 
             .any(|c| c.completed_by_id == person_id)
 }
 
-/// Room-independent core of `!linkmatrix`: resolves `name`, decides whether
+/// Room-independent core of `!member link`: resolves `name`, decides whether
 /// to link fresh, repair an invalid existing `matrix_id`, or refuse, then
 /// performs the stub auto-merge and the actual `PersonMatrixLinked` event —
 /// everything `cmd_linkmatrix` does except the live display-name fetch
@@ -326,7 +382,7 @@ pub(crate) async fn apply_linkmatrix(
     )))
 }
 
-// ── Admin: !addfloor <name> ───────────────────────────────────────────────────
+// ── Admin: !groups add <name> ───────────────────────────────────────────────────
 
 pub(crate) async fn cmd_addfloor(
     ctx: &BotContext,
@@ -336,7 +392,7 @@ pub(crate) async fn cmd_addfloor(
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !addgroup <name>".into())),
+        None => return Ok(Some("Usage: !groups add <name>".into())),
     };
     let mut state = ctx.state.lock().await;
     if state.group_by_name(&name).is_some() {
@@ -351,7 +407,7 @@ pub(crate) async fn cmd_addfloor(
     Ok(Some(format!("✅ Created cleaning group «{name}».")))
 }
 
-// ── Admin: !removefloor <name> ────────────────────────────────────────────────
+// ── Admin: !groups remove <name> ────────────────────────────────────────────────
 
 pub(crate) async fn cmd_removefloor(
     ctx: &BotContext,
@@ -361,7 +417,7 @@ pub(crate) async fn cmd_removefloor(
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !removegroup <name>".into())),
+        None => return Ok(Some("Usage: !groups remove <name>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
@@ -373,9 +429,9 @@ pub(crate) async fn cmd_removefloor(
     Ok(Some(format!("✅ Removed group «{name}».")))
 }
 
-// ── Admin: !addslot <group> <slot_name> ──────────────────────────────────────
+// ── Admin: !groups slot add <group> <slot_name> ──────────────────────────────────────
 
-// ── Admin: !resetplan <group> ─────────────────────────────────────────────────
+// ── Admin: !plan reset <group> ─────────────────────────────────────────────────
 // Clears all future (>= today) slot assignments for a group and rematerializes.
 // Use this after the initial setup when you've added all members and want the
 // rotation to distribute fairly from now on.  Safe to run at any time — past
@@ -389,7 +445,7 @@ pub(crate) async fn cmd_resetplan(
     require_admin(ctx, sender)?;
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !resetplan <group>".into())),
+        None => return Ok(Some("Usage: !plan reset <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
@@ -420,7 +476,7 @@ pub(crate) async fn cmd_addslot(
     require_admin(ctx, sender)?;
     let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
         (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
-        _ => return Ok(Some("Usage: !addslot <group> <slot_name>".into())),
+        _ => return Ok(Some("Usage: !groups slot add <group> <slot>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
@@ -448,7 +504,7 @@ pub(crate) async fn cmd_addslot(
     )))
 }
 
-// ── Admin: !removeslot <group> <slot_name> ───────────────────────────────────
+// ── Admin: !groups slot remove <group> <slot_name> ───────────────────────────────────
 
 pub(crate) async fn cmd_removeslot(
     ctx: &BotContext,
@@ -458,7 +514,7 @@ pub(crate) async fn cmd_removeslot(
     require_admin(ctx, sender)?;
     let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
         (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
-        _ => return Ok(Some("Usage: !removeslot <group> <slot_name>".into())),
+        _ => return Ok(Some("Usage: !groups slot remove <group> <slot>".into())),
     };
     let mut state = ctx.state.lock().await;
     let (group_id, slot_id) = match state.group_by_name(&group_name) {
@@ -479,7 +535,7 @@ pub(crate) async fn cmd_removeslot(
     )))
 }
 
-// ── Admin: !addroom <group> [<slot>] <room> ──────────────────────────────────
+// ── Admin: !groups room add <group> [<slot>] <room> ──────────────────────────────────
 //
 // If the group has slots and the second argument matches a slot name, the room
 // is added to that slot.  Otherwise the room is added to the group directly
@@ -492,7 +548,9 @@ pub(crate) async fn cmd_addroom(
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     if args.len() < 2 {
-        return Ok(Some("Usage: !addroom <group> [<slot>] <room name>".into()));
+        return Ok(Some(
+            "Usage: !groups room add <group> [<slot>] <room>".into(),
+        ));
     }
     let group_name = args[0].to_string();
     let mut state = ctx.state.lock().await;
@@ -512,7 +570,7 @@ pub(crate) async fn cmd_addroom(
             }
         } else if g.is_multi_slot() {
             return Ok(Some(format!(
-                "«{group_name}» has slots. Usage: !addroom \"{group_name}\" <slot_name> <room>.\nSlots: {}",
+                "«{group_name}» has slots. Usage: !groups room add \"{group_name}\" <slot> <room>.\nSlots: {}",
                 g.slots.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
             )));
         } else {
@@ -529,7 +587,7 @@ pub(crate) async fn cmd_addroom(
     Ok(Some(format!("✅ Added room «{room_name}».")))
 }
 
-// ── Admin: !removeroom <group> [<slot>] <room> ───────────────────────────────
+// ── Admin: !groups room remove <group> [<slot>] <room> ───────────────────────────────
 
 pub(crate) async fn cmd_removeroom(
     ctx: &BotContext,
@@ -539,7 +597,7 @@ pub(crate) async fn cmd_removeroom(
     require_admin(ctx, sender)?;
     if args.len() < 2 {
         return Ok(Some(
-            "Usage: !removeroom <group> [<slot>] <room name>".into(),
+            "Usage: !groups room remove <group> [<slot>] <room>".into(),
         ));
     }
     let group_name = args[0].to_string();
@@ -573,7 +631,7 @@ pub(crate) async fn cmd_removeroom(
     )))
 }
 
-// ── Admin: !setroomweight <group> <room> <weight> ────────────────────────────
+// ── Admin: !groups weight <group> <room> <weight> ────────────────────────────
 
 pub(crate) async fn cmd_setroomweight(
     ctx: &BotContext,
@@ -585,7 +643,7 @@ pub(crate) async fn cmd_setroomweight(
         (Some(g), Some(r), Some(w)) => (*g, *r, *w),
         _ => {
             return Ok(Some(
-                "Usage: !setroomweight <group> <room> <weight>  (e.g. 2.0 for twice the load)"
+                "Usage: !groups weight <group> <room> <factor>  (e.g. 2.0 for twice the load)"
                     .into(),
             ))
         }
@@ -655,7 +713,7 @@ pub(crate) async fn cmd_setroomweight(
     )))
 }
 
-// ── Admin: !setgroupweight <group> <weight> ───────────────────────────────────
+// ── Admin: !groups weight <group> <weight> ───────────────────────────────────
 
 pub(crate) async fn cmd_setgroupweight(
     ctx: &BotContext,
@@ -667,7 +725,7 @@ pub(crate) async fn cmd_setgroupweight(
         (Some(g), Some(w)) => (*g, *w),
         _ => {
             return Ok(Some(
-                "Usage: !setgroupweight <group> <weight>  (e.g. 2.0 for twice the load)".into(),
+                "Usage: !groups weight <group> <factor>  (e.g. 2.0 for twice the load)".into(),
             ))
         }
     };
@@ -691,7 +749,7 @@ pub(crate) async fn cmd_setgroupweight(
     )))
 }
 
-// ── Admin: !absent <person> [group] [weeks] ───────────────────────────────────
+// ── Admin: !member away <person> [group] [weeks] ───────────────────────────────────
 //
 // Records an `Absence`, which `resolver::materialize` reads: for any
 // not-yet-frozen due week that falls in the absence range, the person is
@@ -703,7 +761,7 @@ pub(crate) async fn cmd_setgroupweight(
 // `SlotAssignment`s) — same "automatic rotation never rewrites an
 // already-frozen week" rule as everywhere else. If the person is already
 // assigned for the current week when this is called, that assignment
-// stands; get someone else onto it with !takeover, !swap, or !assign.
+// stands; get someone else onto it with !takeover, !swap, or !plan assign.
 
 pub(crate) async fn cmd_absent(
     ctx: &BotContext,
@@ -713,7 +771,11 @@ pub(crate) async fn cmd_absent(
     require_admin(ctx, sender)?;
     let person_query = match args.first() {
         Some(u) => u.to_string(),
-        None => return Ok(Some("Usage: !absent <person> [weeks]  (default 4)".into())),
+        None => {
+            return Ok(Some(
+                "Usage: !member away <person> [weeks]  (default 4)".into(),
+            ))
+        }
     };
 
     let mut state = ctx.state.lock().await;
@@ -759,7 +821,7 @@ pub(crate) async fn cmd_absent(
     )))
 }
 
-// ── Admin: !back <person> ─────────────────────────────────────────────────────
+// ── Admin: !member back <person> ─────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_back(
     ctx: &BotContext,
@@ -769,7 +831,7 @@ pub(crate) async fn cmd_back(
     require_admin(ctx, sender)?;
     let query = match args.first() {
         Some(u) => u.to_string(),
-        None => return Ok(Some("Usage: !back <person>".into())),
+        None => return Ok(Some("Usage: !member back <person>".into())),
     };
     let mut state = ctx.state.lock().await;
     let person_id = match state.find_person(&query).map(|p| p.id.clone()) {

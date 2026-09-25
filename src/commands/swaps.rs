@@ -1,4 +1,4 @@
-//! Swapping duties: !swap, !acceptswap, !rejectswap.
+//! Swapping duties: !swap, !swap accept, !swap reject.
 
 use super::*;
 
@@ -68,14 +68,14 @@ pub(crate) async fn cmd_swap(
         None => return Ok(Some("Group not found.".into())),
     };
 
-    // !swap/!acceptswap only ever write slot_index 0 (see cmd_acceptswap) —
+    // !swap/!swap accept only ever write slot_index 0 (see cmd_acceptswap) —
     // fine for single-slot groups, but silently wrong for multi-slot ones
     // (it would overwrite whichever slot happens to be first, not the one
     // the requester actually holds). Point at the slot-aware commands instead.
     if group.is_multi_slot() {
         return Ok(Some(format!(
             "«{}» has multiple slots — !swap doesn't support slot selection. \
-             Use !takeover {} <slot> or ask an admin for !assign instead.",
+             Use !takeover {} <slot> or ask an admin for !plan assign instead.",
             group.name, group.name
         )));
     }
@@ -110,12 +110,12 @@ pub(crate) async fn cmd_swap(
     state.save(&ctx.state_path).await?;
 
     Ok(Some(format!(
-        "🔄 Swap #{id} · «{}» week {week} ({})\n{target_mxid}: !acceptswap {id} or !rejectswap {id}",
+        "🔄 Swap #{id} · «{}» week {week} ({})\n{target_mxid}: !swap accept {id} or !swap reject {id}",
         group.name, week_dates(year, week)
     )))
 }
 
-// ── !acceptswap <id> ──────────────────────────────────────────────────────────
+// ── !swap accept <id> ──────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_acceptswap(
     ctx: &BotContext,
@@ -124,7 +124,7 @@ pub(crate) async fn cmd_acceptswap(
 ) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None => return Ok(Some("Usage: !acceptswap <id>".into())),
+        None => return Ok(Some("Usage: !swap accept <id>".into())),
     };
     let sender_mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
@@ -201,7 +201,7 @@ pub(crate) async fn cmd_acceptswap(
     })?;
     // The swap-request bookkeeping above records *that* a swap happened; this
     // is what actually makes the target the responsible person — the same
-    // frozen `SlotAssignment` !assign and !takeover use, so !done, !status,
+    // frozen `SlotAssignment` !plan assign and !takeover use, so !done, !status,
     // the pinned plan's ✅ reaction, PDF/iCal etc. all agree immediately,
     // even though the week was already materialized before the swap.
     state.apply_event(DomainEvent::SlotAssigned {
@@ -225,7 +225,7 @@ pub(crate) async fn cmd_acceptswap(
     )))
 }
 
-// ── !rejectswap <id> ─────────────────────────────────────────────────────────
+// ── !swap reject <id> ─────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_rejectswap(
     ctx: &BotContext,
@@ -234,7 +234,7 @@ pub(crate) async fn cmd_rejectswap(
 ) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None => return Ok(Some("Usage: !rejectswap <id>".into())),
+        None => return Ok(Some("Usage: !swap reject <id>".into())),
     };
     let sender_mxid = sender.as_str();
     let mut state = ctx.state.lock().await;

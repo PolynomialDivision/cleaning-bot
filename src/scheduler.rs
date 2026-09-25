@@ -105,7 +105,7 @@ pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32
 /// shows, marks the week's initial reminder as sent, and persists. Callers
 /// are responsible for actually sending/editing the message beforehand —
 /// this only updates bookkeeping. Shared by the first-ever post of a week's
-/// plan, `refresh_pinned_plan`, `!announceweek`, and startup reconciliation.
+/// plan, `refresh_pinned_plan`, `!plan announce`, and startup reconciliation.
 async fn register_weekly_plan_message(
     ctx: &BotContext,
     year: i32,
@@ -238,7 +238,7 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Announce helper (used by scheduler tick and !announceweek command) ────────
+// ── Announce helper (used by scheduler tick and !plan announce command) ────────
 
 /// Send a consolidated weekly plan for `(year, week)`, replacing any previous
 /// plan for that week in state, pinning the new message, and adding a ✅ reaction.
@@ -716,11 +716,11 @@ fn status_icon(done: bool) -> &'static str {
 }
 
 /// " (🌴 away)" when the shown assignee is on record absence for this
-/// (group, week) — purely a display hint. `!absent` never reassigns an
+/// (group, week) — purely a display hint. `!member away` never reassigns an
 /// already-frozen week automatically (see `resolver::materialize`'s
 /// eligibility filter, which only applies to not-yet-frozen picks); this
 /// just makes it visible on the plan that the frozen assignee won't be
-/// doing it themselves, so `!takeover`/`!swap`/`!assign` is expected.
+/// doing it themselves, so `!takeover`/`!swap`/`!plan assign` is expected.
 fn away_suffix(
     state: &crate::state::State,
     person_id: &crate::domain::PersonId,

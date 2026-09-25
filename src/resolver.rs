@@ -637,7 +637,7 @@ mod tests {
         assert!(preview == Some(id1) || preview == Some(id2));
     }
 
-    // ── !absent eligibility ──────────────────────────────────────────────
+    // ── !member away eligibility ──────────────────────────────────────────────
 
     fn absence(
         person_id: &PersonId,

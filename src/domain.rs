@@ -124,7 +124,7 @@ pub struct CleaningGroup {
     #[serde(default)]
     pub slots: Vec<CleaningSlot>,
     /// Group-level workload multiplier stacked on top of room weights (default 1.0).
-    /// Use `!setgroupweight` to adjust for groups heavier/lighter than their
+    /// Use `!groups weight` to adjust for groups heavier/lighter than their
     /// room count suggests (e.g. kitchen = 2.0, storage = 0.5).
     #[serde(default = "default_weight")]
     pub weight: f64,
@@ -228,19 +228,19 @@ pub enum AssignmentSource {
     /// Produced by `resolver::materialize` filling a not-yet-frozen due week.
     #[default]
     RoundRobin,
-    /// Legacy tag from before sources were split out below — `!assign`,
+    /// Legacy tag from before sources were split out below — `!plan assign`,
     /// `!takeover` and accepted swaps all wrote this. Kept only so an
     /// existing `state.json` / event log with old `"manual"` entries still
     /// deserializes; nothing writes it anymore.
     Manual,
-    /// Admin override (`!assign`, `!unassign`).
+    /// Admin override (`!plan assign`, `!plan unassign`).
     Assign,
     /// Self-service handoff (`!takeover`).
     Takeover,
     /// An accepted `!swap`.
     Swap,
     /// One-time migration of a remaining assignment from the old paper plan
-    /// (`!importplan`).
+    /// (`!plan import`).
     Import,
 }
 

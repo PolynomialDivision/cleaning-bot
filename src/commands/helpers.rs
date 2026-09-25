@@ -4,27 +4,22 @@ use super::*;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// True for every command whose successful effect can change who's
-/// responsible for, or the completion status of, the currently displayed
-/// weekly plan — `handle` re-renders the pinned message from `State` after
-/// any of these (see the call site below) instead of leaving it to drift
-/// until the next scheduler tick or restart. Pulled out as its own function
-/// (rather than an inline `matches!` at the call site) so this list — which
-/// `!importplan` was added to alongside the other admin overrides — is
-/// covered by a direct unit test instead of only being verified by reading
-/// the dispatcher.
-pub(crate) fn command_may_change_current_plan(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "!done"
-            | "!skip"
-            | "!undo"
-            | "!assign"
-            | "!unassign"
-            | "!takeover"
-            | "!acceptswap"
-            | "!importplan"
-    )
+/// True for every command (and lower-cased first argument, for commands
+/// with subcommands) whose successful effect can change who's responsible
+/// for, or the completion status of, the currently displayed weekly plan —
+/// `handle` re-renders the pinned message from `State` after any of these
+/// instead of leaving it to drift until the next scheduler tick or restart.
+/// Kept as its own function so the list is covered by a direct unit test.
+pub(crate) fn command_may_change_current_plan(cmd: &str, sub: Option<&str>) -> bool {
+    match cmd {
+        "!done" | "!undo" | "!takeover" | "!acceptswap" => true,
+        "!swap" => sub == Some("accept"),
+        "!plan" => matches!(
+            sub,
+            Some("assign" | "unassign" | "skip" | "reset" | "import")
+        ),
+        _ => false,
+    }
 }
 
 pub(crate) fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
@@ -117,7 +112,7 @@ pub(crate) fn group_horizon_weeks_ahead(
     }
 }
 
-/// Admin escape hatch (`!resetplan`): explicitly wipe and redistribute a
+/// Admin escape hatch (`!plan reset`): explicitly wipe and redistribute a
 /// group's future schedule, unlike a join/leave which never touches
 /// already-frozen weeks. Clears future `slot_assignments`, resets the
 /// rotation queue to plain `member_ids` order, then refills.
@@ -215,7 +210,7 @@ pub(crate) fn apply_group_join(
     // the configured horizon) — enough that the joiner's own turn becomes
     // visible soon, without a single early member's join greedily claiming
     // the *entire* configured horizon before anyone else has a chance to
-    // join. (Deeper horizons still get filled by bot startup or !resetplan.)
+    // join. (Deeper horizons still get filled by bot startup or !plan reset.)
     let interval = ctx.config.schedule.interval_weeks;
     let materialize_weeks = ctx.config.schedule.materialize_weeks as usize;
     let horizon = group_horizon_weeks_ahead(state, group_id, interval);
@@ -294,7 +289,7 @@ pub(crate) fn extract_week_arg<'a>(args: &'a [&'a str]) -> Option<(&'a [&'a str]
 }
 
 /// Resolve `<group> [<slot>]` against `state`, matching the convention used
-/// by `!addroom`/`!removeroom`: the token right after the group name is only
+/// by `!groups room add`/`!groups room remove`: the token right after the group name is only
 /// treated as a slot name when the group is multi-slot and it actually
 /// matches one of its slots.  Returns the group id, the slot index to use in
 /// a `SlotAssignment` (0 for single-slot groups), and the remaining args.
