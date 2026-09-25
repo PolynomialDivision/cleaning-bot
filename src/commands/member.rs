@@ -3,175 +3,106 @@
 use super::*;
 
 // ── !done [group] ─────────────────────────────────────────────────────────────
+//
+// Marks the sender's own open turns of this week — those that have started,
+// or the next one if none has (see `markable_duties`). With a group named,
+// only that group; a member of a group without slots may also mark its
+// running turn for someone else (credit goes to whoever marks it).
 
 pub(crate) async fn cmd_done(
     ctx: &BotContext,
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<String>> {
-    let (year, week) = current_iso_week();
-    let sender_mxid = sender.as_str();
+    let current = current_iso_week();
     let mut state = ctx.state.lock().await;
 
-    // Resolve sender to a Person.
-    let sender_person_id = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
-        Some(id) => id,
-        None => {
-            return Ok(Some(
-                "You are not registered. Join a group with !join <group>.".into(),
-            ))
-        }
+    let Some(sender_person_id) = state
+        .person_by_matrix_id(sender.as_str())
+        .map(|p| p.id.clone())
+    else {
+        return Ok(Some(
+            "You are not registered. Join a group with !join <group>.".into(),
+        ));
     };
 
-    let interval = ctx.config.schedule.interval_weeks;
-
-    // Determine target group(s): a named group, or else whatever is open for
-    // the sender this week (their own slots/turns, including takeovers).
-    let target_group_ids: Vec<String> = if !args.is_empty() {
+    let group = if args.is_empty() {
+        None
+    } else {
         let name = args.join(" ");
         match state.group_by_name(&name) {
-            Some(g) => vec![g.id.clone()],
+            Some(g) => Some(g.clone()),
             None => return Ok(Some(format!("Group «{name}» not found."))),
-        }
-    } else {
-        let open: Vec<String> = state
-            .cleaning_groups
-            .iter()
-            .filter(|g| g.is_active)
-            .filter(|g| {
-                !current_open_assignments(&state, &g.id, &sender_person_id, interval).is_empty()
-            })
-            .map(|g| g.id.clone())
-            .collect();
-        if open.is_empty() {
-            // Not on the hook anywhere: a member of a single plain group may
-            // still mark it (e.g. after cleaning for someone else).
-            let own: Vec<String> = state
-                .groups_for_person(&sender_person_id)
-                .iter()
-                .filter(|g| {
-                    g.is_active && !g.is_multi_slot() && state.is_due(&g.id, year, week, interval)
-                })
-                .map(|g| g.id.clone())
-                .collect();
-            if own.len() == 1 {
-                own
-            } else if state.groups_for_person(&sender_person_id).is_empty() {
-                return Ok(Some("You are not in any cleaning group.".into()));
-            } else {
-                return Ok(Some(
-                    "Nothing open for you this week. (!status shows who cleans what; \
-                     !done <group> marks a group you cleaned for someone else.)"
-                        .into(),
-                ));
-            }
-        } else {
-            open
         }
     };
 
-    let mut marked = vec![];
-    let mut already_done = vec![];
-
-    for group_id in &target_group_ids {
-        let group = state.group_by_id(group_id).unwrap().clone();
-        let is_member = group.member_ids.contains(&sender_person_id);
-        // Whoever currently holds *any* slot for this week may mark it done,
-        // even if they're not a formal member — covers a takeover (!takeover,
-        // !plan assign) or an accepted swap, both of which update the same frozen
-        // assignment `!done` reads here. Based on the *current* assignment,
-        // never the original round-robin pick.
-        let is_current_assignee = if group.is_multi_slot() {
-            group.slots.iter().enumerate().any(|(i, _)| {
-                state
-                    .slot_assignee(&group, i, year, week, interval)
-                    .is_some_and(|p| p.id == sender_person_id)
-            })
-        } else {
-            state
-                .responsible_person(&group, year, week, interval)
-                .is_some_and(|p| p.id == sender_person_id)
+    let mut duties = markable_duties(
+        &state,
+        &sender_person_id,
+        current,
+        group.as_ref().map(|g| &g.id),
+    );
+    if duties.is_empty() {
+        // Covering for someone: a member of a group without slots may mark
+        // its running turn (or, bare, their only such group's).
+        let covering: Vec<CleaningGroup> = match &group {
+            Some(g) => vec![g.clone()],
+            None => state
+                .groups_for_person(&sender_person_id)
+                .into_iter()
+                .filter(|g| g.is_active && !g.is_multi_slot())
+                .filter(|g| state.current_turn(g).is_some())
+                .cloned()
+                .collect(),
         };
-        if !is_member && !is_current_assignee {
-            return Ok(Some(format!("You are not a member of «{}».", group.name)));
-        }
-
-        if group.is_multi_slot() {
-            // Mark the slot(s) assigned to this person.
-            let slot_assignments: Vec<(String, String)> = group
-                .slots
-                .iter()
-                .enumerate()
-                .filter_map(|(slot_idx, slot)| {
-                    let assignee = state.slot_assignee(&group, slot_idx, year, week, interval)?;
-                    if assignee.id == sender_person_id {
-                        Some((slot.id.clone(), slot.name.clone()))
-                    } else {
-                        None
+        match covering.as_slice() {
+            [g] if !g.is_multi_slot() && g.member_ids.contains(&sender_person_id) => {
+                if let Some(turn) = state.current_turn(g) {
+                    if state.is_turn_done(g, turn) {
+                        return Ok(Some(format!(
+                            "Already done: {}",
+                            Duty {
+                                group: g.clone(),
+                                slot_index: 0,
+                                turn
+                            }
+                            .label()
+                        )));
                     }
-                })
-                .collect();
-
-            if slot_assignments.is_empty() {
-                let name = group.name.clone();
+                    duties.push(Duty {
+                        group: g.clone(),
+                        slot_index: 0,
+                        turn,
+                    });
+                }
+            }
+            [g] if !g.member_ids.contains(&sender_person_id) => {
+                return Ok(Some(format!("You are not a member of «{}».", g.name)))
+            }
+            [g] if g.is_multi_slot() => {
                 return Ok(Some(format!(
-                    "You are not assigned to any slot in «{name}» this week."
-                )));
+                "You have no open slot in «{}» this week. (!takeover {} <slot> to take one over.)",
+                g.name, g.name
+            )))
             }
-
-            for (slot_id, slot_name) in slot_assignments {
-                if state.is_slot_completed(group_id, &slot_id, year, week) {
-                    already_done.push(format!("{} / {slot_name}", group.name));
-                    continue;
-                }
-                let responsible_ids = vec![sender_person_id.clone()];
-                state.apply_event(DomainEvent::CleaningCompleted {
-                    group_id: group_id.clone(),
-                    slot_id: Some(slot_id),
-                    person_id: sender_person_id.clone(),
-                    responsible_person_ids: responsible_ids,
-                    iso_year: year,
-                    iso_week: week,
-                })?;
-                // Report group as fully done only when all slots complete.
-                if state.is_completed(group_id, year, week) {
-                    marked.push(format!("{} ✅ fully done", group.name));
-                } else {
-                    marked.push(format!("{} / {slot_name}", group.name));
-                }
+            _ if state.groups_for_person(&sender_person_id).is_empty() => {
+                return Ok(Some("You are not in any cleaning group.".into()))
             }
-        } else {
-            if state.is_completed(group_id, year, week) {
-                already_done.push(group.name.clone());
-                continue;
-            }
-            let responsible_ids: Vec<String> = state
-                .responsible_person(&group, year, week, interval)
-                .map(|p| vec![p.id.clone()])
-                .unwrap_or_default();
-            state.apply_event(DomainEvent::CleaningCompleted {
-                group_id: group_id.clone(),
-                slot_id: None,
-                person_id: sender_person_id.clone(),
-                responsible_person_ids: responsible_ids,
-                iso_year: year,
-                iso_week: week,
-            })?;
-            marked.push(group.name.clone());
+            _ => {}
         }
     }
+    if duties.is_empty() {
+        return Ok(Some(
+            "Nothing open for you this week. (!status shows who cleans what; \
+             !done <group> marks a group you cleaned for someone else.)"
+                .into(),
+        ));
+    }
 
+    mark_duties_done(&mut state, &sender_person_id, &duties)?;
     state.save(&ctx.state_path).await?;
-    drop(state);
-
-    let mut lines = vec![];
-    if !marked.is_empty() {
-        lines.push(format!("✅ Cleaned: {}", marked.join(", ")));
-    }
-    if !already_done.is_empty() {
-        lines.push(format!("Already done: {}", already_done.join(", ")));
-    }
-    Ok(Some(lines.join("\n")))
+    let labels: Vec<String> = duties.iter().map(Duty::label).collect();
+    Ok(Some(format!("✅ Cleaned: {}", labels.join(", "))))
 }
 
 // ── !stats <person> ────────────────────────────────────────────────────────────
@@ -322,12 +253,7 @@ pub(crate) async fn cmd_leavefloor(
     {
         return Ok(Some(format!("You are not in «{group_name}».")));
     }
-    let open = current_open_assignments(
-        &state,
-        &group_id,
-        &person_id,
-        ctx.config.schedule.interval_weeks,
-    );
+    let open = current_open_assignments(&state, &group_id, &person_id);
     if !open.is_empty() {
         return Ok(Some(format!(
             "You cannot leave «{group_name}» while your current assignment is open ({}). \

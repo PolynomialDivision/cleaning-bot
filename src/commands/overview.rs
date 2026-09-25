@@ -1,7 +1,7 @@
 //! Read-only overviews: !status, !groups, !stats.
 
 use super::*;
-use crate::state::{Completion, State};
+use crate::state::State;
 
 /// Name shown in overviews — never a mention, so looking at the status does
 /// not ping anyone.
@@ -26,67 +26,92 @@ fn away_marker(
     }
 }
 
-/// One status line per task: one per slot in a group with slots (several
-/// people clean the same week, each with their own done/open state), one
-/// for the whole group otherwise.
+/// One status line per slot of each turn of the week: "✅ Alice",
+/// "⬜ Thu–Sun · Carol ← now", "⬜ Colbe · bob" — so everyone sharing a week
+/// (slots, shifts) shows with their own done/open state.
 pub(crate) fn week_task_lines(
     state: &State,
     group: &CleaningGroup,
     year: i32,
     week: u32,
-    interval: u32,
 ) -> Vec<(bool, String)> {
-    let line = |label: Option<&str>, assignee: Option<&Person>, completion: Option<&Completion>| {
-        let prefix = label.map(|l| format!("{l} · ")).unwrap_or_default();
-        let who = assignee
-            .map(name)
-            .unwrap_or_else(|| "nobody assigned".into());
-        match completion {
-            Some(c) if c.skipped => (true, format!("⏭️ {prefix}{who} · skipped")),
-            Some(c) => {
-                let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
-                    .then(|| state.person_by_id(&c.completed_by_id))
-                    .flatten()
-                    .map(|p| format!(" (done by {})", p.display_name))
-                    .unwrap_or_default();
-                (true, format!("✅ {prefix}{who}{by}"))
-            }
-            None => {
-                let away = assignee
-                    .map(|p| away_marker(state, p, &group.id, year, week))
-                    .unwrap_or_default();
-                (false, format!("⬜ {prefix}{who}{away}"))
-            }
+    let running = state.current_turn(group);
+    let mut lines = Vec::new();
+    for turn in state.turns_in_week(group, year, week) {
+        let now = if group.rhythm.is_split() && Some(turn) == running {
+            " ← now"
+        } else {
+            ""
+        };
+        let shift = turn
+            .shift_label(&group.rhythm)
+            .map(|l| format!("{l} · "))
+            .unwrap_or_default();
+        for (slot_index, assignee) in state.turn_assignees(group, turn) {
+            let slot = group
+                .slots
+                .get(slot_index)
+                .map(|s| format!("{} · ", s.name))
+                .unwrap_or_default();
+            let who = assignee
+                .map(name)
+                .unwrap_or_else(|| "nobody assigned".into());
+            let line = match state.completion_for(group, slot_index, turn) {
+                Some(c) if c.skipped => (true, format!("⏭️ {shift}{slot}{who} · skipped")),
+                Some(c) => {
+                    let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
+                        .then(|| state.person_by_id(&c.completed_by_id))
+                        .flatten()
+                        .map(|p| format!(" (done by {})", p.display_name))
+                        .unwrap_or_default();
+                    (true, format!("✅ {shift}{slot}{who}{by}"))
+                }
+                None if state.turn_over(group, turn) => {
+                    (false, format!("❌ {shift}{slot}{who} · missed"))
+                }
+                None => {
+                    let away = assignee
+                        .map(|p| away_marker(state, p, &group.id, year, week))
+                        .unwrap_or_default();
+                    (false, format!("⬜ {shift}{slot}{who}{away}{now}"))
+                }
+            };
+            lines.push(line);
         }
-    };
-    let completion_for = |slot_id: Option<&str>| {
-        state.completions.iter().find(|c| {
-            c.group_id == group.id
-                && (c.iso_year, c.iso_week) == (year, week)
-                && (slot_id.is_none() || c.slot_id.as_deref() == slot_id)
-        })
-    };
-
-    if group.is_multi_slot() {
-        group
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                line(
-                    Some(&slot.name),
-                    state.slot_assignee(group, i, year, week, interval),
-                    completion_for(Some(&slot.id)),
-                )
-            })
-            .collect()
-    } else {
-        vec![line(
-            None,
-            state.responsible_person(group, year, week, interval),
-            completion_for(None),
-        )]
     }
+    lines
+}
+
+/// "Next (week 40): Mon–Wed Dave · Thu–Sun Eve" — the group's first due
+/// week after `after`, with everyone on it.
+pub(crate) fn next_week_line(
+    state: &State,
+    group: &CleaningGroup,
+    after: (i32, u32),
+) -> Option<String> {
+    let (y, w) = state.next_due_week(group, add_weeks(after.0, after.1, 1));
+    let parts: Vec<String> = state
+        .turns_in_week(group, y, w)
+        .into_iter()
+        .map(|turn| {
+            let people: Vec<String> = state
+                .turn_assignees(group, turn)
+                .into_iter()
+                .map(|(i, p)| {
+                    let who = p.map(name).unwrap_or_else(|| "nobody".into());
+                    match group.slots.get(i) {
+                        Some(slot) => format!("{} {who}", slot.name),
+                        None => who,
+                    }
+                })
+                .collect();
+            match turn.shift_label(&group.rhythm) {
+                Some(label) => format!("{label} {}", people.join(", ")),
+                None => people.join(", "),
+            }
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("Next (week {w}): {}", parts.join(" · ")))
 }
 
 // ── !status ───────────────────────────────────────────────────────────────────
@@ -94,15 +119,10 @@ pub(crate) fn week_task_lines(
 pub(crate) async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
     let (year, week) = current_iso_week();
     let state = ctx.state.lock().await;
-    Ok(Some(status_text(
-        &state,
-        year,
-        week,
-        ctx.config.schedule.interval_weeks,
-    )))
+    Ok(Some(status_text(&state, year, week)))
 }
 
-pub(crate) fn status_text(state: &State, year: i32, week: u32, interval: u32) -> String {
+pub(crate) fn status_text(state: &State, year: i32, week: u32) -> String {
     let active: Vec<_> = state
         .cleaning_groups
         .iter()
@@ -116,17 +136,23 @@ pub(crate) fn status_text(state: &State, year: i32, week: u32, interval: u32) ->
     let mut not_due = Vec::new();
     let (mut done, mut total) = (0, 0);
     for group in active {
-        if !state.belongs_in_weekly_plan(&group.id, year, week, interval) {
-            not_due.push(group.name.as_str());
+        if !state.belongs_in_weekly_plan(group, year, week) {
+            let (_, next) = state.next_due_week(group, (year, week));
+            not_due.push(format!("{} (week {next})", group.name));
             continue;
         }
         body.push(String::new());
-        body.push(format!("**{}**", group.name));
-        for (is_done, line) in week_task_lines(state, group, year, week, interval) {
+        if group.rhythm.is_split() || group.rhythm.every_weeks() > 1 {
+            body.push(format!("**{}** · {}", group.name, group.rhythm.describe()));
+        } else {
+            body.push(format!("**{}**", group.name));
+        }
+        for (is_done, line) in week_task_lines(state, group, year, week) {
             total += 1;
             done += usize::from(is_done);
             body.push(line);
         }
+        body.extend(next_week_line(state, group, (year, week)));
     }
 
     let mut lines = vec![format!(
@@ -148,11 +174,10 @@ pub(crate) async fn cmd_groups(
     group_name: Option<&str>,
 ) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
     Ok(Some(match group_name {
         None => groups_text(&state),
         Some(name) => match state.group_by_name(name) {
-            Some(group) => group_detail_text(&state, group, interval),
+            Some(group) => group_detail_text(&state, group),
             None => format!("Group «{name}» not found. !groups lists all groups."),
         },
     }))
@@ -230,9 +255,10 @@ pub(crate) fn groups_text(state: &State) -> String {
 }
 
 /// One group in detail: rotation order, this week, next turn, rooms, weights.
-pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup, interval: u32) -> String {
+pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String {
     let (year, week) = current_iso_week();
     let mut header = format!("🏢 **{}**", group.name);
+    header.push_str(&format!(" · cleaned {}", group.rhythm.describe()));
     if !group.is_active {
         header.push_str(" · 🚫 disabled");
     }
@@ -261,10 +287,10 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup, interval: 
         }
     }
 
-    if group.is_active && state.belongs_in_weekly_plan(&group.id, year, week, interval) {
+    if state.belongs_in_weekly_plan(group, year, week) {
         lines.push(format!("This week (week {week}):"));
         lines.extend(
-            week_task_lines(state, group, year, week, interval)
+            week_task_lines(state, group, year, week)
                 .into_iter()
                 .map(|(_, line)| line),
         );
@@ -313,7 +339,7 @@ pub(crate) async fn cmd_stats_overview(ctx: &BotContext, args: &[&str]) -> Resul
         None => {
             let board = cmd_leaderboard(ctx).await?.unwrap_or_default();
             let state = ctx.state.lock().await;
-            let groups = group_completion_lines(&state, ctx.config.schedule.interval_weeks);
+            let groups = group_completion_lines(&state);
             Ok(Some(if groups.is_empty() {
                 board
             } else {
@@ -328,13 +354,12 @@ pub(crate) async fn cmd_stats_overview(ctx: &BotContext, args: &[&str]) -> Resul
         }
         Some(_) => {
             let query = args.join(" ");
-            let interval = ctx.config.schedule.interval_weeks;
             let group = {
                 let state = ctx.state.lock().await;
-                state.group_by_name(&query).cloned().map(|group| {
-                    let (year, week) = current_iso_week();
-                    blame_group(&state, &group, year, week, interval)
-                })
+                state
+                    .group_by_name(&query)
+                    .cloned()
+                    .map(|group| blame_group(&state, &group))
             };
             match group {
                 Some(record) => {
@@ -350,14 +375,14 @@ pub(crate) async fn cmd_stats_overview(ctx: &BotContext, args: &[&str]) -> Resul
 }
 
 /// One line per active group: completion rate, streak, this week.
-fn group_completion_lines(state: &State, interval: u32) -> String {
+fn group_completion_lines(state: &State) -> String {
     let (year, week) = current_iso_week();
     let lines: Vec<String> = state
         .cleaning_groups
         .iter()
         .filter(|g| g.is_active)
         .filter_map(|group| {
-            let gs = analytics::group_stats(state, &group.id, interval)?;
+            let gs = analytics::group_stats(state, &group.id)?;
             let pct = (gs.completion_rate * 100.0).round() as u32;
             let this_week = if state.is_completed(&group.id, year, week) {
                 "✅"

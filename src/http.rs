@@ -23,21 +23,15 @@ use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 
 use crate::{
-    config::Config, domain::verify_calendar_token, ical::render_ics, schedule::build_schedule,
-    state::State,
+    domain::verify_calendar_token, ical::render_ics, schedule::build_schedule, state::State,
 };
 
 struct AppState {
     state: Arc<Mutex<State>>,
-    config: Arc<Config>,
 }
 
-pub async fn run(
-    state: Arc<Mutex<State>>,
-    config: Arc<Config>,
-    bind_addr: &str,
-) -> anyhow::Result<()> {
-    let shared = Arc::new(AppState { state, config });
+pub async fn run(state: Arc<Mutex<State>>, bind_addr: &str) -> anyhow::Result<()> {
+    let shared = Arc::new(AppState { state });
     let app = Router::new()
         .route("/ical/:token_ics", get(serve_ical))
         .with_state(shared);
@@ -74,8 +68,7 @@ async fn serve_ical(
     info!("iCal request: serving feed for person {person_id}");
 
     // Build schedule snapshot (pure computation, no mutations).
-    let interval = app.config.schedule.interval_weeks;
-    let snapshot = build_schedule(&state, interval, 52);
+    let snapshot = build_schedule(&state, 52);
 
     // Capture Last-Modified timestamp before dropping the lock.
     let last_modified = snapshot.state_timestamp;

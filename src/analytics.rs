@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 use crate::{
     domain::{AssignmentSource, GroupId, PersonId, SlotId},
-    state::{all_due_weeks_in_range, current_iso_week, State, SwapStatus},
+    rhythm::Turn,
+    state::{current_iso_week, State, SwapStatus},
 };
 
 // ── Domain event model ────────────────────────────────────────────────────────
@@ -76,6 +77,9 @@ pub enum DomainEvent {
         slot_index: usize,
         iso_year: i32,
         iso_week: u32,
+        /// Shift within the week; 0 for whole-week rhythms.
+        #[serde(default)]
+        shift: u8,
         person_id: Option<PersonId>,
         #[serde(default)]
         source: AssignmentSource,
@@ -129,6 +133,11 @@ pub enum DomainEvent {
         person_id: PersonId,
         matrix_id: String,
     },
+    /// A group's cleaning rhythm changed (how often, how the week is split).
+    RhythmSet {
+        group_id: GroupId,
+        rhythm: crate::rhythm::Rhythm,
+    },
     GroupWeightSet {
         group_id: GroupId,
         weight: f64,
@@ -153,12 +162,17 @@ pub enum DomainEvent {
         responsible_person_ids: Vec<PersonId>,
         iso_year: i32,
         iso_week: u32,
+        #[serde(default)]
+        shift: u8,
     },
     CleaningSkipped {
         group_id: GroupId,
         skipper_id: PersonId,
         iso_year: i32,
         iso_week: u32,
+        /// Only this shift; `None` = every open shift of the week.
+        #[serde(default)]
+        shift: Option<u8>,
         /// Only this slot; `None` = every open slot of the group.
         #[serde(default)]
         slot_id: Option<SlotId>,
@@ -167,6 +181,9 @@ pub enum DomainEvent {
         group_id: GroupId,
         iso_year: i32,
         iso_week: u32,
+        /// Only this shift; `None` = every shift of the week.
+        #[serde(default)]
+        shift: Option<u8>,
         /// Only this slot's mark; `None` = every mark of the group that week.
         #[serde(default)]
         slot_id: Option<SlotId>,
@@ -179,6 +196,8 @@ pub enum DomainEvent {
         target_mxid: String,
         iso_year: i32,
         iso_week: u32,
+        #[serde(default)]
+        shift: u8,
         /// Slot being swapped in a group with slots (0 otherwise).
         #[serde(default)]
         slot_index: usize,
@@ -190,6 +209,8 @@ pub enum DomainEvent {
         replacement_id: PersonId,
         iso_year: i32,
         iso_week: u32,
+        #[serde(default)]
+        shift: u8,
     },
     SwapRejected {
         swap_id: u64,
@@ -255,6 +276,7 @@ pub fn backfill_events(state: &State) -> Vec<LoggedEvent> {
                 iso_year: c.iso_year,
                 iso_week: c.iso_week,
                 slot_id: c.slot_id.clone(),
+                shift: Some(c.shift),
             }
         } else {
             DomainEvent::CleaningCompleted {
@@ -264,6 +286,7 @@ pub fn backfill_events(state: &State) -> Vec<LoggedEvent> {
                 responsible_person_ids: c.responsible_person_ids.clone(),
                 iso_year: c.iso_year,
                 iso_week: c.iso_week,
+                shift: c.shift,
             }
         };
         events.push(LoggedEvent::at(c.completed_at, ev));
@@ -291,6 +314,7 @@ pub fn backfill_events(state: &State) -> Vec<LoggedEvent> {
                 replacement_id,
                 iso_year: s.iso_year,
                 iso_week: s.iso_week,
+                shift: s.shift,
             },
         ));
     }
@@ -411,14 +435,15 @@ pub struct FairnessReport {
 pub struct GroupLoadModel {
     pub group_name: String,
     pub member_count: usize,
-    pub rotation_interval: u32,
+    /// The group's rhythm, e.g. "weekly" or "2× per week (Mon–Wed, Thu–Sun)".
+    pub rhythm: String,
     /// Average room-units a person cleans per visit (weighted by slot.weight).
     pub rooms_per_assignment: f64,
     /// Manual group-level multiplier (1.0 = no adjustment).
     pub group_weight: f64,
     /// rooms_per_assignment × group_weight — the atomic load unit.
     pub load_per_assignment: f64,
-    /// Expected assignments per person per year = 52 / interval / member_count.
+    /// Expected duties per person per year = turns/year × slots / members.
     #[allow(dead_code)]
     pub assignments_per_year: f64,
     /// Expected CLI per person per year = load_per_assignment × assignments_per_year.
@@ -493,19 +518,10 @@ pub fn person_stats(state: &State, person_id: &PersonId) -> Option<PersonStats> 
     if groups.is_empty() {
         return None;
     }
-    let current = current_iso_week();
-
-    // One turn = one (group, slot, week) this person was responsible for,
-    // from the frozen plan, plus older completions that recorded them as
-    // responsible. The running week only counts once it is finished.
-    let completion_for = |group_id: &GroupId, slot_id: Option<&str>, year: i32, week: u32| {
-        state.completions.iter().find(|c| {
-            &c.group_id == group_id
-                && (c.iso_year, c.iso_week) == (year, week)
-                && (slot_id.is_none() || c.slot_id.as_deref() == slot_id)
-        })
-    };
-    let mut turns: Vec<(GroupId, Option<String>, i32, u32)> = Vec::new();
+    // One duty = one slot of one turn this person was responsible for, from
+    // the frozen plan plus older completions that recorded them as
+    // responsible. A turn that is still running only counts once done.
+    let mut duties: Vec<(crate::domain::CleaningGroup, usize, Turn)> = Vec::new();
     for a in &state.slot_assignments {
         if a.person_id.as_deref() != Some(person_id.as_str()) {
             continue;
@@ -513,44 +529,43 @@ pub fn person_stats(state: &State, person_id: &PersonId) -> Option<PersonStats> 
         let Some(group) = state.group_by_id(&a.group_id).filter(|g| g.is_active) else {
             continue;
         };
-        let slot_id = if group.is_multi_slot() {
-            match group.slots.get(a.slot_index) {
-                Some(slot) => Some(slot.id.clone()),
-                None => continue,
-            }
-        } else {
-            None
-        };
-        turns.push((a.group_id.clone(), slot_id, a.iso_year, a.iso_week));
+        if group.is_multi_slot() && a.slot_index >= group.slots.len() {
+            continue;
+        }
+        duties.push((
+            group.clone(),
+            a.slot_index,
+            Turn::new(a.iso_year, a.iso_week, a.shift),
+        ));
     }
     for c in &state.completions {
         if !c.responsible_person_ids.contains(person_id) {
             continue;
         }
-        let known = turns.iter().any(|(g, slot, y, w)| {
-            g == &c.group_id
-                && (*y, *w) == (c.iso_year, c.iso_week)
-                && (slot.is_none() || slot.as_deref() == c.slot_id.as_deref())
-        });
-        let active = state.group_by_id(&c.group_id).is_some_and(|g| g.is_active);
-        if !known && active {
-            turns.push((
-                c.group_id.clone(),
-                c.slot_id.clone(),
-                c.iso_year,
-                c.iso_week,
-            ));
+        let Some(group) = state.group_by_id(&c.group_id).filter(|g| g.is_active) else {
+            continue;
+        };
+        let slot_index = match &c.slot_id {
+            Some(id) => match group.slots.iter().position(|s| &s.id == id) {
+                Some(i) => i,
+                None => continue,
+            },
+            None => 0,
+        };
+        let turn = Turn::new(c.iso_year, c.iso_week, c.shift);
+        if !duties
+            .iter()
+            .any(|(g, i, t)| g.id == group.id && *i == slot_index && *t == turn)
+        {
+            duties.push((group.clone(), slot_index, turn));
         }
     }
-    turns.retain(|(g, slot, y, w)| {
-        (*y, *w) < current
-            || ((*y, *w) == current && completion_for(g, slot.as_deref(), *y, *w).is_some())
-    });
-    turns.sort_by_key(|(_, _, y, w)| (*y, *w));
+    duties.retain(|(g, i, t)| state.turn_over(g, *t) || state.is_turn_slot_done(g, *i, *t));
+    duties.sort_by_key(|(_, _, t)| *t);
 
     let (mut completed, mut skipped, mut missed, mut streak) = (0u32, 0u32, 0u32, 0u32);
-    for (g, slot, y, w) in &turns {
-        match completion_for(g, slot.as_deref(), *y, *w) {
+    for (group, slot_index, turn) in &duties {
+        match state.completion_for(group, *slot_index, *turn) {
             Some(c) if c.skipped => skipped += 1,
             Some(c) if c.completed_by_id == *person_id => {
                 completed += 1;
@@ -563,22 +578,23 @@ pub fn person_stats(state: &State, person_id: &PersonId) -> Option<PersonStats> 
             }
         }
     }
-    let due_weeks = turns.len() as u32 - skipped;
+    let due_weeks = duties.len() as u32 - skipped;
     let completion_rate = if due_weeks > 0 {
         completed as f64 / due_weeks as f64
     } else {
         1.0
     };
-    // Cleanings of weeks/slots that were not their own turn.
+    // Cleanings of turns/slots that were not their own duty.
     let helped = state
         .completions
         .iter()
         .filter(|c| c.completed_by_id == *person_id && !c.skipped)
         .filter(|c| {
-            !turns.iter().any(|(g, slot, y, w)| {
-                g == &c.group_id
-                    && (*y, *w) == (c.iso_year, c.iso_week)
-                    && (slot.is_none() || slot.as_deref() == c.slot_id.as_deref())
+            let turn = Turn::new(c.iso_year, c.iso_week, c.shift);
+            !duties.iter().any(|(g, i, t)| {
+                g.id == c.group_id
+                    && *t == turn
+                    && (!g.is_multi_slot() || g.slots.get(*i).map(|s| &s.id) == c.slot_id.as_ref())
             })
         })
         .count() as u32;
@@ -623,28 +639,19 @@ pub fn person_stats(state: &State, person_id: &PersonId) -> Option<PersonStats> 
     })
 }
 
-/// Compute statistics for a cleaning group.
-pub fn group_stats(state: &State, group_id: &GroupId, interval: u32) -> Option<GroupStats> {
+/// Compute statistics for a cleaning group, counted in turns (one shift of
+/// one due week) that are over.
+pub fn group_stats(state: &State, group_id: &GroupId) -> Option<GroupStats> {
     let group = state.group_by_id(group_id)?;
-    let (cur_y, cur_w) = current_iso_week();
-    let start = state.tracking_start();
-    let all_due = all_due_weeks_in_range(start, (cur_y, cur_w), interval);
-    let closed: Vec<_> = all_due
-        .iter()
-        .copied()
-        .filter(|&(y, w)| (y, w) != (cur_y, cur_w))
-        .collect();
+    let closed = state.closed_turns(group);
     let due_weeks = closed.len() as u32;
-
     let completed = closed
         .iter()
-        .filter(|(y, w)| state.is_cleaned(group_id, *y, *w))
+        .filter(|t| state.is_turn_cleaned(group, **t))
         .count() as u32;
     let skipped = closed
         .iter()
-        .filter(|(y, w)| {
-            state.is_completed(group_id, *y, *w) && !state.is_cleaned(group_id, *y, *w)
-        })
+        .filter(|t| state.is_turn_done(group, **t) && !state.is_turn_cleaned(group, **t))
         .count() as u32;
     let eff = due_weeks.saturating_sub(skipped);
     let missed = eff.saturating_sub(completed);
@@ -668,7 +675,7 @@ pub fn group_stats(state: &State, group_id: &GroupId, interval: u32) -> Option<G
         skipped,
         missed,
         completion_rate,
-        current_streak: state.streak_for(group_id, interval),
+        current_streak: state.streak_for(group),
         swap_count,
     })
 }
@@ -676,25 +683,18 @@ pub fn group_stats(state: &State, group_id: &GroupId, interval: u32) -> Option<G
 /// Compute how equitably cleaning is distributed within a group.
 ///
 /// Returns `None` if the group has no members.
-pub fn fairness_report(state: &State, group_id: &GroupId, interval: u32) -> Option<FairnessReport> {
+pub fn fairness_report(state: &State, group_id: &GroupId) -> Option<FairnessReport> {
     let group = state.group_by_id(group_id)?;
     if group.member_ids.is_empty() {
         return None;
     }
 
-    let (cur_y, cur_w) = current_iso_week();
-    let start = state.tracking_start();
-    let all_due = all_due_weeks_in_range(start, (cur_y, cur_w), interval);
-    let closed: Vec<_> = all_due
-        .iter()
-        .copied()
-        .filter(|&(y, w)| (y, w) != (cur_y, cur_w))
-        .collect();
-    let due_weeks = closed.len() as u32;
-
+    // Every slot of every finished turn is one duty to share out.
+    let due_weeks = state.closed_turns(group).len() as u32;
+    let duties = due_weeks as f64 * group.slots.len().max(1) as f64;
     let n = group.member_ids.len() as f64;
-    let expected_each = due_weeks as f64 / n;
-    let load_model = group_load_model(group, interval);
+    let expected_each = duties / n;
+    let load_model = group_load_model(group);
 
     let mut entries: Vec<FairnessEntry> = group
         .member_ids
@@ -767,7 +767,7 @@ fn effective_rooms(
     }
 }
 
-pub fn group_load_model(group: &crate::domain::CleaningGroup, interval: u32) -> GroupLoadModel {
+pub fn group_load_model(group: &crate::domain::CleaningGroup) -> GroupLoadModel {
     let member_count = group.member_ids.len().max(1);
 
     let rooms_per_assignment = if group.slots.is_empty() {
@@ -789,12 +789,15 @@ pub fn group_load_model(group: &crate::domain::CleaningGroup, interval: u32) -> 
     } else {
         group.slots.len()
     };
-    let assignments_per_year = 52.0 * num_slots as f64 / interval as f64 / member_count as f64;
+    // One duty per slot per turn; turns per year follow the group's rhythm.
+    let turns_per_year =
+        52.0 / group.rhythm.every_weeks() as f64 * group.rhythm.shift_count() as f64;
+    let assignments_per_year = turns_per_year * num_slots as f64 / member_count as f64;
 
     GroupLoadModel {
         group_name: group.name.clone(),
         member_count,
-        rotation_interval: interval,
+        rhythm: group.rhythm.describe(),
         rooms_per_assignment,
         group_weight: group.weight,
         load_per_assignment,
@@ -807,14 +810,10 @@ pub fn group_load_model(group: &crate::domain::CleaningGroup, interval: u32) -> 
 ///
 /// Compares persons who belong to different groups by normalising their
 /// respective loads onto the same scale (room-equivalents since tracking start).
-pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
-    let (cur_y, cur_w) = current_iso_week();
-    let start = state.tracking_start();
-    let all_due = all_due_weeks_in_range(start, (cur_y, cur_w), interval);
-    let due_weeks = all_due
-        .iter()
-        .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
-        .count() as f64;
+pub fn workload_report(state: &State) -> WorkloadReport {
+    // Finished weeks since the tracking start.
+    let due_weeks =
+        crate::state::weeks_between(state.tracking_start(), current_iso_week()).max(0) as f64;
     // Treat the period as at least 1 week so annual rates are always finite,
     // but expose the raw week count so callers can warn when history is short.
     let years_tracked = due_weeks.max(1.0) / 52.0;
@@ -823,7 +822,7 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
         .cleaning_groups
         .iter()
         .filter(|g| g.is_active)
-        .map(|g| (g.id.clone(), group_load_model(g, interval)))
+        .map(|g| (g.id.clone(), group_load_model(g)))
         .collect();
 
     let mut entries: Vec<PersonWorkload> = state
@@ -846,7 +845,9 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
 
             for g in &groups {
                 let Some(m) = models.get(&g.id) else { continue };
-                let expected_assignments = due_weeks / m.member_count as f64;
+                let expected_assignments = state.closed_turns(g).len() as f64
+                    * g.slots.len().max(1) as f64
+                    / m.member_count as f64;
                 let actual_assignments = state
                     .completions
                     .iter()
@@ -1022,6 +1023,7 @@ mod tests {
             responsible_person_ids: vec![],
             iso_year: 2025,
             iso_week: 10,
+            shift: 0,
             completed_at: Utc::now(),
             skipped: false,
         });
@@ -1064,12 +1066,13 @@ mod tests {
                 responsible_person_ids: vec![],
                 iso_year: 2025,
                 iso_week: week,
+                shift: 0,
                 completed_at: Utc::now(),
                 skipped: false,
             });
         }
 
-        let report = fairness_report(&st, &gid, 1).unwrap();
+        let report = fairness_report(&st, &gid).unwrap();
         assert!(
             report.gini < 0.01,
             "expected near-zero Gini, got {}",

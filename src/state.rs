@@ -7,8 +7,9 @@ use std::{
     sync::OnceLock,
 };
 
-use crate::domain::{
-    CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId,
+use crate::{
+    domain::{CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId},
+    rhythm::Turn,
 };
 
 // ── Scheduling records ────────────────────────────────────────────────────────
@@ -24,6 +25,9 @@ pub struct Completion {
     pub responsible_person_ids: Vec<PersonId>,
     pub iso_year: i32,
     pub iso_week: u32,
+    /// Shift within the week (see `rhythm`); 0 for whole-week rhythms.
+    #[serde(default)]
+    pub shift: u8,
     pub completed_at: DateTime<Utc>,
     #[serde(default)]
     pub skipped: bool,
@@ -60,6 +64,9 @@ pub struct SwapRequest {
     /// Slot being swapped in a group with slots (0 otherwise).
     #[serde(default)]
     pub slot_index: usize,
+    /// Shift within the week being swapped.
+    #[serde(default)]
+    pub shift: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -81,9 +88,13 @@ pub enum ReminderKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SentReminder {
+    /// A group id, or `*` for the consolidated weekly plan.
     pub group_id: GroupId,
     pub iso_year: i32,
     pub iso_week: u32,
+    /// Shift the reminder was for (per-turn reminders).
+    #[serde(default)]
+    pub shift: u8,
     pub kind: ReminderKind,
     #[serde(default)]
     pub sent_at: Option<DateTime<Utc>>,
@@ -310,26 +321,39 @@ impl State {
                 slot_index,
                 iso_year,
                 iso_week,
+                shift,
                 person_id,
                 source,
                 actor_id: _,
                 previous_person_id: _,
             } => {
-                // Upsert: replace any existing assignment for this (group, slot, year, week).
+                // Upsert: replace any existing assignment for this (group, slot, turn).
                 self.slot_assignments.retain(|a| {
                     !(a.group_id == *group_id
                         && a.slot_index == *slot_index
-                        && a.iso_year == *iso_year
-                        && a.iso_week == *iso_week)
+                        && (a.iso_year, a.iso_week, a.shift) == (*iso_year, *iso_week, *shift))
                 });
                 self.slot_assignments.push(SlotAssignment {
                     group_id: group_id.clone(),
                     slot_index: *slot_index,
                     iso_year: *iso_year,
                     iso_week: *iso_week,
+                    shift: *shift,
                     person_id: person_id.clone(),
                     source: source.clone(),
                 });
+                true
+            }
+            E::RhythmSet { group_id, rhythm } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if &g.rhythm == rhythm {
+                    return Ok(());
+                }
+                g.rhythm = rhythm.clone();
                 true
             }
             E::RoomAdded {
@@ -538,15 +562,19 @@ impl State {
                 responsible_person_ids,
                 iso_year,
                 iso_week,
+                shift,
             } => {
+                let turn = Turn::new(*iso_year, *iso_week, *shift);
+                // Idempotency: this slot (or, without slots, the group) of
+                // this turn already has a record.
+                let already_done = self.completions.iter().any(|c| {
+                    &c.group_id == group_id
+                        && (c.iso_year, c.iso_week, c.shift) == (turn.year, turn.week, turn.shift)
+                        && (slot_id.is_none() || c.slot_id == *slot_id)
+                });
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
-                // Idempotency: check whether this specific slot (or the whole group) is already done.
-                let already_done = match slot_id {
-                    Some(sid) => self.is_slot_completed(group_id, sid, *iso_year, *iso_week),
-                    None => self.is_completed(group_id, *iso_year, *iso_week),
-                };
                 if already_done {
                     return Ok(());
                 }
@@ -557,6 +585,7 @@ impl State {
                     responsible_person_ids: responsible_person_ids.clone(),
                     iso_year: *iso_year,
                     iso_week: *iso_week,
+                    shift: *shift,
                     completed_at: Utc::now(),
                     skipped: false,
                 });
@@ -568,65 +597,68 @@ impl State {
                 iso_year,
                 iso_week,
                 slot_id,
+                shift,
             } => {
-                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
-                    anyhow::bail!("Group not found: {group_id}");
-                }
-                // For multi-slot groups, skip the given slot, or else all
-                // slots not yet completed.
-                let group = self.group_by_id(group_id).unwrap().clone();
-                if group.is_multi_slot() {
-                    let slots: Vec<_> = group
+                let group = self
+                    .group_by_id(group_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                // Skip every open (slot, shift) of the week — or just the
+                // given slot and/or shift.
+                let shifts: Vec<u8> = match shift {
+                    Some(s) => vec![*s],
+                    None => (0..group.rhythm.shift_count() as u8).collect(),
+                };
+                let slots: Vec<Option<SlotId>> = if group.is_multi_slot() {
+                    group
                         .slots
                         .iter()
-                        .map(|s| s.id.clone())
-                        .filter(|id| slot_id.as_ref().is_none_or(|only| only == id))
-                        .collect();
-                    let mut changed = false;
-                    for sid in slots {
-                        if !self.is_slot_completed(group_id, &sid, *iso_year, *iso_week) {
-                            self.completions.push(Completion {
-                                group_id: group_id.clone(),
-                                slot_id: Some(sid),
-                                completed_by_id: skipper_id.clone(),
-                                responsible_person_ids: vec![],
-                                iso_year: *iso_year,
-                                iso_week: *iso_week,
-                                completed_at: Utc::now(),
-                                skipped: true,
-                            });
-                            changed = true;
-                        }
-                    }
-                    changed
+                        .map(|s| Some(s.id.clone()))
+                        .filter(|id| slot_id.is_none() || id == slot_id)
+                        .collect()
                 } else {
-                    if self.is_completed(group_id, *iso_year, *iso_week) {
-                        return Ok(());
+                    vec![None]
+                };
+                let mut changed = false;
+                for sh in shifts {
+                    for sid in &slots {
+                        let done = self.completions.iter().any(|c| {
+                            &c.group_id == group_id
+                                && (c.iso_year, c.iso_week, c.shift) == (*iso_year, *iso_week, sh)
+                                && (sid.is_none() || c.slot_id == *sid)
+                        });
+                        if done {
+                            continue;
+                        }
+                        self.completions.push(Completion {
+                            group_id: group_id.clone(),
+                            slot_id: sid.clone(),
+                            completed_by_id: skipper_id.clone(),
+                            responsible_person_ids: vec![],
+                            iso_year: *iso_year,
+                            iso_week: *iso_week,
+                            shift: sh,
+                            completed_at: Utc::now(),
+                            skipped: true,
+                        });
+                        changed = true;
                     }
-                    self.completions.push(Completion {
-                        group_id: group_id.clone(),
-                        slot_id: None,
-                        completed_by_id: skipper_id.clone(),
-                        responsible_person_ids: vec![],
-                        iso_year: *iso_year,
-                        iso_week: *iso_week,
-                        completed_at: Utc::now(),
-                        skipped: true,
-                    });
-                    true
                 }
+                changed
             }
             E::CleaningUndone {
                 group_id,
                 iso_year,
                 iso_week,
                 slot_id,
+                shift,
             } => {
                 let before = self.completions.len();
                 self.completions.retain(|c| {
                     !(&c.group_id == group_id
                         && c.iso_year == *iso_year
                         && c.iso_week == *iso_week
+                        && (shift.is_none() || Some(c.shift) == *shift)
                         && (slot_id.is_none() || c.slot_id == *slot_id))
                 });
                 self.completions.len() < before
@@ -640,6 +672,7 @@ impl State {
                 iso_year,
                 iso_week,
                 slot_index,
+                shift,
             } => {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
@@ -656,6 +689,7 @@ impl State {
                     created_at: Utc::now(),
                     status: SwapStatus::Pending,
                     slot_index: *slot_index,
+                    shift: *shift,
                 });
                 true
             }
@@ -786,77 +820,132 @@ impl State {
 }
 
 // ── Scheduling queries ────────────────────────────────────────────────────────
+//
+// Everything is expressed in `Turn`s (one shift of one due week, see
+// `rhythm`) and each group's own rhythm — nothing here assumes that a turn
+// is a calendar week or that all groups share one interval.
 
 impl State {
-    /// True when the group (or ALL slots for a multi-slot group) are completed this week.
+    /// True when `group` is cleaned in this ISO week: every
+    /// `rhythm.every_weeks` weeks, counted from the tracking start.
+    pub fn is_due_week(&self, group: &CleaningGroup, year: i32, week: u32) -> bool {
+        let every = group.rhythm.every_weeks() as i64;
+        let offset = weeks_between(self.tracking_start(), (year, week));
+        offset.rem_euclid(every) == 0
+    }
+
+    /// The group's turns in this week — one per shift, none in a week it
+    /// isn't due.
+    pub fn turns_in_week(&self, group: &CleaningGroup, year: i32, week: u32) -> Vec<Turn> {
+        if !self.is_due_week(group, year, week) {
+            return Vec::new();
+        }
+        (0..group.rhythm.shift_count() as u8)
+            .map(|shift| Turn::new(year, week, shift))
+            .collect()
+    }
+
+    /// All turns of `group` in the weeks `from..=to`, in order.
+    pub fn turns_between(
+        &self,
+        group: &CleaningGroup,
+        from: (i32, u32),
+        to: (i32, u32),
+    ) -> Vec<Turn> {
+        let weeks = weeks_between(from, to);
+        (0..=weeks.max(-1))
+            .flat_map(|i| {
+                let (y, w) = add_weeks(from.0, from.1, i);
+                self.turns_in_week(group, y, w)
+            })
+            .collect()
+    }
+
+    /// First week at or after `from` in which `group` is due.
+    pub fn next_due_week(&self, group: &CleaningGroup, from: (i32, u32)) -> (i32, u32) {
+        let every = group.rhythm.every_weeks() as i64;
+        let offset = weeks_between(self.tracking_start(), from);
+        let ahead = (every - offset.rem_euclid(every)) % every;
+        add_weeks(from.0, from.1, ahead)
+    }
+
+    /// The turn running today, if the group is due this week.
+    pub fn current_turn(&self, group: &CleaningGroup) -> Option<Turn> {
+        let today = today();
+        let (year, week) = (today.iso_week().year(), today.iso_week().week());
+        if !self.is_due_week(group, year, week) {
+            return None;
+        }
+        let weekday = today.weekday().num_days_from_monday() as u8;
+        Some(Turn::new(
+            year,
+            week,
+            group.rhythm.shift_for_weekday(weekday),
+        ))
+    }
+
+    /// The turn has begun (its first day is today or earlier).
+    pub fn turn_started(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        turn.dates(&group.rhythm).0 <= today()
+    }
+
+    /// The turn is over (its last day was before today).
+    pub fn turn_over(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        turn.dates(&group.rhythm).1 < today()
+    }
+
+    /// The done/skipped record of one slot of one turn.
+    pub fn completion_for(
+        &self,
+        group: &CleaningGroup,
+        slot_index: usize,
+        turn: Turn,
+    ) -> Option<&Completion> {
+        let slot_id = group.slots.get(slot_index).map(|s| s.id.as_str());
+        self.completions.iter().find(|c| {
+            c.group_id == group.id
+                && (c.iso_year, c.iso_week, c.shift) == (turn.year, turn.week, turn.shift)
+                && (!group.is_multi_slot() || c.slot_id.as_deref() == slot_id)
+        })
+    }
+
+    pub fn is_turn_slot_done(&self, group: &CleaningGroup, slot_index: usize, turn: Turn) -> bool {
+        self.completion_for(group, slot_index, turn).is_some()
+    }
+
+    /// Slot indices of a group: `0..slots` (just 0 for a group without slots).
+    pub fn slot_indices(group: &CleaningGroup) -> std::ops::Range<usize> {
+        0..group.slots.len().max(1)
+    }
+
+    /// Every slot of the turn is done or skipped.
+    pub fn is_turn_done(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        Self::slot_indices(group).all(|i| self.is_turn_slot_done(group, i, turn))
+    }
+
+    /// Every slot of the turn was actually cleaned (none skipped).
+    pub fn is_turn_cleaned(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        Self::slot_indices(group).all(|i| {
+            self.completion_for(group, i, turn)
+                .is_some_and(|c| !c.skipped)
+        })
+    }
+
+    /// Every turn of the group in this week is done or skipped (false in a
+    /// week the group isn't due).
     pub fn is_completed(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
-        match self.group_by_id(group_id) {
-            Some(g) if g.is_multi_slot() => g
-                .slots
-                .iter()
-                .all(|s| self.is_slot_completed(group_id, &s.id, year, week)),
-            _ => self
-                .completions
-                .iter()
-                .any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week),
-        }
+        let Some(group) = self.group_by_id(group_id) else {
+            return false;
+        };
+        let turns = self.turns_in_week(group, year, week);
+        !turns.is_empty() && turns.iter().all(|t| self.is_turn_done(group, *t))
     }
 
-    pub fn is_cleaned(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
-        match self.group_by_id(group_id) {
-            Some(g) if g.is_multi_slot() => g.slots.iter().all(|s| {
-                self.completions.iter().any(|c| {
-                    &c.group_id == group_id
-                        && c.slot_id.as_deref() == Some(&s.id)
-                        && c.iso_year == year
-                        && c.iso_week == week
-                        && !c.skipped
-                })
-            }),
-            _ => self.completions.iter().any(|c| {
-                &c.group_id == group_id && c.iso_year == year && c.iso_week == week && !c.skipped
-            }),
-        }
+    /// The group appears in that week's plan message.
+    pub fn belongs_in_weekly_plan(&self, group: &CleaningGroup, year: i32, week: u32) -> bool {
+        group.is_active && self.is_due_week(group, year, week)
     }
 
-    /// True when the specific slot is marked completed.
-    pub fn is_slot_completed(
-        &self,
-        group_id: &GroupId,
-        slot_id: &SlotId,
-        year: i32,
-        week: u32,
-    ) -> bool {
-        self.completions.iter().any(|c| {
-            &c.group_id == group_id
-                && c.slot_id.as_deref() == Some(slot_id)
-                && c.iso_year == year
-                && c.iso_week == week
-        })
-    }
-
-    pub fn is_due(&self, group_id: &GroupId, year: i32, week: u32, interval: u32) -> bool {
-        (0..interval).all(|w| {
-            let (y, wk) = weeks_ago(year, week, w);
-            !self.is_completed(group_id, y, wk)
-        })
-    }
-
-    /// True when a group should still appear in an already-posted weekly-plan
-    /// message: either it's still open (`is_due`), or it was fully completed
-    /// *this* week — in which case it must stay visible (as done) rather than
-    /// disappearing once `is_due` flips to false. Only relevant for
-    /// refreshing/reposting an existing week's plan, not for deciding what
-    /// belongs in a brand-new one.
-    pub fn belongs_in_weekly_plan(
-        &self,
-        group_id: &GroupId,
-        year: i32,
-        week: u32,
-        interval: u32,
-    ) -> bool {
-        self.is_due(group_id, year, week, interval) || self.is_completed(group_id, year, week)
-    }
     pub fn is_absent(
         &self,
         person_id: &PersonId,
@@ -872,97 +961,112 @@ impl State {
             (year, week) >= (a.from_year, a.from_week) && (year, week) < end
         })
     }
-    pub fn reminder_sent(&self, group_id: &str, year: i32, week: u32, kind: &ReminderKind) -> bool {
+
+    pub fn reminder_sent(
+        &self,
+        group_id: &str,
+        year: i32,
+        week: u32,
+        shift: u8,
+        kind: &ReminderKind,
+    ) -> bool {
         self.sent_reminders.iter().any(|r| {
-            r.group_id == group_id && r.iso_year == year && r.iso_week == week && &r.kind == kind
+            r.group_id == group_id
+                && (r.iso_year, r.iso_week, r.shift) == (year, week, shift)
+                && &r.kind == kind
         })
     }
-    pub fn mark_reminder_sent(&mut self, group_id: &str, year: i32, week: u32, kind: ReminderKind) {
+
+    pub fn mark_reminder_sent(
+        &mut self,
+        group_id: &str,
+        year: i32,
+        week: u32,
+        shift: u8,
+        kind: ReminderKind,
+    ) {
         self.sent_reminders.push(SentReminder {
             group_id: group_id.to_owned(),
             iso_year: year,
             iso_week: week,
+            shift,
             kind,
             sent_at: Some(Utc::now()),
         });
     }
 
-    /// For single-slot groups (or swap-overridden): one responsible person.
-    /// Checks stored `slot_assignments` first (stable); falls back to a pure
-    /// preview of the rotation queue only when no materialized assignment
-    /// exists yet (e.g. projecting past the materialized horizon).
-    pub fn responsible_person(
-        &self,
-        group: &CleaningGroup,
-        year: i32,
-        week: u32,
-        interval: u32,
-    ) -> Option<&Person> {
-        // 1. Frozen stored assignment (stable across membership changes).
-        if let Some(a) = self.slot_assignments.iter().find(|a| {
-            a.group_id == group.id && a.slot_index == 0 && a.iso_year == year && a.iso_week == week
-        }) {
-            return a.person_id.as_ref().and_then(|pid| self.person_by_id(pid));
-        }
-        if group.member_ids.is_empty() {
-            return None;
-        }
-        // 2. Swap override.
-        if let Some(swap) = self.swap_requests.iter().find(|s| {
-            s.group_id == group.id
-                && s.slot_index == 0
-                && s.iso_year == year
-                && s.iso_week == week
-                && s.status == SwapStatus::Accepted
-        }) {
-            return self.person_by_matrix_id(&swap.target);
-        }
-        // 3. Preview beyond the materialized horizon (agrees with what
-        //    `resolver::materialize` will actually freeze once it gets there).
-        crate::resolver::preview_slot_assignee(self, group, 0, year, week, interval)
-            .and_then(|pid| self.person_by_id(&pid))
-    }
-
-    /// For multi-slot groups: the person assigned to `slot_index` this cycle.
-    /// Checks stored `slot_assignments` first; falls back to the same queue preview.
+    /// Who is responsible for one slot (0 without slots) of one turn: the
+    /// frozen plan first; past its horizon, a preview of the rotation that
+    /// agrees with what `resolver::materialize` will freeze.
     pub fn slot_assignee(
         &self,
         group: &CleaningGroup,
         slot_index: usize,
-        year: i32,
-        week: u32,
-        interval: u32,
+        turn: Turn,
     ) -> Option<&Person> {
         if let Some(a) = self.slot_assignments.iter().find(|a| {
             a.group_id == group.id
                 && a.slot_index == slot_index
-                && a.iso_year == year
-                && a.iso_week == week
+                && (a.iso_year, a.iso_week, a.shift) == (turn.year, turn.week, turn.shift)
         }) {
             return a.person_id.as_ref().and_then(|pid| self.person_by_id(pid));
         }
         if group.member_ids.is_empty() {
             return None;
         }
-        crate::resolver::preview_slot_assignee(self, group, slot_index, year, week, interval)
+        // Swaps accepted before swaps froze their result as an assignment.
+        if let Some(swap) = self.swap_requests.iter().find(|s| {
+            s.group_id == group.id
+                && s.slot_index == slot_index
+                && (s.iso_year, s.iso_week, s.shift) == (turn.year, turn.week, turn.shift)
+                && s.status == SwapStatus::Accepted
+        }) {
+            return self.person_by_matrix_id(&swap.target);
+        }
+        crate::resolver::preview_slot_assignee(self, group, slot_index, turn)
             .and_then(|pid| self.person_by_id(&pid))
     }
 
-    /// All (slot, Option<Person>) pairs for a multi-slot group in a given week.
-    /// Falls back to single-slot behaviour for non-slotted groups.
-    pub fn slot_assignments<'a>(
+    /// Every slot of the turn with its assignee.
+    pub fn turn_assignees<'a>(
         &'a self,
-        group: &'a CleaningGroup,
+        group: &CleaningGroup,
+        turn: Turn,
+    ) -> Vec<(usize, Option<&'a Person>)> {
+        Self::slot_indices(group)
+            .map(|i| (i, self.slot_assignee(group, i, turn)))
+            .collect()
+    }
+
+    /// The slots of the turn held by `person_id`.
+    pub fn held_slots(
+        &self,
+        group: &CleaningGroup,
+        person_id: &PersonId,
+        turn: Turn,
+    ) -> Vec<usize> {
+        Self::slot_indices(group)
+            .filter(|&i| {
+                self.slot_assignee(group, i, turn)
+                    .is_some_and(|p| &p.id == person_id)
+            })
+            .collect()
+    }
+
+    /// Test helper: some shift of the week has a record for this slot.
+    #[cfg(test)]
+    pub fn is_slot_completed(
+        &self,
+        group_id: &GroupId,
+        slot_id: &SlotId,
         year: i32,
         week: u32,
-        interval: u32,
-    ) -> Vec<(&'a CleaningSlot, Option<&'a Person>)> {
-        group
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| (slot, self.slot_assignee(group, i, year, week, interval)))
-            .collect()
+    ) -> bool {
+        self.completions.iter().any(|c| {
+            &c.group_id == group_id
+                && c.slot_id.as_deref() == Some(slot_id.as_str())
+                && (c.iso_year, c.iso_week) == (year, week)
+        })
     }
 
     pub fn last_completion(&self, group_id: &GroupId) -> Option<&Completion> {
@@ -987,28 +1091,36 @@ impl State {
         }
         current_iso_week()
     }
-    pub fn all_due_weeks(&self, interval: u32, end: (i32, u32)) -> Vec<(i32, u32)> {
-        all_due_weeks_in_range(self.tracking_start(), end, interval)
-    }
-    pub fn missed_weeks_for(&self, group_id: &GroupId, interval: u32) -> Vec<(i32, u32)> {
-        let cur = current_iso_week();
-        self.all_due_weeks(interval, cur)
+
+    /// Turns of the group from the tracking start that are over.
+    pub fn closed_turns(&self, group: &CleaningGroup) -> Vec<Turn> {
+        self.turns_between(group, self.tracking_start(), current_iso_week())
             .into_iter()
-            .filter(|&(y, w)| (y, w) != cur && !self.is_completed(group_id, y, w))
+            .filter(|t| self.turn_over(group, *t))
             .collect()
     }
-    pub fn streak_for(&self, group_id: &GroupId, interval: u32) -> u32 {
-        let cur = current_iso_week();
+
+    /// Closed turns in which some slot was neither done nor skipped.
+    pub fn missed_turns(&self, group: &CleaningGroup) -> Vec<Turn> {
+        self.closed_turns(group)
+            .into_iter()
+            .filter(|t| !self.is_turn_done(group, *t))
+            .collect()
+    }
+
+    /// Consecutive most recent turns that were fully cleaned; skipped turns
+    /// neither count nor break it, a running turn only counts once cleaned.
+    pub fn streak_for(&self, group: &CleaningGroup) -> u32 {
         let mut streak = 0u32;
-        for &(y, w) in self.all_due_weeks(interval, cur).iter().rev() {
-            if (y, w) == cur && !self.is_cleaned(group_id, y, w) {
-                continue;
-            }
-            if self.is_completed(group_id, y, w) && !self.is_cleaned(group_id, y, w) {
-                continue;
-            }
-            if self.is_cleaned(group_id, y, w) {
+        for turn in self
+            .turns_between(group, self.tracking_start(), current_iso_week())
+            .into_iter()
+            .rev()
+        {
+            if self.is_turn_cleaned(group, turn) {
                 streak += 1;
+            } else if self.is_turn_done(group, turn) || !self.turn_over(group, turn) {
+                continue;
             } else {
                 break;
             }
@@ -1019,15 +1131,6 @@ impl State {
 
 // ── Week arithmetic ───────────────────────────────────────────────────────────
 
-pub fn weeks_ago(year: i32, week: u32, n: u32) -> (i32, u32) {
-    if n == 0 {
-        return (year, week);
-    }
-    let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
-    let d = mon - chrono::Duration::weeks(n as i64);
-    (d.iso_week().year(), d.iso_week().week())
-}
 pub fn add_weeks(year: i32, week: u32, n: i64) -> (i32, u32) {
     let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
@@ -1040,20 +1143,6 @@ pub fn weeks_between(from: (i32, u32), to: (i32, u32)) -> i64 {
     let b = NaiveDate::from_isoywd_opt(to.0, to.1, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(to.0, 1, 4).unwrap());
     (b - a).num_weeks()
-}
-pub fn all_due_weeks_in_range(
-    start: (i32, u32),
-    end: (i32, u32),
-    interval: u32,
-) -> Vec<(i32, u32)> {
-    let total = weeks_between(start, end);
-    if total < 0 {
-        return vec![];
-    }
-    (0..)
-        .map(|n| add_weeks(start.0, start.1, n * interval as i64))
-        .take_while(|&w| weeks_between(start, w) <= total)
-        .collect()
 }
 /// The configured wall-clock timezone (`schedule.timezone`), set once at
 /// startup by `main` before any command runs. Everything that decides "what
@@ -1084,6 +1173,12 @@ pub fn current_iso_week() -> (i32, u32) {
     iso_week_at(Utc::now(), tz)
 }
 
+/// Today's date in the configured local timezone (see `current_iso_week`).
+pub fn today() -> NaiveDate {
+    let tz = TIMEZONE.get().copied().unwrap_or(chrono_tz::UTC);
+    Utc::now().with_timezone(&tz).date_naive()
+}
+
 /// Pure helper behind `current_iso_week()`, split out so the timezone
 /// behaviour is unit-testable without touching the process-global
 /// `TIMEZONE` (which, being a `OnceLock`, can only ever be set once per test
@@ -1091,26 +1186,6 @@ pub fn current_iso_week() -> (i32, u32) {
 fn iso_week_at(now: DateTime<Utc>, tz: chrono_tz::Tz) -> (i32, u32) {
     let d = now.with_timezone(&tz).date_naive();
     (d.iso_week().year(), d.iso_week().week())
-}
-/// First due week >= today, aligned to `state.tracking_start()` by stepping
-/// `interval` weeks at a time. Shared by `resolver::materialize`,
-/// `resolver::preview_slot_assignee`, and `!next` so all three agree on
-/// where the due-week cycle currently stands.
-pub fn first_due_week(state: &State, interval: u32) -> (i32, u32) {
-    let (cur_y, cur_w) = current_iso_week();
-    let (start_y, start_w) = state.tracking_start();
-    let iv = interval as i64;
-    let elapsed = weeks_between((start_y, start_w), (cur_y, cur_w));
-    if elapsed < 0 {
-        (start_y, start_w)
-    } else {
-        let past = elapsed / iv;
-        if elapsed % iv == 0 {
-            (cur_y, cur_w)
-        } else {
-            add_weeks(start_y, start_w, (past + 1) * iv)
-        }
-    }
 }
 pub fn week_dates(year: i32, week: u32) -> String {
     let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
@@ -1155,39 +1230,37 @@ mod tests {
     }
 
     #[test]
-    fn belongs_in_weekly_plan_keeps_a_fully_completed_group_visible() {
-        // Before this fix, refreshing an already-posted weekly plan filtered
-        // groups by `is_due` alone, which flips to false the instant a group
-        // is fully completed for the week — so the group (and the person who
-        // just finished) would silently vanish from the pinned message on the
-        // very next refresh instead of showing up as done.
-        let group_id: GroupId = "g1".into();
+    fn a_group_stays_in_its_weekly_plan_once_done_and_follows_its_rhythm() {
+        // A completed group must stay visible (as done) in the pinned plan,
+        // and a group cleaned every second week only belongs to its weeks.
         let mut state = State::default();
+        state.created_at = Some("2024-03-04T12:00:00Z".parse().unwrap()); // week 10
+        let mut group = CleaningGroup::new("Hall");
         let (year, week) = (2024, 10);
-
-        assert!(
-            state.belongs_in_weekly_plan(&group_id, year, week, 1),
-            "nothing completed yet, so due"
-        );
+        state.cleaning_groups.push(group.clone());
+        assert!(state.belongs_in_weekly_plan(&group, year, week));
 
         state.completions.push(Completion {
-            group_id: group_id.clone(),
+            group_id: group.id.clone(),
             slot_id: None,
             completed_by_id: "p1".into(),
             responsible_person_ids: vec!["p1".into()],
             iso_year: year,
             iso_week: week,
+            shift: 0,
             completed_at: Utc::now(),
             skipped: false,
         });
+        assert!(state.is_completed(&group.id, year, week));
+        assert!(state.belongs_in_weekly_plan(&group, year, week));
 
-        assert!(
-            !state.is_due(&group_id, year, week, 1),
-            "is_due alone flips false once completed"
-        );
-        assert!(
-            state.belongs_in_weekly_plan(&group_id, year, week, 1),
-            "completed group must stay visible"
+        group.rhythm.every_weeks = Some(2);
+        assert!(state.belongs_in_weekly_plan(&group, year, week));
+        assert!(!state.belongs_in_weekly_plan(&group, year, week + 1));
+        assert!(state.belongs_in_weekly_plan(&group, year, week + 2));
+        assert_eq!(
+            state.next_due_week(&group, (year, week + 1)),
+            (year, week + 2)
         );
     }
 }

@@ -93,12 +93,7 @@ pub(crate) async fn remove_matrix_participant(
         )));
     }
 
-    let open = current_open_assignments(
-        &state,
-        &group_id,
-        &person_id,
-        ctx.config.schedule.interval_weeks,
-    );
+    let open = current_open_assignments(&state, &group_id, &person_id);
     if !open.is_empty() {
         return Ok(Some(format!(
             "Cannot remove {mxid} from «{group_name}»: their current assignment is still open \

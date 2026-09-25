@@ -28,17 +28,20 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
 
     let mut events = String::new();
     for a in &assignments {
-        let dtstart = a.week_monday.format("%Y%m%d").to_string();
-        let dtend = (a.week_sunday + chrono::Duration::days(1))
+        let dtstart = a.start.format("%Y%m%d").to_string();
+        let dtend = (a.end + chrono::Duration::days(1))
             .format("%Y%m%d")
             .to_string();
-        let summary = ical_text(&format!("🧹 {}", a.group_name));
+        let summary = ical_text(&match &a.shift_label {
+            Some(shift) => format!("🧹 {} ({shift})", a.group_name),
+            None => format!("🧹 {}", a.group_name),
+        });
 
-        let mut desc_parts = vec![a.week_label.clone()];
+        let mut desc_parts = vec![a.period_label.clone()];
         if !a.room_names.is_empty() {
             desc_parts.push(format!("Rooms: {}", a.room_names.join(", ")));
         }
-        // Show other assignees from the same group this week (siblings in snapshot).
+        // Show other assignees of the same group and turn (siblings in snapshot).
         let others: Vec<&str> = snapshot
             .assignments
             .iter()
@@ -46,6 +49,7 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
                 b.group_id == a.group_id
                     && b.iso_year == a.iso_year
                     && b.iso_week == a.iso_week
+                    && b.shift == a.shift
                     && b.assignee
                         .as_ref()
                         .map(|p| &p.id != person_id)
@@ -160,8 +164,8 @@ mod tests {
     #[test]
     fn ics_output_is_deterministic() {
         let st = make_state();
-        let sn1 = build_schedule(&st, 1, 4);
-        let sn2 = build_schedule(&st, 1, 4);
+        let sn1 = build_schedule(&st, 4);
+        let sn2 = build_schedule(&st, 4);
         let id = &st.persons[0].id;
         assert_eq!(render_ics(&sn1, id), render_ics(&sn2, id));
     }
@@ -169,8 +173,8 @@ mod tests {
     #[test]
     fn ics_contains_stable_uids() {
         let st = make_state();
-        let sn1 = build_schedule(&st, 1, 2);
-        let sn2 = build_schedule(&st, 1, 2);
+        let sn1 = build_schedule(&st, 2);
+        let sn2 = build_schedule(&st, 2);
         let id = &st.persons[0].id;
         let body1 = render_ics(&sn1, id);
         let body2 = render_ics(&sn2, id);
@@ -184,7 +188,7 @@ mod tests {
     #[test]
     fn ics_empty_for_unknown_person() {
         let st = make_state();
-        let sn = build_schedule(&st, 1, 4);
+        let sn = build_schedule(&st, 4);
         let ics = render_ics(&sn, &"not-a-real-uuid".to_owned());
         assert!(
             !ics.contains("BEGIN:VEVENT"),

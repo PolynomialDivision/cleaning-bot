@@ -4,6 +4,7 @@ use crate::{
     domain::{CleaningSlot, SlotAssignment},
     state::State,
 };
+use chrono::Datelike;
 use matrix_sdk::ruma::OwnedRoomId;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
@@ -41,6 +42,7 @@ fn removing_future_assignments_is_targeted_and_keeps_current_week() {
             slot_index: 0,
             iso_year: year,
             iso_week: week,
+            shift: 0,
             person_id: Some(first_id.clone()),
             source: Default::default(),
         },
@@ -49,6 +51,7 @@ fn removing_future_assignments_is_targeted_and_keeps_current_week() {
             slot_index: 0,
             iso_year: next_year,
             iso_week: next_week,
+            shift: 0,
             person_id: Some(first_id.clone()),
             source: Default::default(),
         },
@@ -57,6 +60,7 @@ fn removing_future_assignments_is_targeted_and_keeps_current_week() {
             slot_index: 1,
             iso_year: next_year,
             iso_week: next_week,
+            shift: 0,
             person_id: Some(second_id.clone()),
             source: Default::default(),
         },
@@ -86,12 +90,13 @@ fn current_open_assignment_blocks_removal_until_completed() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
 
     assert_eq!(
-        current_open_assignments(&state, &group_id, &first_id, 1),
+        current_open_assignments(&state, &group_id, &first_id),
         vec!["2nd Floor"]
     );
 
@@ -103,10 +108,11 @@ fn current_open_assignment_blocks_removal_until_completed() {
             responsible_person_ids: vec![first_id.clone()],
             iso_year: year,
             iso_week: week,
+            shift: 0,
         })
         .unwrap();
 
-    assert!(current_open_assignments(&state, &group_id, &first_id, 1).is_empty());
+    assert!(current_open_assignments(&state, &group_id, &first_id).is_empty());
     assert_eq!(
         state.completions.len(),
         1,
@@ -216,7 +222,7 @@ fn three_person_state() -> (State, GroupId, PersonId, PersonId, PersonId) {
 /// a test-only shortcut around `resolver::materialize` for pre-seeding
 /// "already planned" weeks before exercising a join/leave command.
 fn seed_materialized_weeks(state: &mut State, weeks_ahead: usize) {
-    for ev in resolver::materialize(state, 1, weeks_ahead) {
+    for ev in resolver::materialize(state, weeks_ahead) {
         state.apply_event(ev).unwrap();
     }
 }
@@ -241,7 +247,7 @@ fn preview_assignee_for(
 ) -> Option<PersonId> {
     let group = state.group_by_id(group_id).unwrap();
     state
-        .responsible_person(group, year, week, 1)
+        .slot_assignee(group, 0, Turn::new(year, week, 0))
         .map(|p| p.id.clone())
 }
 
@@ -331,6 +337,7 @@ async fn adding_requires_admin_and_preserves_the_active_assignment() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -857,10 +864,7 @@ async fn import_does_not_disturb_the_rotation_queue_and_round_robin_continues_af
     }
     let (ctx, path, admin) = test_context(raw_state);
 
-    let (fy, fw) = {
-        let state = ctx.state.lock().await;
-        crate::state::first_due_week(&state, 1)
-    };
+    let (fy, fw) = current_iso_week();
 
     // Paper plan says Carla covers the very next due week — out of the
     // natural Anna → Bob → Carla order the queue would produce.
@@ -883,7 +887,7 @@ async fn import_does_not_disturb_the_rotation_queue_and_round_robin_continues_af
     // Fill this and the next two due weeks the normal way.
     let events = {
         let state = ctx.state.lock().await;
-        resolver::materialize(&state, 1, 3)
+        resolver::materialize(&state, 3)
     };
     {
         let mut state = ctx.state.lock().await;
@@ -994,7 +998,7 @@ async fn import_for_the_current_week_changes_the_render_and_is_idempotent_after(
 
     let before = {
         let state = ctx.state.lock().await;
-        scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups).0
+        scheduler::build_weekly_plan(&state, cy, cw, &state.cleaning_groups).0
     };
 
     let args = [
@@ -1011,7 +1015,7 @@ async fn import_for_the_current_week_changes_the_render_and_is_idempotent_after(
 
     let after = {
         let state = ctx.state.lock().await;
-        scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups).0
+        scheduler::build_weekly_plan(&state, cy, cw, &state.cleaning_groups).0
     };
     assert_ne!(
         before, after,
@@ -1035,7 +1039,7 @@ async fn import_for_the_current_week_changes_the_render_and_is_idempotent_after(
     assert!(second.contains("Nothing to do"), "{second}");
     let after_repeat = {
         let state = ctx.state.lock().await;
-        scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups).0
+        scheduler::build_weekly_plan(&state, cy, cw, &state.cleaning_groups).0
     };
     assert_eq!(
         after, after_repeat,
@@ -1074,7 +1078,7 @@ async fn import_makes_a_matrix_participant_mentionable_and_a_non_matrix_particip
     assert!(reply.contains("2 added"), "{reply}");
 
     let state = ctx.state.lock().await;
-    let (raw, _mxids) = scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups);
+    let (raw, _mxids) = scheduler::build_weekly_plan(&state, cy, cw, &state.cleaning_groups);
     drop(state);
     assert!(raw.contains("@bob:example.org"), "{raw}");
 
@@ -1093,8 +1097,7 @@ async fn import_makes_a_matrix_participant_mentionable_and_a_non_matrix_particip
     );
 
     let state = ctx.state.lock().await;
-    let (raw_next, _mxids) =
-        scheduler::build_weekly_plan(&state, ny, nw, 1, &state.cleaning_groups);
+    let (raw_next, _mxids) = scheduler::build_weekly_plan(&state, ny, nw, &state.cleaning_groups);
     drop(state);
     assert!(raw_next.contains("Flo3"), "{raw_next}");
     assert!(
@@ -1142,12 +1145,13 @@ async fn a_completion_recorded_after_import_still_mentions_the_imported_assignee
                 responsible_person_ids: vec![second_id.clone()],
                 iso_year: cy,
                 iso_week: cw,
+                shift: 0,
             })
             .unwrap();
     }
 
     let state = ctx.state.lock().await;
-    let (raw, _mxids) = scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups);
+    let (raw, _mxids) = scheduler::build_weekly_plan(&state, cy, cw, &state.cleaning_groups);
     drop(state);
     assert!(raw.contains("✅"), "{raw}");
     assert!(
@@ -1184,7 +1188,7 @@ async fn import_replace_overrides_an_already_materialized_round_robin_pick() {
     // (a fresh 2-member queue's first-ever draw goes to member_ids[0]).
     let events = {
         let state = ctx.state.lock().await;
-        resolver::materialize(&state, 1, 1)
+        resolver::materialize(&state, 1)
     };
     {
         let mut state = ctx.state.lock().await;
@@ -1269,15 +1273,12 @@ async fn import_replace_does_not_touch_the_rotation_queue() {
         group.rotation_queue = vec![anna_id.clone(), bob_id.clone(), carla_id.clone()];
     }
     let (ctx, path, admin) = test_context(raw_state);
-    let (fy, fw) = {
-        let state = ctx.state.lock().await;
-        crate::state::first_due_week(&state, 1)
-    };
+    let (fy, fw) = current_iso_week();
 
     // Materialize freezes Anna in via round-robin for the first due week.
     let events = {
         let state = ctx.state.lock().await;
-        resolver::materialize(&state, 1, 1)
+        resolver::materialize(&state, 1)
     };
     {
         let mut state = ctx.state.lock().await;
@@ -1327,7 +1328,7 @@ async fn import_replace_is_atomic_one_bad_entry_blocks_the_whole_batch() {
 
     let events = {
         let state = ctx.state.lock().await;
-        resolver::materialize(&state, 1, 1)
+        resolver::materialize(&state, 1)
     };
     {
         let mut state = ctx.state.lock().await;
@@ -1390,6 +1391,7 @@ async fn import_replace_is_idempotent_and_refuses_to_touch_a_completed_week() {
                 slot_index: 0,
                 iso_year: cy,
                 iso_week: cw,
+                shift: 0,
                 person_id: Some(first_id.clone()),
                 source: AssignmentSource::RoundRobin,
                 actor_id: None,
@@ -1404,6 +1406,7 @@ async fn import_replace_is_idempotent_and_refuses_to_touch_a_completed_week() {
                 responsible_person_ids: vec![first_id.clone()],
                 iso_year: cy,
                 iso_week: cw,
+                shift: 0,
             })
             .unwrap();
     }
@@ -1759,6 +1762,7 @@ async fn leavefloor_is_blocked_while_the_current_assignment_is_open() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -1906,6 +1910,7 @@ async fn linkmatrix_repairs_a_corrupted_matrix_id_and_merges_the_unused_stub() {
         slot_index: 0,
         iso_year: fy,
         iso_week: fw,
+        shift: 0,
         person_id: Some(real_id.clone()),
         source: Default::default(),
     });
@@ -1916,6 +1921,7 @@ async fn linkmatrix_repairs_a_corrupted_matrix_id_and_merges_the_unused_stub() {
         responsible_person_ids: vec![real_id.clone()],
         iso_year: year,
         iso_week: week,
+        shift: 0,
         completed_at: chrono::Utc::now(),
         skipped: false,
     });
@@ -2042,6 +2048,7 @@ async fn linkmatrix_refuses_to_guess_between_two_real_people_with_the_same_name(
         responsible_person_ids: vec![dup_b_id.clone()],
         iso_year: year,
         iso_week: week,
+        shift: 0,
         completed_at: chrono::Utc::now(),
         skipped: false,
     });
@@ -2192,10 +2199,9 @@ async fn restart_replay_reproduces_identical_rotation() {
     // Re-running materialize against the reloaded state, up to exactly
     // how far it's already frozen, must be a no-op — no logic may depend
     // on events only ever having existed in RAM.
-    let interval = ctx.config.schedule.interval_weeks;
-    let horizon = group_horizon_weeks_ahead(&after, &group_id, interval);
+    let horizon = group_horizon_weeks_ahead(&after, &group_id);
     assert!(horizon > 0, "the join must have frozen at least one week");
-    let replay_events = resolver::materialize(&after, interval, horizon);
+    let replay_events = resolver::materialize(&after, horizon);
     assert!(
         replay_events.is_empty(),
         "materialize must be a no-op on an already-materialized, reloaded state"
@@ -2215,6 +2221,7 @@ async fn takeover_reassigns_the_running_week_and_the_original_loses_it() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -2295,6 +2302,7 @@ async fn new_assignee_can_mark_done_and_it_persists_across_restart() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id),
         source: Default::default(),
     });
@@ -2345,6 +2353,7 @@ async fn a_member_can_still_mark_done_but_credit_goes_to_the_takeover_assignee()
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -2418,6 +2427,7 @@ async fn takeover_of_an_already_completed_week_is_rejected() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -2451,6 +2461,7 @@ async fn takeover_of_a_skipped_week_is_rejected() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id),
         source: Default::default(),
     });
@@ -2482,6 +2493,7 @@ async fn double_done_after_takeover_stays_consistent() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id),
         source: Default::default(),
     });
@@ -2593,6 +2605,7 @@ async fn accepted_swap_actually_reassigns_an_already_materialized_current_week()
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id),
         source: Default::default(),
     });
@@ -2680,6 +2693,7 @@ async fn bare_takeover_with_one_group_and_one_slot_just_works() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id),
         source: Default::default(),
     });
@@ -2703,6 +2717,7 @@ async fn takeover_slot_only_uses_the_senders_own_group() {
         slot_index: 0,
         iso_year: current_iso_week().0,
         iso_week: current_iso_week().1,
+        shift: 0,
         person_id: Some(aid),
         source: Default::default(),
     });
@@ -2742,6 +2757,7 @@ async fn multiple_open_slots_are_listed_instead_of_guessed() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(aid.clone()),
         source: Default::default(),
     });
@@ -2750,6 +2766,7 @@ async fn multiple_open_slots_are_listed_instead_of_guessed() {
         slot_index: 1,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(aid.clone()),
         source: Default::default(),
     });
@@ -2808,6 +2825,7 @@ async fn nothing_to_take_over_is_reported_clearly() {
             slot_index,
             iso_year: year,
             iso_week: week,
+            shift: 0,
             person_id: Some(bid.clone()),
             source: Default::default(),
         });
@@ -2838,6 +2856,7 @@ async fn explicit_group_and_slot_syntax_still_works_for_multi_slot_groups() {
         slot_index: 1,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(aid),
         source: Default::default(),
     });
@@ -2883,13 +2902,13 @@ async fn swap_in_a_group_with_slots_moves_only_the_requesters_slot() {
         .await
         .unwrap()
         .unwrap();
-    assert!(reply.contains("Floor» / Kitchen"), "{reply}");
+    assert!(reply.contains("Floor / Kitchen"), "{reply}");
     // Naming a slot Alice doesn't hold is refused.
     let wrong = cmd_swap(&ctx, &alice, &["@carla:example.org", "Floor", "Bath"])
         .await
         .unwrap()
         .unwrap();
-    assert!(wrong.contains("Name the slot"), "{wrong}");
+    assert!(wrong.contains("isn't yours"), "{wrong}");
 
     let id = ctx.state.lock().await.swap_requests[0].id.to_string();
     let accepted = cmd_acceptswap(&ctx, &carla, &[id.as_str()])
@@ -2902,13 +2921,13 @@ async fn swap_in_a_group_with_slots_moves_only_the_requesters_slot() {
     let group = state.group_by_id(&group_id).unwrap().clone();
     assert_eq!(
         state
-            .slot_assignee(&group, 0, year, week, 1)
+            .slot_assignee(&group, 0, Turn::new(year, week, 0))
             .map(|p| p.id.clone()),
         Some(carla_id)
     );
     assert_eq!(
         state
-            .slot_assignee(&group, 1, year, week, 1)
+            .slot_assignee(&group, 1, Turn::new(year, week, 0))
             .map(|p| p.id.clone()),
         Some(bid)
     );
@@ -2930,6 +2949,7 @@ async fn accepting_a_swap_after_the_week_was_reassigned_elsewhere_is_refused_not
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -2963,6 +2983,7 @@ async fn accepting_a_swap_after_the_week_was_reassigned_elsewhere_is_refused_not
                 slot_index: 0,
                 iso_year: year,
                 iso_week: week,
+                shift: 0,
                 person_id: Some(carla_id.clone()),
                 source: AssignmentSource::Assign,
                 actor_id: Some("@admin:example.org".to_owned()),
@@ -3029,6 +3050,7 @@ async fn removing_a_slot_repoints_future_assignments_at_the_same_physical_slot()
             slot_index: 0,
             iso_year: year,
             iso_week: week,
+            shift: 0,
             person_id: Some(aid.clone()),
             source: Default::default(),
         },
@@ -3037,6 +3059,7 @@ async fn removing_a_slot_repoints_future_assignments_at_the_same_physical_slot()
             slot_index: 2,
             iso_year: year,
             iso_week: week,
+            shift: 0,
             person_id: Some(bid.clone()),
             source: Default::default(),
         },
@@ -3111,6 +3134,7 @@ async fn absence_declared_after_the_week_is_frozen_does_not_retroactively_change
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -3148,6 +3172,7 @@ async fn assign_takeover_and_swap_produce_distinguishable_audit_metadata() {
         slot_index: 0,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(first_id.clone()),
         source: Default::default(),
     });
@@ -3163,6 +3188,7 @@ async fn assign_takeover_and_swap_produce_distinguishable_audit_metadata() {
         slot_index: 0,
         iso_year: next_year,
         iso_week: next_week,
+        shift: 0,
         person_id: Some(second_id.clone()),
         source: Default::default(),
     });
@@ -3296,6 +3322,7 @@ fn two_slot_week() -> (State, GroupId, PersonId, PersonId) {
                 slot_index,
                 iso_year: year,
                 iso_week: week,
+                shift: 0,
                 person_id: Some(person_id.clone()),
                 source: AssignmentSource::Assign,
                 actor_id: None,
@@ -3344,6 +3371,7 @@ async fn status_shows_who_actually_cleaned_and_skips() {
                 responsible_person_ids: vec![],
                 iso_year: year,
                 iso_week: week,
+                shift: 0,
             })
             .unwrap();
     }
@@ -3406,6 +3434,7 @@ async fn bare_done_only_marks_what_is_open_for_the_sender() {
             slot_index: 0,
             iso_year: year,
             iso_week: week,
+            shift: 0,
             person_id: Some(alice_id),
             source: AssignmentSource::Assign,
             actor_id: None,
@@ -3499,6 +3528,7 @@ fn freeze(
         slot_index,
         iso_year: year,
         iso_week: week,
+        shift: 0,
         person_id: Some(person.clone()),
         source: Default::default(),
     });
@@ -3643,6 +3673,7 @@ fn personal_stats_count_own_turns_not_every_week_of_the_group() {
             responsible_person_ids: vec![],
             iso_year: cy,
             iso_week: cw,
+            shift: 0,
             completed_at: Utc::now(),
             skipped: false,
         });
@@ -3694,4 +3725,336 @@ async fn going_away_points_out_weeks_already_planned_for_the_person() {
         "{reply}"
     );
     let _ = tokio::fs::remove_file(path).await;
+}
+
+// ── Rhythms: Kitchen weekly, Bathroom twice a week ───────────────────────────
+
+/// Kitchen (weekly) and Bathroom (2× per week: Mon–Wed, Thu–Sun) sharing the
+/// same four people, planned four weeks ahead.
+fn kitchen_and_bathroom() -> (State, CleaningGroup, CleaningGroup, Vec<PersonId>) {
+    let mut state = State::default();
+    state.created_at = Some(Utc::now());
+    let people: Vec<Person> = [
+        "@anna:example.org",
+        "@ben:example.org",
+        "@cleo:example.org",
+        "@dan:example.org",
+    ]
+    .iter()
+    .map(|m| Person::new_matrix(m))
+    .collect();
+    let ids: Vec<PersonId> = people.iter().map(|p| p.id.clone()).collect();
+    state.persons = people;
+    let mut kitchen = CleaningGroup::new("Kitchen");
+    kitchen.member_ids = ids.clone();
+    let mut bathroom = CleaningGroup::new("Bathroom");
+    bathroom.member_ids = ids.clone();
+    bathroom.rhythm = crate::rhythm::Rhythm {
+        every_weeks: Some(1),
+        shift_starts: crate::rhythm::Rhythm::times_per_week(2),
+    };
+    state.cleaning_groups = vec![kitchen.clone(), bathroom.clone()];
+    for ev in resolver::materialize(&state, 4) {
+        state.apply_event(ev).unwrap();
+    }
+    (state, kitchen, bathroom, ids)
+}
+
+fn holder(state: &State, group: &CleaningGroup, turn: Turn) -> PersonId {
+    state.slot_assignee(group, 0, turn).unwrap().id.clone()
+}
+
+#[test]
+fn a_weekly_and_a_twice_weekly_group_are_planned_side_by_side() {
+    let (state, kitchen, bathroom, ids) = kitchen_and_bathroom();
+    let (y, w) = current_iso_week();
+
+    // Kitchen: one turn per week, one person after the other.
+    let kitchen_people: Vec<PersonId> = (0..4)
+        .map(|i| {
+            let (y, w) = add_weeks(y, w, i);
+            assert_eq!(state.turns_in_week(&kitchen, y, w).len(), 1);
+            holder(&state, &kitchen, Turn::new(y, w, 0))
+        })
+        .collect();
+    assert_eq!(kitchen_people, ids);
+
+    // Bathroom: two turns per week, two different people, continuing
+    // through the same rotation: Anna/Ben, Cleo/Dan, Anna/Ben, …
+    let mut bathroom_people = Vec::new();
+    for i in 0..4 {
+        let (y, w) = add_weeks(y, w, i);
+        let turns = state.turns_in_week(&bathroom, y, w);
+        assert_eq!(turns.len(), 2);
+        let first = holder(&state, &bathroom, turns[0]);
+        let second = holder(&state, &bathroom, turns[1]);
+        assert_ne!(
+            first, second,
+            "the two halves of a week go to different people"
+        );
+        bathroom_people.extend([first, second]);
+    }
+    // Fair: over 4 weeks (8 turns) everyone had exactly two.
+    for id in &ids {
+        assert_eq!(bathroom_people.iter().filter(|p| *p == id).count(), 2);
+    }
+    // Shifts have their own dates.
+    let (start, end) = Turn::new(y, w, 1).dates(&bathroom.rhythm);
+    assert_eq!(start.weekday(), chrono::Weekday::Thu);
+    assert_eq!(end.weekday(), chrono::Weekday::Sun);
+}
+
+#[tokio::test]
+async fn status_shows_each_shift_with_its_own_person_state_and_whats_next() {
+    let (state, _kitchen, bathroom, ids) = kitchen_and_bathroom();
+    let (y, w) = current_iso_week();
+    let first_shift_person = state
+        .person_by_id(&holder(&state, &bathroom, Turn::new(y, w, 0)))
+        .unwrap()
+        .matrix_id
+        .clone()
+        .unwrap();
+    let (ctx, path, _admin) = test_context(state);
+    let _ = ids;
+
+    // Mark the first shift done (a past week would be simpler, but the
+    // status is about the current one).
+    {
+        let mut state = ctx.state.lock().await;
+        let pid = state
+            .person_by_matrix_id(&first_shift_person)
+            .unwrap()
+            .id
+            .clone();
+        let duty = Duty {
+            group: bathroom.clone(),
+            slot_index: 0,
+            turn: Turn::new(y, w, 0),
+        };
+        mark_duties_done(&mut state, &pid, &[duty]).unwrap();
+    }
+    let text = cmd_status(&ctx).await.unwrap().unwrap();
+    assert!(
+        text.contains("**Bathroom** · 2× per week (Mon–Wed, Thu–Sun)"),
+        "{text}"
+    );
+    assert!(text.contains("✅ Mon–Wed · "), "{text}");
+    assert!(text.contains("⬜ Thu–Sun · "), "{text}");
+    assert!(text.contains("**Kitchen**\n⬜ anna"), "{text}");
+    assert!(text.contains("1 of 3 done"), "{text}");
+    assert!(
+        text.contains(&format!("Next (week {}): Mon–Wed ", add_weeks(y, w, 1).1)),
+        "{text}"
+    );
+    // The running shift is marked.
+    let now_marked = text.lines().filter(|l| l.ends_with("← now")).count();
+    assert!(now_marked <= 1, "{text}");
+
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn done_marks_started_turns_and_otherwise_only_the_next_one() {
+    let (mut state, _kitchen, bathroom, _ids) = kitchen_and_bathroom();
+    let (y, w) = current_iso_week();
+    let next_week = add_weeks(y, w, 1);
+    // Next week nothing has started: only the earliest own turn counts.
+    let who = holder(&state, &bathroom, Turn::new(next_week.0, next_week.1, 1));
+    let duties = markable_duties(&state, &who, next_week, None);
+    assert!(!duties.is_empty());
+    let first_start = duties[0].turn.dates(&duties[0].group.rhythm).0;
+    assert!(duties
+        .iter()
+        .all(|d| d.turn.dates(&d.group.rhythm).0 == first_start));
+
+    // A past week: every own turn has started, all are markable at once.
+    let last_week = add_weeks(y, w, -1);
+    freeze(&mut state, &bathroom.id, 0, last_week, &who);
+    state.slot_assignments.push(SlotAssignment {
+        group_id: bathroom.id.clone(),
+        slot_index: 0,
+        iso_year: last_week.0,
+        iso_week: last_week.1,
+        shift: 1,
+        person_id: Some(who.clone()),
+        source: Default::default(),
+    });
+    let duties = markable_duties(&state, &who, last_week, Some(&bathroom.id));
+    assert_eq!(duties.len(), 2);
+    mark_duties_done(&mut state, &who, &duties).unwrap();
+    assert!(state.is_completed(&bathroom.id, last_week.0, last_week.1));
+}
+
+#[test]
+fn reminders_follow_each_turn() {
+    let (state, _kitchen, bathroom, _ids) = kitchen_and_bathroom();
+    let (y, w) = current_iso_week();
+    let day =
+        |weekday: u32| crate::rhythm::week_monday(y, w) + chrono::Duration::days(weekday as i64);
+    let names = |turns: Vec<(CleaningGroup, Turn)>| -> Vec<(String, u8)> {
+        turns.into_iter().map(|(g, t)| (g.name, t.shift)).collect()
+    };
+    let initial = crate::state::ReminderKind::Initial;
+    let final_ = crate::state::ReminderKind::Final;
+
+    // Monday: the weekly plan covers everything starting then — no extra notice.
+    assert!(scheduler::turns_to_remind(&state, day(0), &initial, 6).is_empty());
+    // Wednesday: Bathroom's first shift ends.
+    assert_eq!(
+        names(scheduler::turns_to_remind(&state, day(2), &final_, 6)),
+        [("Bathroom".to_owned(), 0)]
+    );
+    // Thursday: Bathroom's second shift starts.
+    assert_eq!(
+        names(scheduler::turns_to_remind(&state, day(3), &initial, 6)),
+        [("Bathroom".to_owned(), 1)]
+    );
+    // Sunday: Kitchen's week and Bathroom's second shift end.
+    assert_eq!(
+        names(scheduler::turns_to_remind(&state, day(6), &final_, 6)),
+        [("Kitchen".to_owned(), 0), ("Bathroom".to_owned(), 1)]
+    );
+
+    // A turn that's done, or already reminded, isn't reminded again.
+    let mut state = state;
+    let who = holder(&state, &bathroom, Turn::new(y, w, 1));
+    mark_duties_done(
+        &mut state,
+        &who,
+        &[Duty {
+            group: bathroom.clone(),
+            slot_index: 0,
+            turn: Turn::new(y, w, 1),
+        }],
+    )
+    .unwrap();
+    state.mark_reminder_sent(
+        &state.cleaning_groups[0].id.clone(),
+        y,
+        w,
+        0,
+        final_.clone(),
+    );
+    assert!(scheduler::turns_to_remind(&state, day(6), &final_, 6).is_empty());
+}
+
+#[tokio::test]
+async fn changing_the_rhythm_replans_later_weeks_without_costing_anyone_a_turn() {
+    let (mut state, kitchen, _bathroom, ids) = kitchen_and_bathroom();
+    state.cleaning_groups.retain(|g| g.id == kitchen.id);
+    let (y, w) = current_iso_week();
+    let this_week = holder(&state, &kitchen, Turn::new(y, w, 0));
+    let (ctx, path, admin) = test_context(state);
+
+    let reply = cmd_groups_rhythm(&ctx, &admin, &["Kitchen", "2x"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        reply.contains("now cleaned 2× per week (Mon–Wed, Thu–Sun)"),
+        "{reply}"
+    );
+
+    let state = ctx.state.lock().await;
+    let kitchen = state.group_by_id(&kitchen.id).unwrap().clone();
+    // This week's existing turn keeps its person; the new second shift and
+    // later weeks continue the rotation where it stood.
+    assert_eq!(holder(&state, &kitchen, Turn::new(y, w, 0)), this_week);
+    let mut order = vec![this_week];
+    for i in 0..3 {
+        let (y, w) = add_weeks(y, w, i);
+        for turn in state.turns_in_week(&kitchen, y, w) {
+            if (turn.year, turn.week, turn.shift) != (y, w, 0) || i > 0 {
+                order.push(holder(&state, &kitchen, turn));
+            }
+        }
+    }
+    assert_eq!(
+        &order[..4],
+        &ids[..],
+        "Anna, Ben, Cleo, Dan — nobody skipped"
+    );
+    drop(state);
+
+    // Every second week, from the tracking start.
+    cmd_groups_rhythm(&ctx, &admin, &["Kitchen", "weekly", "every", "2"])
+        .await
+        .unwrap();
+    let state = ctx.state.lock().await;
+    let kitchen = state.group_by_id(&kitchen.id).unwrap().clone();
+    assert_eq!(kitchen.rhythm.describe(), "every 2 weeks");
+    let (ny, nw) = add_weeks(y, w, 1);
+    assert!(state.turns_in_week(&kitchen, ny, nw).is_empty());
+    assert!(state
+        .slot_assignments
+        .iter()
+        .all(|a| a.group_id != kitchen.id
+            || (a.iso_year, a.iso_week) <= (y, w)
+            || state.is_due_week(&kitchen, a.iso_year, a.iso_week)));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn rhythm_specs_parse() {
+    let weekly = crate::rhythm::Rhythm::weekly();
+    let r = parse_rhythm(&weekly, &["2x"]).unwrap();
+    assert_eq!(r.describe(), "2× per week (Mon–Wed, Thu–Sun)");
+    let r = parse_rhythm(&weekly, &["thu"]).unwrap();
+    assert_eq!(r.describe(), "2× per week (Mon–Wed, Thu–Sun)");
+    let r = parse_rhythm(&weekly, &["every", "2", "weeks"]).unwrap();
+    assert_eq!(r.describe(), "every 2 weeks");
+    let r = parse_rhythm(&r, &["weekly"]).unwrap();
+    assert_eq!(r.describe(), "weekly");
+    let r = parse_rhythm(&weekly, &["1x"]).unwrap();
+    assert!(r.shift_starts.is_empty());
+    assert!(parse_rhythm(&weekly, &["9x"]).is_err());
+    assert!(parse_rhythm(&weekly, &["often"]).is_err());
+}
+
+#[test]
+fn a_calendar_feed_has_one_event_per_shift_with_its_own_dates() {
+    let (state, _kitchen, bathroom, _ids) = kitchen_and_bathroom();
+    let (y, w) = current_iso_week();
+    let who = holder(&state, &bathroom, Turn::new(y, w, 1));
+    let snapshot = crate::schedule::build_schedule(&state, 1);
+    let mine: Vec<_> = snapshot
+        .for_person(&who)
+        .into_iter()
+        .filter(|a| a.group_id == bathroom.id)
+        .collect();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].shift_label.as_deref(), Some("Thu–Sun"));
+    let ics = crate::ical::render_ics(&snapshot, &who);
+    let thursday = Turn::new(y, w, 1).dates(&bathroom.rhythm).0;
+    assert!(
+        ics.contains(&format!("DTSTART;VALUE=DATE:{}", thursday.format("%Y%m%d"))),
+        "{ics}"
+    );
+    assert!(ics.contains("Bathroom (Thu–Sun)"), "{ics}");
+}
+
+#[test]
+fn stats_count_turns_so_a_twice_weekly_group_owes_twice_the_duties() {
+    let (mut state, kitchen, bathroom, _ids) = kitchen_and_bathroom();
+    // Pretend tracking began three weeks ago; those turns are over.
+    state.created_at = Some(Utc::now() - chrono::Duration::weeks(3));
+    // Shifts of this week that already ended count too (Mon–Wed from Thursday on).
+    let (y, w) = current_iso_week();
+    let over_now = state
+        .turns_in_week(&bathroom, y, w)
+        .into_iter()
+        .filter(|t| state.turn_over(&bathroom, *t))
+        .count();
+    assert_eq!(state.closed_turns(&kitchen).len(), 3);
+    assert_eq!(state.closed_turns(&bathroom).len(), 6 + over_now);
+    let fairness = analytics::fairness_report(&state, &bathroom.id).unwrap();
+    assert_eq!(fairness.due_weeks as usize, 6 + over_now);
+    assert!((fairness.entries[0].expected - (6 + over_now) as f64 / 4.0).abs() < 1e-9);
+    let model = analytics::group_load_model(&bathroom);
+    assert!(
+        (model.assignments_per_year - 26.0).abs() < 1e-9,
+        "{}",
+        model.assignments_per_year
+    );
 }

@@ -19,7 +19,10 @@ pub(crate) fn command_may_change_current_plan(cmd: &str, sub: Option<&str>) -> b
             Some("assign" | "unassign" | "skip" | "reset" | "import")
         ),
         // Which groups/slots are shown, and who is marked away.
-        "!groups" => matches!(sub, Some("enable" | "disable" | "remove" | "slot")),
+        "!groups" => matches!(
+            sub,
+            Some("enable" | "disable" | "remove" | "slot" | "rhythm")
+        ),
         "!member" => matches!(sub, Some("remove" | "away" | "back")),
         _ => false,
     }
@@ -74,32 +77,30 @@ pub(crate) fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static st
     (pct_str, label)
 }
 
-/// Fill not-yet-frozen future weeks for every group using the current
-/// rotation queue, up to `weeks_ahead` due-cycles. Idempotent and purely
-/// additive — `resolver::materialize` never revisits or changes a week it
-/// already froze, so this is safe to call at any time without disturbing
-/// anyone's existing plan.
-pub(crate) fn materialize_and_apply(
-    ctx: &BotContext,
+/// Fill not-yet-frozen upcoming turns of one group from its rotation queue,
+/// up to `cycles_ahead` of its due weeks. Idempotent and purely additive.
+pub(crate) fn materialize_group_and_apply(
     state: &mut crate::state::State,
-    weeks_ahead: usize,
+    group_id: &GroupId,
+    cycles_ahead: usize,
 ) -> anyhow::Result<()> {
-    let interval = ctx.config.schedule.interval_weeks;
-    for ev in resolver::materialize(state, interval, weeks_ahead) {
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(());
+    };
+    for ev in resolver::materialize_group(state, &group, cycles_ahead) {
         state.apply_event(ev)?;
     }
     Ok(())
 }
 
-/// How many due-cycles ahead of `first_due_week` a group is *already*
-/// materialized (i.e. has a frozen `SlotAssignment` for), based on its
-/// furthest currently-stored assignment. 0 means nothing is frozen yet.
-pub(crate) fn group_horizon_weeks_ahead(
-    state: &crate::state::State,
-    group_id: &GroupId,
-    interval: u32,
-) -> usize {
-    let first_due = crate::state::first_due_week(state, interval);
+/// How many of its due weeks (from the current one) a group is *already*
+/// materialized for, based on its furthest stored assignment. 0 means
+/// nothing is frozen yet.
+pub(crate) fn group_horizon_weeks_ahead(state: &crate::state::State, group_id: &GroupId) -> usize {
+    let Some(group) = state.group_by_id(group_id) else {
+        return 0;
+    };
+    let first_due = state.next_due_week(group, current_iso_week());
     let max_offset = state
         .slot_assignments
         .iter()
@@ -110,7 +111,7 @@ pub(crate) fn group_horizon_weeks_ahead(
         })
         .max();
     match max_offset {
-        Some(d) => d / (interval.max(1) as usize) + 1,
+        Some(d) => d / (group.rhythm.every_weeks() as usize) + 1,
         None => 0,
     }
 }
@@ -124,14 +125,7 @@ pub(crate) fn reset_and_rematerialize(
     state: &mut crate::state::State,
     group_id: &str,
 ) -> anyhow::Result<usize> {
-    let (cur_y, cur_w) = current_iso_week();
-    let before = state.slot_assignments.len();
-    // Drop assignments after the active week; they'll be rebuilt with the full list.
-    state.slot_assignments.retain(|a| {
-        a.group_id != group_id || a.iso_year < cur_y || (a.iso_year == cur_y && a.iso_week <= cur_w)
-    });
-    let cleared = before - state.slot_assignments.len();
-
+    let cleared = drop_future_assignments(state, group_id).len();
     if let Some(group) = state.group_by_id(&group_id.to_owned()).cloned() {
         state.apply_event(DomainEvent::RotationQueueSet {
             group_id: group_id.to_owned(),
@@ -141,9 +135,55 @@ pub(crate) fn reset_and_rematerialize(
     // Explicit admin escape hatch: commit the full configured horizon, not
     // just one more due-cycle — unlike a join/leave, this is a deliberate
     // "redistribute everything now" action.
-    let weeks = ctx.config.schedule.materialize_weeks as usize;
-    materialize_and_apply(ctx, state, weeks)?;
+    let cycles = ctx.config.schedule.materialize_weeks as usize;
+    materialize_group_and_apply(state, &group_id.to_owned(), cycles)?;
     Ok(cleared)
+}
+
+/// Remove and return the group's assignments after the current week.
+pub(crate) fn drop_future_assignments(
+    state: &mut crate::state::State,
+    group_id: &str,
+) -> Vec<crate::domain::SlotAssignment> {
+    let current = current_iso_week();
+    let (future, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut state.slot_assignments)
+        .into_iter()
+        .partition(|a| a.group_id == group_id && (a.iso_year, a.iso_week) > current);
+    state.slot_assignments = keep;
+    future
+}
+
+/// Change a group's rhythm. Turns of the current week that already exist
+/// keep their assignee (and new shifts of this week are filled); everything
+/// after it is re-planned in the new rhythm, with the people drawn for the
+/// dropped turns put back at the front of the queue in their order — so
+/// nobody loses or gains a turn by the change.
+pub(crate) fn apply_rhythm_change(
+    ctx: &BotContext,
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+    rhythm: crate::rhythm::Rhythm,
+) -> anyhow::Result<()> {
+    state.apply_event(DomainEvent::RhythmSet {
+        group_id: group_id.clone(),
+        rhythm: rhythm.clone(),
+    })?;
+    let dropped = drop_future_assignments(state, group_id);
+    // This week's turns that no longer exist (fewer shifts now).
+    let current = current_iso_week();
+    let shifts = rhythm.shift_count() as u8;
+    state.slot_assignments.retain(|a| {
+        !(a.group_id == *group_id && (a.iso_year, a.iso_week) == current && a.shift >= shifts)
+    });
+    if let Some(group) = state.group_by_id(group_id).cloned() {
+        let queue = resolver::rewind_queue(&resolver::reconcile_queue(state, &group), &dropped);
+        state.apply_event(DomainEvent::RotationQueueSet {
+            group_id: group_id.clone(),
+            queue,
+        })?;
+    }
+    let cycles = ctx.config.schedule.materialize_weeks as usize;
+    materialize_group_and_apply(state, group_id, cycles)
 }
 
 /// Insert `person_id` into `group_id`'s rotation queue and fill in any
@@ -214,11 +254,10 @@ pub(crate) fn apply_group_join(
     // visible soon, without a single early member's join greedily claiming
     // the *entire* configured horizon before anyone else has a chance to
     // join. (Deeper horizons still get filled by bot startup or !plan reset.)
-    let interval = ctx.config.schedule.interval_weeks;
     let materialize_weeks = ctx.config.schedule.materialize_weeks as usize;
-    let horizon = group_horizon_weeks_ahead(state, group_id, interval);
-    let weeks_ahead = (horizon + 1).min(materialize_weeks.max(horizon));
-    materialize_and_apply(ctx, state, weeks_ahead)
+    let horizon = group_horizon_weeks_ahead(state, group_id);
+    let cycles_ahead = (horizon + 1).min(materialize_weeks.max(horizon));
+    materialize_group_and_apply(state, group_id, cycles_ahead)
 }
 
 /// Drop `person_id` from `group_id`'s rotation queue, clear their future
@@ -230,7 +269,7 @@ pub(crate) fn apply_group_join(
 /// applied (so `reconcile_queue` naturally drops the leaver). Returns the
 /// number of future assignments that were cleared and refilled.
 pub(crate) fn apply_group_departure(
-    ctx: &BotContext,
+    _ctx: &BotContext,
     state: &mut crate::state::State,
     person_id: &PersonId,
     group_id: &GroupId,
@@ -247,9 +286,8 @@ pub(crate) fn apply_group_departure(
 
     // Refill within whatever horizon this group already had — a leave
     // creates gaps, it never needs to extend the horizon further out.
-    let interval = ctx.config.schedule.interval_weeks;
-    let horizon = group_horizon_weeks_ahead(state, group_id, interval);
-    materialize_and_apply(ctx, state, horizon)?;
+    let horizon = group_horizon_weeks_ahead(state, group_id);
+    materialize_group_and_apply(state, group_id, horizon)?;
     Ok(removed)
 }
 
@@ -269,26 +307,102 @@ pub(crate) fn remove_future_assignments_for_person(
     before - state.slot_assignments.len()
 }
 
-/// Extract an optional trailing `week <1-53>` clause from `args`.
-///
-/// Returns the remaining args (with the clause removed) and the resolved
-/// `(year, week)` — the current week when no clause is present, rolling into
-/// next year when the requested week number has already passed this year.
-/// `None` means a `week` keyword was present but not followed by a valid
-/// 1-53 number; the caller should show its own usage message in that case.
-pub(crate) fn extract_week_arg<'a>(args: &'a [&'a str]) -> Option<(&'a [&'a str], (i32, u32))> {
+/// Which turn a command means: `week <1-53>` and/or `on <weekday>`,
+/// anywhere in the arguments.
+pub(crate) struct TurnArgs<'a> {
+    /// The arguments without those clauses.
+    pub(crate) rest: Vec<&'a str>,
+    /// The named week, or the current one — rolling into next year when the
+    /// week number has already passed this year.
+    pub(crate) week: (i32, u32),
+    /// Weekday (0 = Monday) selecting a shift in a group split into shifts.
+    pub(crate) day: Option<u8>,
+}
+
+/// Extract `week <N>` and `on <weekday>` clauses. `None` means a keyword was
+/// not followed by a valid value; the caller shows its usage message.
+pub(crate) fn extract_turn_args<'a>(args: &[&'a str]) -> Option<TurnArgs<'a>> {
     let (cur_y, cur_w) = current_iso_week();
-    match args.iter().position(|a| a.eq_ignore_ascii_case("week")) {
-        Some(pos) => {
+    let mut out = TurnArgs {
+        rest: Vec::new(),
+        week: (cur_y, cur_w),
+        day: None,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let token = args[i];
+        if token.eq_ignore_ascii_case("week") {
             let n: u32 = args
-                .get(pos + 1)
+                .get(i + 1)
                 .and_then(|s| s.parse().ok())
                 .filter(|n| (1..=53).contains(n))?;
-            let y = if n < cur_w { cur_y + 1 } else { cur_y };
-            Some((&args[..pos], (y, n)))
+            out.week = (if n < cur_w { cur_y + 1 } else { cur_y }, n);
+            i += 2;
+        } else if token.eq_ignore_ascii_case("on") {
+            out.day = Some(args.get(i + 1).and_then(|d| parse_weekday(d))?);
+            i += 2;
+        } else {
+            out.rest.push(token);
+            i += 1;
         }
-        None => Some((args, (cur_y, cur_w))),
     }
+    Some(out)
+}
+
+/// The turns of `group` a command refers to in `week`: the shift containing
+/// `day`, or every turn of the week. An error names the group's rhythm when
+/// it isn't cleaned that week.
+pub(crate) fn turns_for(
+    state: &crate::state::State,
+    group: &CleaningGroup,
+    week: (i32, u32),
+    day: Option<u8>,
+) -> std::result::Result<Vec<Turn>, String> {
+    let turns = state.turns_in_week(group, week.0, week.1);
+    if turns.is_empty() {
+        return Err(format!(
+            "«{}» is not cleaned in week {} (it is cleaned {}).",
+            group.name,
+            week.1,
+            group.rhythm.describe()
+        ));
+    }
+    Ok(match day {
+        Some(day) => vec![Turn::new(
+            week.0,
+            week.1,
+            group.rhythm.shift_for_weekday(day),
+        )],
+        None => turns,
+    })
+}
+
+/// Exactly one turn of `week`: the shift named by `day`, or the only shift
+/// of a group that isn't split. Otherwise asks for `on <day>`.
+pub(crate) fn single_turn(
+    state: &crate::state::State,
+    group: &CleaningGroup,
+    week: (i32, u32),
+    day: Option<u8>,
+) -> std::result::Result<Turn, String> {
+    let turns = turns_for(state, group, week, day)?;
+    match turns.as_slice() {
+        [turn] => Ok(*turn),
+        _ => Err(shift_hint(group)),
+    }
+}
+
+/// "«Bathroom» is cleaned in shifts (Mon–Wed, Thu–Sun) — add `on <day>`, e.g. `on thu`."
+pub(crate) fn shift_hint(group: &CleaningGroup) -> String {
+    let shifts: Vec<String> = group.rhythm.shifts().iter().map(|s| s.label()).collect();
+    let example = group.rhythm.shifts().get(1).map_or("mon", |s| {
+        ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][s.start as usize]
+    });
+    format!(
+        "«{}» is cleaned in shifts ({}) — add `on <day>`, e.g. `on {example}`.",
+        group.name,
+        shifts.join(", ")
+    )
 }
 
 /// Resolve `<group> [<slot>]` against `state`, matching the convention used
@@ -296,11 +410,11 @@ pub(crate) fn extract_week_arg<'a>(args: &'a [&'a str]) -> Option<(&'a [&'a str]
 /// treated as a slot name when the group is multi-slot and it actually
 /// matches one of its slots.  Returns the group id, the slot index to use in
 /// a `SlotAssignment` (0 for single-slot groups), and the remaining args.
-pub(crate) fn resolve_group_and_slot<'a>(
+pub(crate) fn resolve_group_and_slot<'r, 'a>(
     state: &crate::state::State,
     group_name: &str,
-    rest: &'a [&'a str],
-) -> std::result::Result<(GroupId, usize, &'a [&'a str]), String> {
+    rest: &'r [&'a str],
+) -> std::result::Result<(GroupId, usize, &'r [&'a str]), String> {
     let group = state
         .group_by_name(group_name)
         .ok_or_else(|| format!("Group «{group_name}» not found."))?;
@@ -328,27 +442,21 @@ pub(crate) fn resolve_group_and_slot<'a>(
 }
 
 /// Resolve what a `!takeover` invocation refers to, applying self-service
-/// defaults instead of requiring the full explicit `<group> <slot>` syntax:
+/// defaults instead of requiring the full explicit syntax:
 ///
 /// - No group given → the sender's own group, provided they're in exactly
 ///   one (never guessed among several — that returns a message listing them).
-/// - No slot given → auto-picked when the target group/week has exactly one
-///   takeable slot (not already completed/skipped, not already the sender's);
-///   with zero or several candidates, returns a message instead of guessing.
-/// - `!takeover <slot>` (a single token that isn't a known group name) is
-///   read as a slot name within the sender's own single group.
-///
-/// The full explicit syntax (`!takeover <group> [<slot>] [week <N>]`) keeps
-/// working unchanged — it's just the first two branches below, same as
-/// `resolve_group_and_slot`.
+/// - A single token that isn't a group name is read as a slot of that group.
+/// - Turn and slot are picked automatically when exactly one candidate
+///   (not done, not already the sender's) is left; in the current week the
+///   running turn wins. Otherwise the choices are listed instead of guessed.
 pub(crate) fn resolve_takeover_target(
     state: &crate::state::State,
     sender_person_id: &PersonId,
     rest: &[&str],
-    year: i32,
-    week: u32,
-    interval: u32,
-) -> std::result::Result<(GroupId, usize), String> {
+    week: (i32, u32),
+    day: Option<u8>,
+) -> std::result::Result<(CleaningGroup, usize, Turn), String> {
     fn own_group(
         state: &crate::state::State,
         sender_person_id: &PersonId,
@@ -357,7 +465,7 @@ pub(crate) fn resolve_takeover_target(
             [] => Err("You are not in any cleaning group. Specify one: !takeover <group> [<slot>]".into()),
             [g] => Ok((*g).clone()),
             many => Err(format!(
-                "You are in multiple groups — specify one: {}\nUsage: !takeover <group> [<slot>] [week <N>]",
+                "You are in multiple groups — specify one: {}\nUsage: !takeover <group> [<slot>] [week <N>] [on <day>]",
                 many.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
             )),
         }
@@ -372,7 +480,7 @@ pub(crate) fn resolve_takeover_target(
         None => (own_group(state, sender_person_id)?, None),
     };
 
-    let slot_index = match slot_token {
+    let slots: Vec<usize> = match slot_token {
         Some(name) => {
             if !group.is_multi_slot() {
                 return Err(format!("«{}» does not have slots.", group.name));
@@ -382,7 +490,7 @@ pub(crate) fn resolve_takeover_target(
                 .iter()
                 .position(|s| s.name.eq_ignore_ascii_case(name))
             {
-                Some(idx) => idx,
+                Some(idx) => vec![idx],
                 None => {
                     return Err(format!(
                         "«{name}» is not a group or a slot of «{}». Slots: {}",
@@ -397,51 +505,66 @@ pub(crate) fn resolve_takeover_target(
                 }
             }
         }
-        None => auto_pick_takeover_slot(state, &group, sender_person_id, year, week, interval)?,
+        None => crate::state::State::slot_indices(&group).collect(),
     };
-    Ok((group.id.clone(), slot_index))
-}
 
-/// Auto-pick the slot for a group/week when `!takeover` wasn't given one
-/// explicitly: 0 for a single-slot group, or the sole takeable slot of a
-/// multi-slot group. Never guesses between several — returns the choices
-/// (or "nothing to take over") as a message instead.
-pub(crate) fn auto_pick_takeover_slot(
-    state: &crate::state::State,
-    group: &CleaningGroup,
-    sender_person_id: &PersonId,
-    year: i32,
-    week: u32,
-    interval: u32,
-) -> std::result::Result<usize, String> {
-    if !group.is_multi_slot() {
-        return Ok(0);
-    }
-    let candidates: Vec<usize> = group
-        .slots
+    let turns = turns_for(state, &group, week, day)?;
+    let candidates: Vec<(usize, Turn)> = turns
         .iter()
-        .enumerate()
-        .filter(|(i, slot)| {
-            !state.is_slot_completed(&group.id, &slot.id, year, week)
+        .filter(|t| !state.turn_over(&group, **t))
+        .flat_map(|t| slots.iter().map(move |i| (*i, *t)))
+        .filter(|(i, t)| {
+            !state.is_turn_slot_done(&group, *i, *t)
                 && state
-                    .slot_assignee(group, *i, year, week, interval)
+                    .slot_assignee(&group, *i, *t)
                     .is_none_or(|p| &p.id != sender_person_id)
         })
-        .map(|(i, _)| i)
         .collect();
-    match candidates.as_slice() {
-        [] => Err(format!(
-            "Nothing to take over in «{}» this week — every slot is already done, skipped, or already yours.",
-            group.name
-        )),
-        [i] => Ok(*i),
-        many => Err(format!(
-            "«{}» has multiple open slots this week: {}\nSpecify one: !takeover {} <slot>",
-            group.name,
-            many.iter().map(|&i| group.slots[i].name.as_str()).collect::<Vec<_>>().join(", "),
-            group.name,
-        )),
-    }
+    let running = state.current_turn(&group);
+    let preferred: Vec<(usize, Turn)> = if day.is_none() {
+        candidates
+            .iter()
+            .copied()
+            .filter(|(_, t)| Some(*t) == running)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let pick = match (preferred.as_slice(), candidates.as_slice()) {
+        ([one], _) | ([], [one]) => *one,
+        (_, []) => {
+            return Err(format!(
+                "Nothing to take over in «{}» then — already completed or skipped, over, or yours.",
+                group.name
+            ))
+        }
+        _ => {
+            let options: Vec<String> = candidates
+                .iter()
+                .map(|(i, t)| {
+                    Duty {
+                        group: group.clone(),
+                        slot_index: *i,
+                        turn: *t,
+                    }
+                    .label()
+                })
+                .collect();
+            let how = if group.is_multi_slot() && group.rhythm.is_split() {
+                "a slot and `on <day>`"
+            } else if group.is_multi_slot() {
+                "a slot"
+            } else {
+                "`on <day>`"
+            };
+            return Err(format!(
+                "Several open turns: {} — specify {how}: !takeover {} …",
+                options.join(", "),
+                group.name
+            ));
+        }
+    };
+    Ok((group, pick.0, pick.1))
 }
 
 pub(crate) fn validate_matrix_user_id(mxid: &str) -> std::result::Result<(), String> {
@@ -450,121 +573,97 @@ pub(crate) fn validate_matrix_user_id(mxid: &str) -> std::result::Result<(), Str
         .map_err(|_| format!("«{mxid}» is not a valid Matrix user ID. Use @user:server."))
 }
 
+/// Freeze the group's current week (if due and not frozen yet) using the
+/// *pre-join* queue, so nobody's task this week changes because someone
+/// else just joined.
 pub(crate) fn freeze_schedule_before_join(
-    ctx: &BotContext,
+    _ctx: &BotContext,
     state: &mut crate::state::State,
     group_id: &GroupId,
 ) -> anyhow::Result<()> {
-    let (cur_y, cur_w) = current_iso_week();
-    let interval = ctx.config.schedule.interval_weeks;
-    for event in resolver::materialize(state, interval, 1) {
-        // Apply this group's active-week pick (so it's locked in before the
-        // join can affect it) AND the queue advancement that produced it —
-        // otherwise whoever got picked would stay stuck at the queue's front
-        // and get reused for the very next week too.
-        let applies = match &event {
-            DomainEvent::SlotAssigned {
-                group_id: g,
-                iso_year,
-                iso_week,
-                ..
-            } => g == group_id && *iso_year == cur_y && *iso_week == cur_w,
-            DomainEvent::RotationQueueSet { group_id: g, .. } => g == group_id,
-            _ => false,
-        };
-        if applies {
-            state.apply_event(event)?;
-        }
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(());
+    };
+    let current = current_iso_week();
+    if state.next_due_week(&group, current) != current {
+        return Ok(());
     }
-    Ok(())
-}
-
-/// Freezes the active week as explicitly unassigned for a group that just
-/// got its first member, so their real first turn starts next week instead
-/// of a week already underway. Deliberately does NOT apply the
-/// `RotationQueueSet` that the underlying preview-materialize would have
-/// produced (it would have advanced the queue past this person) — the queue
-/// must stay exactly as `apply_group_join` left it (them at the front) so
-/// they're picked again, for real, next week.
-pub(crate) fn keep_active_week_unassigned_for_first_member(
-    ctx: &BotContext,
-    state: &mut crate::state::State,
-    group_id: &GroupId,
-) -> anyhow::Result<()> {
-    let (cur_y, cur_w) = current_iso_week();
-    let interval = ctx.config.schedule.interval_weeks;
-    let active_placeholders: Vec<DomainEvent> = resolver::materialize(state, interval, 1)
-        .into_iter()
-        .filter_map(|event| match event {
-            DomainEvent::SlotAssigned {
-                group_id: event_group_id,
-                slot_index,
-                iso_year,
-                iso_week,
-                source,
-                ..
-            } if event_group_id == *group_id && iso_year == cur_y && iso_week == cur_w => {
-                Some(DomainEvent::SlotAssigned {
-                    group_id: event_group_id,
-                    slot_index,
-                    iso_year,
-                    iso_week,
-                    person_id: None,
-                    source,
-                    actor_id: None,
-                    previous_person_id: None,
-                })
-            }
-            _ => None,
-        })
-        .collect();
-    for event in active_placeholders {
+    // One cycle = exactly this week; apply its picks AND the queue
+    // advancement that produced them (else the picked people would stay at
+    // the queue's front and be reused for the next week too).
+    for event in resolver::materialize_group(state, &group, 1) {
         state.apply_event(event)?;
     }
     Ok(())
 }
 
+/// Freezes the current week as explicitly unassigned for a group that just
+/// got its first member, so their real first turn starts next time instead
+/// of in a week already underway. Leaves the queue untouched (them at the
+/// front) so they're picked, for real, next.
+pub(crate) fn keep_active_week_unassigned_for_first_member(
+    _ctx: &BotContext,
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+) -> anyhow::Result<()> {
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(());
+    };
+    let (year, week) = current_iso_week();
+    for turn in state.turns_in_week(&group, year, week) {
+        for slot_index in crate::state::State::slot_indices(&group) {
+            let frozen = state.slot_assignments.iter().any(|a| {
+                a.group_id == group.id
+                    && a.slot_index == slot_index
+                    && (a.iso_year, a.iso_week, a.shift) == (turn.year, turn.week, turn.shift)
+            });
+            if !frozen {
+                state.apply_event(DomainEvent::SlotAssigned {
+                    group_id: group.id.clone(),
+                    slot_index,
+                    iso_year: turn.year,
+                    iso_week: turn.week,
+                    shift: turn.shift,
+                    person_id: None,
+                    source: AssignmentSource::RoundRobin,
+                    actor_id: None,
+                    previous_person_id: None,
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Open duties of `person_id` in `group_id` this week, as labels (all
+/// shifts, also ones that haven't started yet).
 pub(crate) fn current_open_assignments(
     state: &crate::state::State,
     group_id: &GroupId,
     person_id: &PersonId,
-    interval: u32,
 ) -> Vec<String> {
     let (year, week) = current_iso_week();
     let Some(group) = state.group_by_id(group_id) else {
         return Vec::new();
     };
-    let has_frozen_current = state.slot_assignments.iter().any(|assignment| {
-        assignment.group_id == *group_id
-            && assignment.iso_year == year
-            && assignment.iso_week == week
-    });
-    if !has_frozen_current && !state.is_due(group_id, year, week, interval) {
-        return Vec::new();
-    }
-
-    if group.is_multi_slot() {
-        group
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| !state.is_slot_completed(group_id, &slot.id, year, week))
-            .filter_map(|(index, slot)| {
-                state
-                    .slot_assignee(group, index, year, week, interval)
-                    .filter(|person| &person.id == person_id)
-                    .map(|_| slot.name.clone())
-            })
-            .collect()
-    } else if !state.is_completed(group_id, year, week)
-        && state
-            .responsible_person(group, year, week, interval)
-            .is_some_and(|person| &person.id == person_id)
-    {
-        vec![group.name.clone()]
-    } else {
-        Vec::new()
-    }
+    state
+        .turns_in_week(group, year, week)
+        .into_iter()
+        .flat_map(|turn| {
+            state
+                .held_slots(group, person_id, turn)
+                .into_iter()
+                .filter(move |i| !state.is_turn_slot_done(group, *i, turn))
+                .map(move |slot_index| {
+                    Duty {
+                        group: group.clone(),
+                        slot_index,
+                        turn,
+                    }
+                    .label()
+                })
+        })
+        .collect()
 }
 
 pub(crate) fn person_label(person: &Person) -> String {
@@ -575,35 +674,30 @@ pub(crate) fn person_label(person: &Person) -> String {
     }
 }
 
+/// "Next: Bob · Thu–Sun 25 – 28 Sep (week 39)." — the group's first turn
+/// that starts after today.
 pub(crate) fn next_assignment_summary(state: &crate::state::State, group_id: &GroupId) -> String {
-    let (cur_y, cur_w) = current_iso_week();
     let Some(group) = state.group_by_id(group_id) else {
         return "Next: unavailable.".to_owned();
     };
     if group.member_ids.is_empty() {
         return "Next: rotation is empty.".to_owned();
     }
-
-    let next_week = state
+    let today = crate::state::today();
+    let next = state
         .slot_assignments
         .iter()
-        .filter(|a| {
-            a.group_id == *group_id
-                && (a.iso_year > cur_y || (a.iso_year == cur_y && a.iso_week > cur_w))
-        })
-        .map(|a| (a.iso_year, a.iso_week))
+        .filter(|a| a.group_id == *group_id)
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+        .filter(|t| t.dates(&group.rhythm).0 > today)
         .min();
-
-    let Some((year, week)) = next_week else {
+    let Some(turn) = next else {
         return "Next: no future assignment is materialized.".to_owned();
     };
     let mut names: Vec<String> = state
-        .slot_assignments
-        .iter()
-        .filter(|a| a.group_id == *group_id && a.iso_year == year && a.iso_week == week)
-        .filter_map(|a| a.person_id.as_ref())
-        .filter_map(|id| state.person_by_id(id))
-        .map(person_label)
+        .turn_assignees(group, turn)
+        .into_iter()
+        .filter_map(|(_, p)| p.map(person_label))
         .collect();
     names.dedup();
     let who = if names.is_empty() {
@@ -611,8 +705,11 @@ pub(crate) fn next_assignment_summary(state: &crate::state::State, group_id: &Gr
     } else {
         names.join(", ")
     };
-    let dates = week_dates(year, week);
-    format!("Next: {who} · week {week} ({dates}).")
+    format!(
+        "Next: {who} · {} (week {}).",
+        turn.period_label(&group.rhythm),
+        turn.week
+    )
 }
 
 /// Fetch Matrix display names for all known Matrix users and update state.
@@ -645,4 +742,90 @@ pub(crate) async fn refresh_display_names(ctx: &BotContext, room: &Room) {
             }
         }
     }
+}
+
+/// One slot of one turn someone is responsible for.
+#[derive(Clone)]
+pub(crate) struct Duty {
+    pub(crate) group: CleaningGroup,
+    pub(crate) slot_index: usize,
+    pub(crate) turn: Turn,
+}
+
+impl Duty {
+    /// "Bathroom", "Bathroom · Mon–Wed", "Floor / Kitchen · Thu–Sun".
+    pub(crate) fn label(&self) -> String {
+        let mut label = self.group.name.clone();
+        if let Some(slot) = self.group.slots.get(self.slot_index) {
+            label.push_str(&format!(" / {}", slot.name));
+        }
+        if let Some(shift) = self.turn.shift_label(&self.group.rhythm) {
+            label.push_str(&format!(" · {shift}"));
+        }
+        label
+    }
+}
+
+/// `person_id`'s open duties in one week (optionally one group): those whose
+/// turn has started — or, if none has yet, the week's next one, since
+/// cleaning a little early is fine. Shared by `!done` and the ✅ reaction.
+pub(crate) fn markable_duties(
+    state: &crate::state::State,
+    person_id: &PersonId,
+    (year, week): (i32, u32),
+    only_group: Option<&GroupId>,
+) -> Vec<Duty> {
+    let mut open: Vec<Duty> = Vec::new();
+    for group in state.cleaning_groups.iter().filter(|g| g.is_active) {
+        if only_group.is_some_and(|id| id != &group.id) {
+            continue;
+        }
+        for turn in state.turns_in_week(group, year, week) {
+            for slot_index in state.held_slots(group, person_id, turn) {
+                if !state.is_turn_slot_done(group, slot_index, turn) {
+                    open.push(Duty {
+                        group: group.clone(),
+                        slot_index,
+                        turn,
+                    });
+                }
+            }
+        }
+    }
+    let started: Vec<Duty> = open
+        .iter()
+        .filter(|d| state.turn_started(&d.group, d.turn))
+        .cloned()
+        .collect();
+    if !started.is_empty() {
+        return started;
+    }
+    let first = open.iter().map(|d| d.turn.dates(&d.group.rhythm).0).min();
+    open.into_iter()
+        .filter(|d| Some(d.turn.dates(&d.group.rhythm).0) == first)
+        .collect()
+}
+
+/// Record `duties` as cleaned by `person_id`.
+pub(crate) fn mark_duties_done(
+    state: &mut crate::state::State,
+    person_id: &PersonId,
+    duties: &[Duty],
+) -> anyhow::Result<()> {
+    for duty in duties {
+        let responsible = state
+            .slot_assignee(&duty.group, duty.slot_index, duty.turn)
+            .map(|p| vec![p.id.clone()])
+            .unwrap_or_default();
+        state.apply_event(DomainEvent::CleaningCompleted {
+            group_id: duty.group.id.clone(),
+            slot_id: duty.group.slots.get(duty.slot_index).map(|s| s.id.clone()),
+            person_id: person_id.clone(),
+            responsible_person_ids: responsible,
+            iso_year: duty.turn.year,
+            iso_week: duty.turn.week,
+            shift: duty.turn.shift,
+        })?;
+    }
+    Ok(())
 }

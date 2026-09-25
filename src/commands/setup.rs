@@ -159,12 +159,7 @@ pub(crate) async fn cmd_removeperson(
             "{query} is not in «{group_name}». No changes made."
         )));
     }
-    let open = current_open_assignments(
-        &state,
-        &group_id,
-        &person_id,
-        ctx.config.schedule.interval_weeks,
-    );
+    let open = current_open_assignments(&state, &group_id, &person_id);
     if !open.is_empty() {
         return Ok(Some(format!(
             "Cannot remove {query} from «{group_name}»: their current assignment is still open \
@@ -400,11 +395,24 @@ pub(crate) async fn cmd_addfloor(
     }
     let group_id = uuid::Uuid::new_v4().to_string();
     state.apply_event(DomainEvent::GroupCreated {
-        group_id,
+        group_id: group_id.clone(),
         name: name.clone(),
     })?;
+    // New groups start weekly, or in the configured default interval.
+    let every = ctx.config.schedule.interval_weeks.max(1);
+    if every != 1 {
+        state.apply_event(DomainEvent::RhythmSet {
+            group_id,
+            rhythm: crate::rhythm::Rhythm {
+                every_weeks: Some(every),
+                shift_starts: Vec::new(),
+            },
+        })?;
+    }
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Created cleaning group «{name}».")))
+    Ok(Some(format!(
+        "✅ Created cleaning group «{name}». Change how often it is cleaned with !groups rhythm {name} …"
+    )))
 }
 
 // ── Admin: !groups remove <name> ────────────────────────────────────────────────
@@ -478,19 +486,9 @@ pub(crate) async fn cmd_resetplan(
         None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
     reset_and_rematerialize(ctx, &mut state, &group_id)?;
-    let assignee = {
-        let interval = ctx.config.schedule.interval_weeks;
-        let (cur_y, cur_w) = current_iso_week();
-        let g = state.group_by_id(&group_id).unwrap().clone();
-        state
-            .responsible_person(&g, cur_y, cur_w, interval)
-            .map(|p| p.display_name.clone())
-            .unwrap_or_else(|| "(nobody)".into())
-    };
+    let next = next_assignment_summary(&state, &group_id);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "✅ Plan reset for «{group_name}». This week: {assignee}."
-    )))
+    Ok(Some(format!("✅ Plan reset for «{group_name}». {next}")))
 }
 
 pub(crate) async fn cmd_addslot(
@@ -847,20 +845,16 @@ pub(crate) async fn cmd_absent(
         .filter(|a| (a.iso_year, a.iso_week) >= (from_y, from_w) && (a.iso_year, a.iso_week) < end)
         .filter_map(|a| {
             let group = state.group_by_id(&a.group_id)?;
-            let (label, done) = match group.slots.get(a.slot_index) {
-                Some(slot) if group.is_multi_slot() => (
-                    format!("{} / {}", group.name, slot.name),
-                    state.is_slot_completed(&group.id, &slot.id, a.iso_year, a.iso_week),
-                ),
-                _ => (
-                    group.name.clone(),
-                    state.is_completed(&group.id, a.iso_year, a.iso_week),
-                ),
+            let turn = Turn::new(a.iso_year, a.iso_week, a.shift);
+            let duty = Duty {
+                group: group.clone(),
+                slot_index: a.slot_index,
+                turn,
             };
-            (!done).then(|| {
+            (!state.is_turn_slot_done(group, a.slot_index, turn)).then(|| {
                 (
                     (a.iso_year, a.iso_week),
-                    format!("week {} {label}", a.iso_week),
+                    format!("week {} {}", a.iso_week, duty.label()),
                 )
             })
         })
@@ -910,4 +904,116 @@ pub(crate) async fn cmd_back(
     state.apply_event(DomainEvent::AbsenceCancelled { person_id })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ {query} is back.")))
+}
+
+// ── Admin: !groups rhythm <group> [weekly | <N>x | every <N> | <days…>] ──────
+//
+// How often a group is cleaned. `2x` splits every due week into two shifts
+// (Mon–Wed, Thu–Sun), each with its own person from the rotation; `every 2`
+// cleans every second week; weekdays set the shift starts explicitly
+// (`mon thu`, Monday always starts one). Parts combine: `every 2 2x`.
+
+pub(crate) async fn cmd_groups_rhythm(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    let usage = "Usage: !groups rhythm <group> weekly | <N>x | every <N> | <weekdays…>  \
+                 (e.g. `2x` = Mon–Wed + Thu–Sun, `every 2`, `mon thu`)";
+    let Some((&group_name, spec)) = args.split_first() else {
+        return Ok(Some(usage.into()));
+    };
+    let mut state = ctx.state.lock().await;
+    let Some(group) = state.group_by_name(group_name).cloned() else {
+        return Ok(Some(format!("Group «{group_name}» not found.")));
+    };
+    if spec.is_empty() {
+        return Ok(Some(format!(
+            "«{}» is cleaned {}.\n{usage}",
+            group.name,
+            group.rhythm.describe()
+        )));
+    }
+    require_admin(ctx, sender)?;
+
+    let rhythm = match parse_rhythm(&group.rhythm, spec) {
+        Ok(r) => r,
+        Err(e) => return Ok(Some(format!("{e}\n{usage}"))),
+    };
+    if rhythm.shifts() == group.rhythm.shifts()
+        && rhythm.every_weeks() == group.rhythm.every_weeks()
+    {
+        return Ok(Some(format!(
+            "«{}» is already cleaned {}.",
+            group.name,
+            rhythm.describe()
+        )));
+    }
+    apply_rhythm_change(ctx, &mut state, &group.id, rhythm.clone())?;
+    let next = next_assignment_summary(&state, &group.id);
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!(
+        "✅ «{}» is now cleaned {}.\n\
+         This week's existing turns are kept; later weeks were re-planned from the rotation.\n{next}",
+        group.name,
+        rhythm.describe()
+    )))
+}
+
+/// Apply a rhythm spec to `current`: `weekly`, `daily`, `<N>x`, `every <N>
+/// [weeks]`, weekday names.
+pub(crate) fn parse_rhythm(
+    current: &crate::rhythm::Rhythm,
+    spec: &[&str],
+) -> std::result::Result<crate::rhythm::Rhythm, String> {
+    let mut rhythm = current.clone();
+    rhythm.every_weeks = Some(current.every_weeks());
+    let mut days: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < spec.len() {
+        let token = spec[i].to_ascii_lowercase();
+        if token == "weekly" {
+            rhythm = crate::rhythm::Rhythm::weekly();
+        } else if token == "daily" {
+            rhythm.shift_starts = crate::rhythm::Rhythm::times_per_week(7);
+        } else if token == "every" {
+            let n: u32 = spec
+                .get(i + 1)
+                .and_then(|n| n.parse().ok())
+                .filter(|n| (1..=52).contains(n))
+                .ok_or("`every` needs a number of weeks (1–52).")?;
+            rhythm.every_weeks = Some(n);
+            i += 1;
+            if spec
+                .get(i + 1)
+                .is_some_and(|w| w.eq_ignore_ascii_case("weeks") || w.eq_ignore_ascii_case("week"))
+            {
+                i += 1;
+            }
+        } else if let Some(n) = token
+            .strip_suffix('x')
+            .or_else(|| token.strip_suffix('×'))
+            .and_then(|n| n.parse::<u8>().ok())
+        {
+            if !(1..=7).contains(&n) {
+                return Err("Between 1x and 7x per week.".into());
+            }
+            rhythm.shift_starts = crate::rhythm::Rhythm::times_per_week(n);
+        } else if let Some(day) = parse_weekday(&token) {
+            days.push(day);
+        } else {
+            return Err(format!("Don't understand «{}».", spec[i]));
+        }
+        i += 1;
+    }
+    if !days.is_empty() {
+        days.push(0);
+        days.sort_unstable();
+        days.dedup();
+        rhythm.shift_starts = if days.len() == 1 { Vec::new() } else { days };
+    }
+    if rhythm.shift_count() == 1 {
+        rhythm.shift_starts = Vec::new();
+    }
+    Ok(rhythm)
 }

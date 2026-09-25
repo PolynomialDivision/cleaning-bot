@@ -42,7 +42,6 @@ pub(crate) async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> 
 
 pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
     let (_, start_w) = state.tracking_start();
 
     let groups: Vec<crate::domain::GroupId> = if let Some(name) = args.first() {
@@ -65,14 +64,14 @@ pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Opti
 
     let mut out = Vec::new();
     for (i, group_id) in groups.iter().enumerate() {
-        let Some(report) = analytics::fairness_report(&state, group_id, interval) else {
+        let Some(report) = analytics::fairness_report(&state, group_id) else {
             continue;
         };
         if i > 0 {
             out.push(String::new());
         }
         out.push(format!(
-            "⚖️ **{}** · {} wks · since W{start_w}",
+            "⚖️ **{}** · {} turns · since W{start_w}",
             report.group_name, report.due_weeks,
         ));
         for e in &report.entries {
@@ -98,8 +97,7 @@ pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Opti
 
 pub(crate) async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
-    let report = analytics::workload_report(&state, interval);
+    let report = analytics::workload_report(&state);
 
     if report.entries.is_empty() {
         return Ok(Some("No members assigned to any group yet.".into()));
@@ -176,7 +174,6 @@ pub(crate) async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
 
 pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
 
     let active: Vec<_> = state
         .cleaning_groups
@@ -189,7 +186,7 @@ pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
 
     let models: Vec<_> = active
         .iter()
-        .map(|g| analytics::group_load_model(g, interval))
+        .map(|g| analytics::group_load_model(g))
         .collect();
 
     let avg_cli = {
@@ -212,8 +209,8 @@ pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
             String::new()
         };
         out.push(format!(
-            "**{}**  {:.2}× · {}p/{}wks · {:.0}r{}",
-            group.name, ratio, m.member_count, m.rotation_interval, m.rooms_per_assignment, weight,
+            "**{}**  {:.2}× · {}p · {} · {:.0}r{}",
+            group.name, ratio, m.member_count, m.rhythm, m.rooms_per_assignment, weight,
         ));
         for slot in &group.slots {
             let sr = analytics::effective_rooms_pub(&slot.room_names, &slot.room_weights);
@@ -244,26 +241,31 @@ pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
 
 // ── Group record (!stats <group>) ─────────────────────────────────────────────
 
-pub(crate) fn blame_group(
-    state: &crate::state::State,
-    group: &CleaningGroup,
-    year: i32,
-    week: u32,
-    interval: u32,
-) -> String {
-    let due = state.all_due_weeks(interval, (year, week));
-    let closed: Vec<_> = due
-        .iter()
-        .filter(|&&(y, w)| (y, w) != (year, week))
-        .collect();
+pub(crate) fn blame_group(state: &crate::state::State, group: &CleaningGroup) -> String {
+    let closed = state.closed_turns(group);
     let n_due = closed.len();
     let n_done = closed
         .iter()
-        .filter(|(y, w)| state.is_completed(&group.id, *y, *w))
+        .filter(|t| state.is_turn_done(group, **t))
         .count();
     let pct = (100 * n_done).checked_div(n_due).unwrap_or(100);
-    let streak = state.streak_for(&group.id, interval);
-    let this = state.is_completed(&group.id, year, week);
+    let streak = state.streak_for(group);
+    let (year, week) = current_iso_week();
+    let this_week: Vec<String> = state
+        .turns_in_week(group, year, week)
+        .into_iter()
+        .map(|t| {
+            let icon = if state.is_turn_done(group, t) {
+                "✅"
+            } else {
+                "⬜"
+            };
+            match t.shift_label(&group.rhythm) {
+                Some(label) => format!("{label} {icon}"),
+                None => icon.to_owned(),
+            }
+        })
+        .collect();
     let members_text = state
         .members_of(group)
         .iter()
@@ -271,29 +273,42 @@ pub(crate) fn blame_group(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let mut lines = vec![format!("📊 **{}**", group.name), String::new()];
+    let mut lines = vec![
+        format!(
+            "📊 **{}** · cleaned {}",
+            group.name,
+            group.rhythm.describe()
+        ),
+        String::new(),
+    ];
     lines.push(format!("Members: {members_text}"));
     lines.push(format!(
-        "Completed: {n_done}/{n_due} ({pct}%) · Streak: {streak} · This week: {}",
-        if this { "✅" } else { "❌" }
+        "Turns done: {n_done}/{n_due} ({pct}%) · Streak: {streak} · This week: {}",
+        if this_week.is_empty() {
+            "not due".to_owned()
+        } else {
+            this_week.join(" ")
+        }
     ));
     if let Some(last) = state.last_completion(&group.id) {
         let by = state
             .person_by_id(&last.completed_by_id)
             .map(|p| p.display_name.as_str())
             .unwrap_or("?");
+        let turn = Turn::new(last.iso_year, last.iso_week, last.shift);
         lines.push(format!(
             "Last: week {} ({}) by {by}",
             last.iso_week,
-            week_dates(last.iso_year, last.iso_week)
+            turn.period_label(&group.rhythm)
         ));
     }
-    let missed = state.missed_weeks_for(&group.id, interval);
+    let missed = state.missed_turns(group);
     if !missed.is_empty() {
         let shown: Vec<_> = missed
             .iter()
+            .rev()
             .take(5)
-            .map(|(y, w)| format!("w{w} ({})", week_dates(*y, *w)))
+            .map(|t| format!("w{} ({})", t.week, t.period_label(&group.rhythm)))
             .collect();
         lines.push(format!(
             "Missed: {}{}",

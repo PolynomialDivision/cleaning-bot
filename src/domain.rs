@@ -132,6 +132,10 @@ pub struct CleaningGroup {
     /// bot output.  Defaults to true so existing state upgrades seamlessly.
     #[serde(default = "default_active")]
     pub is_active: bool,
+    /// How often the group is cleaned and how each due week is split into
+    /// turns (see `rhythm`).
+    #[serde(default)]
+    pub rhythm: crate::rhythm::Rhythm,
 }
 
 fn default_active() -> bool {
@@ -155,6 +159,7 @@ impl CleaningGroup {
             slots: Vec::new(),
             weight: 1.0,
             is_active: true,
+            rhythm: crate::rhythm::Rhythm::weekly(),
         }
     }
 
@@ -254,6 +259,9 @@ pub struct SlotAssignment {
     pub slot_index: usize,
     pub iso_year: i32,
     pub iso_week: u32,
+    /// Shift within the week (see `rhythm`); 0 for whole-week rhythms.
+    #[serde(default)]
+    pub shift: u8,
     /// `None` = unassigned (person left or group has no members).
     pub person_id: Option<PersonId>,
     #[serde(default)]

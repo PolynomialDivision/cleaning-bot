@@ -24,13 +24,15 @@ pub struct Config {
 pub struct ScheduleConfig {
     /// Matrix room ID where reminders and replies are posted.
     pub room_id: String,
-    /// Cleaning interval in weeks (default 1 = every week).
+    /// Default rhythm of new groups, in weeks (1 = every week). Groups from
+    /// before per-group rhythms adopt it once at startup.
     #[serde(default = "default_interval_weeks")]
     pub interval_weeks: u32,
     /// Weekday to send the initial reminder (0 = Mon … 6 = Sun).
     #[serde(default = "default_reminder_weekday")]
     pub reminder_weekday: u8,
-    /// Weekday to send the final "not done yet" reminder.
+    /// Weekday to send the final "not done yet" reminder for whole-week
+    /// turns (shifts get theirs on their last day).
     #[serde(default = "default_final_reminder_weekday")]
     pub final_reminder_weekday: u8,
     /// Local time (HH:MM) at or after which reminders are allowed to fire.
@@ -43,7 +45,7 @@ pub struct ScheduleConfig {
     /// Assignment fill strategy.
     #[serde(default)]
     pub fill_strategy: FillStrategy,
-    /// How many due weeks ahead to pre-materialize assignments.  Default: 26 (≈6 months).
+    /// How many due weeks per group to pre-materialize assignments for.
     #[serde(default = "default_materialize_weeks")]
     pub materialize_weeks: u32,
 }

@@ -19,13 +19,17 @@ admin_users = ["@admin:example.org"]
 # Matrix room where all reminders and bot replies are posted.
 room_id = "!REPLACE_ME:example.org"
 
-# How often each floor must be cleaned (in weeks).  Default: 1 (every week).
+# Default rhythm for new groups: cleaned every N weeks. Each group's rhythm
+# is set in the bot with `!groups rhythm <group> …` (e.g. `2x` = two shifts
+# per week, Mon–Wed and Thu–Sun, each with its own person; `every 2`).
 interval_weeks = 1
 
-# Day of week for the initial reminder: 0 = Monday … 6 = Sunday.
+# Day of week the weekly plan is posted and pinned: 0 = Monday … 6 = Sunday.
+# A shift starting later in the week gets its own reminder that day.
 reminder_weekday = 0          # Monday
 
-# Day of week for the final "not done yet" reminder.
+# Day of week for the final "not done yet" reminder of whole-week turns.
+# Shifts get theirs on their own last day.
 final_reminder_weekday = 6    # Sunday
 
 # IANA timezone used for weekday calculations.

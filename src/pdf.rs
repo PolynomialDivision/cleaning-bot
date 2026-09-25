@@ -60,12 +60,12 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
         }
 
         let date_range = match (rows.first(), rows.last()) {
-            (Some(f), Some(l)) if f.week_monday != l.week_sunday => format!(
+            (Some(f), Some(l)) if f.start != l.end => format!(
                 "{} -- {}",
-                f.week_monday.format("%d %b %Y"),
-                l.week_sunday.format("%d %b %Y")
+                f.start.format("%d %b %Y"),
+                l.end.format("%d %b %Y")
             ),
-            (Some(f), _) => f.week_label.clone(),
+            (Some(f), _) => f.period_label.clone(),
             _ => String::new(),
         };
 
@@ -75,7 +75,7 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
         body.push_str(&group_section(
             group_name,
             &date_range,
-            snapshot.interval_weeks,
+            &rows[0].rhythm,
             &generated,
             &rows,
         ));
@@ -89,7 +89,7 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
 fn group_section(
     group_name: &str,
     date_range: &str,
-    interval: u32,
+    rhythm: &str,
     generated: &str,
     rows: &[&crate::schedule::AssignmentInstance],
 ) -> String {
@@ -108,12 +108,12 @@ fn group_section(
     ));
     s.push_str("\\vspace{0.5mm}\\rule{\\linewidth}{0.6pt}\\\\\n");
 
-    // Subtitle: date range · interval · generated (small, italic).
+    // Subtitle: date range · rhythm · generated (small, italic).
     s.push_str(&format!(
         "{{\\fontsize{{7.5}}{{9.5}}\\selectfont\\itshape \
-         {} $\\cdot$ Every {} week(s) $\\cdot$ Generated {}}}\n",
+         {} $\\cdot$ Cleaned {} $\\cdot$ Generated {}}}\n",
         tex_esc(date_range),
-        interval,
+        tex_esc(rhythm),
         tex_esc(generated),
     ));
     s.push_str("\\vspace{2mm}\n\n");
@@ -178,7 +178,11 @@ fn group_section(
                     a.iso_week, a.iso_year,
                 ));
                 s.push_str(" & ");
-                s.push_str(&tex_esc(&a.week_label));
+                s.push_str(&tex_esc(&a.period_label));
+            } else if rows[i + offset - 1].shift != a.shift {
+                // A new shift within the same week: its own dates.
+                s.push_str(" & ");
+                s.push_str(&tex_esc(&a.period_label));
             } else {
                 // Blank week and date cells — visual merge with the row above.
                 s.push_str(" & ");
@@ -308,15 +312,15 @@ mod tests {
     #[test]
     fn tex_output_is_deterministic() {
         let st = make_state();
-        let sn1 = build_schedule(&st, 1, 4);
-        let sn2 = build_schedule(&st, 1, 4);
+        let sn1 = build_schedule(&st, 4);
+        let sn2 = build_schedule(&st, 4);
         assert_eq!(render_tex(&sn1), render_tex(&sn2));
     }
 
     #[test]
     fn tex_contains_group_name() {
         let st = make_state();
-        let sn = build_schedule(&st, 1, 2);
+        let sn = build_schedule(&st, 2);
         let tex = render_tex(&sn);
         assert!(
             tex.contains("Hallway"),
@@ -327,7 +331,7 @@ mod tests {
     #[test]
     fn tex_column_headers_are_english() {
         let st = make_state();
-        let sn = build_schedule(&st, 1, 2);
+        let sn = build_schedule(&st, 2);
         let tex = render_tex(&sn);
         assert!(
             tex.contains("Responsible"),
@@ -349,7 +353,7 @@ mod tests {
             g.member_ids.push(pid);
             st.cleaning_groups.push(g);
         }
-        let sn = build_schedule(&st, 1, 2);
+        let sn = build_schedule(&st, 2);
         let tex = render_tex(&sn);
         assert!(tex.contains("Floor A"));
         assert!(tex.contains("Floor B"));
@@ -373,7 +377,7 @@ mod tests {
     #[test]
     fn uses_longtable_not_tabularx() {
         let st = make_state();
-        let sn = build_schedule(&st, 1, 2);
+        let sn = build_schedule(&st, 2);
         let tex = render_tex(&sn);
         assert!(
             tex.contains("longtable"),

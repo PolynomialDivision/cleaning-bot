@@ -21,14 +21,13 @@ pub(crate) async fn cmd_swap(
     let sender_mxid = sender.as_str();
     let (cur_y, cur_w) = current_iso_week();
 
-    let (group_args, (year, week)) = match extract_week_arg(&args[1..]) {
-        Some(v) => v,
-        None => {
-            return Ok(Some(
-                "Usage: !swap @user [group] [slot] [week <1-53>]".into(),
-            ))
-        }
+    let Some(parsed) = extract_turn_args(&args[1..]) else {
+        return Ok(Some(
+            "Usage: !swap @user [group] [slot] [week <1-53>] [on <day>]".into(),
+        ));
     };
+    let group_args = parsed.rest.as_slice();
+    let (year, week) = parsed.week;
 
     if (year, week) < (cur_y, cur_w) {
         return Ok(Some(format!(
@@ -76,61 +75,77 @@ pub(crate) async fn cmd_swap(
         }
     };
     let group_id = group.id.clone();
-    let interval = ctx.config.schedule.interval_weeks;
 
-    // Slot: the sender's own slot that week (named, or the only one they hold).
-    let slot_index = if group.is_multi_slot() {
-        let held = held_tasks(&state, &group, &sender_person_id, year, week, interval);
-        let chosen = match slot_token {
-            Some(name) => held
-                .iter()
-                .find(|(_, slot)| slot.eq_ignore_ascii_case(name))
-                .map(|(i, _)| i.unwrap_or(0)),
-            None if held.len() == 1 => held[0].0,
-            None => None,
-        };
-        match chosen {
-            Some(i) => i,
-            None if held.is_empty() => {
-                return Ok(Some(format!(
-                    "You have no slot in «{}» in week {week} — nothing to swap.",
-                    group.name
-                )))
-            }
-            None => {
-                return Ok(Some(format!(
-                    "Name the slot to swap — yours in «{}» week {week}: {}\nUsage: !swap @user {} <slot> [week <N>]",
-                    group.name,
-                    held.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(", "),
-                    group.name
-                )))
-            }
-        }
-    } else {
-        if slot_token.is_some() {
-            return Ok(Some(format!("«{}» does not have slots.", group.name)));
-        }
-        0
+    // The sender's own open duties that week (optionally one slot / shift).
+    let turns = match turns_for(&state, &group, (year, week), parsed.day) {
+        Ok(t) => t,
+        Err(e) => return Ok(Some(e)),
     };
-
-    if !group.member_ids.contains(&sender_person_id)
-        && !holds_any_slot(&state, &group, &sender_person_id, year, week, interval)
-    {
-        return Ok(Some(format!("You are not a member of «{}».", group.name)));
+    if slot_token.is_some() && !group.is_multi_slot() {
+        return Ok(Some(format!("«{}» does not have slots.", group.name)));
     }
+    let held: Vec<Duty> = turns
+        .iter()
+        .flat_map(|t| {
+            state
+                .held_slots(&group, &sender_person_id, *t)
+                .into_iter()
+                .map(|slot_index| Duty {
+                    group: group.clone(),
+                    slot_index,
+                    turn: *t,
+                })
+        })
+        .filter(|d| !state.is_turn_slot_done(&group, d.slot_index, d.turn))
+        .collect();
+    let chosen: Vec<Duty> = held
+        .iter()
+        .filter(|d| {
+            slot_token.is_none_or(|name| {
+                group
+                    .slots
+                    .get(d.slot_index)
+                    .is_some_and(|s| s.name.eq_ignore_ascii_case(name))
+            })
+        })
+        .cloned()
+        .collect();
+    if chosen.is_empty() && !held.is_empty() {
+        return Ok(Some(format!(
+            "«{}» isn't yours in week {week} — yours: {}",
+            slot_token.unwrap_or_default(),
+            held.iter().map(Duty::label).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    let duty = match chosen.as_slice() {
+        [one] => one.clone(),
+        [] => {
+            return Ok(Some(format!(
+                "You have no open turn in «{}» in week {week} — nothing to swap.",
+                group.name
+            )))
+        }
+        many => {
+            return Ok(Some(format!(
+                "Which one? Yours in week {week}: {}\nName the slot and/or add `on <day>`: !swap @user {} [<slot>] [week <N>] [on <day>]",
+                many.iter().map(Duty::label).collect::<Vec<_>>().join(", "),
+                group.name
+            )))
+        }
+    };
+    let (slot_index, turn) = (duty.slot_index, duty.turn);
 
     let dupe = state.swap_requests.iter().any(|s| {
         s.group_id == group_id
             && s.slot_index == slot_index
-            && s.iso_year == year
-            && s.iso_week == week
+            && (s.iso_year, s.iso_week, s.shift) == (turn.year, turn.week, turn.shift)
             && s.status == SwapStatus::Pending
             && s.requester == sender_mxid
     });
     if dupe {
         return Ok(Some(format!(
-            "You already have a pending swap for «{}» week {week}.",
-            group.name
+            "You already have a pending swap for {}.",
+            duty.label()
         )));
     }
 
@@ -141,21 +156,19 @@ pub(crate) async fn cmd_swap(
         iso_year: year,
         iso_week: week,
         slot_index,
+        shift: turn.shift,
     })?;
     // The swap ID was allocated inside apply_event.
     let id = state.swap_requests.last().map(|s| s.id).unwrap_or(0);
     state.save(&ctx.state_path).await?;
 
-    let slot_suffix = group
-        .slots
-        .get(slot_index)
-        .map(|s| format!(" / {}", s.name))
-        .unwrap_or_default();
     Ok(Some(format!(
-        "🔄 Swap #{id} · «{}»{slot_suffix} week {week} ({})\n{target_mxid}: !swap accept {id} or !swap reject {id}",
-        group.name, week_dates(year, week)
+        "🔄 Swap #{id} · {} · week {week} ({})\n{target_mxid}: !swap accept {id} or !swap reject {id}",
+        duty.label(),
+        turn.period_label(&group.rhythm)
     )))
 }
+
 // ── !swap accept <id> ──────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_acceptswap(
@@ -185,17 +198,11 @@ pub(crate) async fn cmd_acceptswap(
     let iso_year = req.iso_year;
     let iso_week = req.iso_week;
     let slot_index = req.slot_index;
-    let interval = ctx.config.schedule.interval_weeks;
+    let turn = Turn::new(iso_year, iso_week, req.shift);
     let group = state.group_by_id(&group_id).cloned();
-    let slot = group
+    let already_done = group
         .as_ref()
-        .and_then(|g| g.slots.get(slot_index))
-        .cloned();
-
-    let already_done = match &slot {
-        Some(slot) => state.is_slot_completed(&group_id, &slot.id, iso_year, iso_week),
-        None => state.is_completed(&group_id, iso_year, iso_week),
-    };
+        .is_some_and(|g| state.is_turn_slot_done(g, slot_index, turn));
     if already_done {
         let group_name = state
             .group_by_id(&group_id)
@@ -230,13 +237,7 @@ pub(crate) async fn cmd_acceptswap(
     // instead of blindly overwriting it.
     let current_holder_id = group
         .as_ref()
-        .and_then(|g| {
-            if g.is_multi_slot() {
-                state.slot_assignee(g, slot_index, iso_year, iso_week, interval)
-            } else {
-                state.responsible_person(g, iso_year, iso_week, interval)
-            }
-        })
+        .and_then(|g| state.slot_assignee(g, slot_index, turn))
         .map(|p| p.id.clone());
     if current_holder_id.as_deref() != Some(requester_id.as_str()) {
         state.apply_event(DomainEvent::SwapRejected { swap_id: id })?;
@@ -260,6 +261,7 @@ pub(crate) async fn cmd_acceptswap(
         replacement_id: replacement_id.clone(),
         iso_year,
         iso_week,
+        shift: turn.shift,
     })?;
     // The swap-request bookkeeping above records *that* a swap happened; this
     // is what actually makes the target the responsible person — the same
@@ -271,6 +273,7 @@ pub(crate) async fn cmd_acceptswap(
         slot_index,
         iso_year,
         iso_week,
+        shift: turn.shift,
         person_id: Some(replacement_id),
         source: AssignmentSource::Swap,
         actor_id: Some(sender_mxid.to_owned()),
@@ -278,10 +281,18 @@ pub(crate) async fn cmd_acceptswap(
     })?;
     state.save(&ctx.state_path).await?;
 
-    let group_name = group.map(|g| g.name).unwrap_or_default();
-    let slot_suffix = slot.map(|s| format!(" / {}", s.name)).unwrap_or_default();
+    let what = group
+        .map(|group| {
+            Duty {
+                group,
+                slot_index,
+                turn,
+            }
+            .label()
+        })
+        .unwrap_or_default();
     Ok(Some(format!(
-        "✅ Swap #{id} accepted. {sender_mxid} will clean «{group_name}»{slot_suffix} in week {iso_week} instead of {requester}."
+        "✅ Swap #{id} accepted. {sender_mxid} will clean {what} in week {iso_week} instead of {requester}."
     )))
 }
 

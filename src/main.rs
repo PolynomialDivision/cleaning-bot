@@ -38,6 +38,7 @@ mod ical;
 mod pdf;
 mod pdf_renderer;
 mod resolver;
+mod rhythm;
 mod schedule;
 mod scheduler;
 mod state;
@@ -127,6 +128,19 @@ async fn send_join_greeting(ctx: &BotContext, room: &Room, user_id: &str, intro:
     }
 }
 
+/// Give every group without an explicit rhythm the old global
+/// `interval_weeks`. Returns whether anything changed.
+fn migrate_rhythms(state: &mut State, interval_weeks: u32) -> bool {
+    let mut changed = false;
+    for group in &mut state.cleaning_groups {
+        if group.rhythm.every_weeks.is_none() {
+            group.rhythm.every_weeks = Some(interval_weeks.max(1));
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn thread_reply(text: &str, root: OwnedEventId, reply_to: OwnedEventId) -> RoomMessageEventContent {
     in_thread(format::mentionify(text), root, reply_to)
 }
@@ -164,13 +178,14 @@ async fn main() -> Result<()> {
         st.save(&state_path).await?;
     }
 
-    // Materialize future assignments (idempotent — skips already-stored weeks).
+    // Groups from before per-group rhythms keep the old global interval.
+    if migrate_rhythms(&mut st, config.schedule.interval_weeks) {
+        st.save(&state_path).await?;
+    }
+
+    // Materialize future assignments (idempotent — skips already-stored turns).
     {
-        let mat_events = resolver::materialize(
-            &st,
-            config.schedule.interval_weeks,
-            config.schedule.materialize_weeks as usize,
-        );
+        let mat_events = resolver::materialize(&st, config.schedule.materialize_weeks as usize);
         let n = mat_events.len();
         for ev in mat_events {
             st.apply_event(ev).ok();
@@ -205,9 +220,8 @@ async fn main() -> Result<()> {
     if let Some(ref ical_cfg) = config.ical_server {
         let bind_addr = ical_cfg.bind_addr.clone();
         let state_clone = state.clone();
-        let config_clone = Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(e) = http::run(state_clone, config_clone, &bind_addr).await {
+            if let Err(e) = http::run(state_clone, &bind_addr).await {
                 error!("iCal HTTP server error: {e}");
             }
         });
@@ -429,9 +443,8 @@ async fn main() -> Result<()> {
                 if emoji_key != "✅" { return; }
 
                 let mut state = ctx.state.lock().await;
-                let interval = ctx.config.schedule.interval_weeks;
 
-                // ── Consolidated weekly plan / final-reminder reaction ─────────
+                // ── Consolidated weekly plan reaction ─────────────────────────
                 if let Some((plan_year, plan_week)) = state.weekly_plan_event_ids.get(&reacted_to).copied() {
                     let new_pid = uuid::Uuid::new_v4().to_string();
                     if let Err(e) = state.apply_event(analytics::DomainEvent::PersonCreated {
@@ -443,25 +456,14 @@ async fn main() -> Result<()> {
                     let sender_person_id = state.person_by_matrix_id(&sender_mxid)
                         .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
 
-                    let groups_to_mark: Vec<_> = state.cleaning_groups.iter()
-                        .filter(|g| state.is_due(&g.id, plan_year, plan_week, interval))
-                        .filter(|g| {
-                            if g.is_multi_slot() {
-                                g.slots.iter().enumerate().any(|(i, _)|
-                                    state.slot_assignee(g, i, plan_year, plan_week, interval)
-                                        .is_some_and(|p| p.id == sender_person_id)
-                                )
-                            } else {
-                                state.responsible_person(g, plan_year, plan_week, interval)
-                                    .is_some_and(|p| p.id == sender_person_id)
-                            }
-                        })
-                        .cloned()
-                        .collect();
-
+                    // The sender's own open turns of that week that have
+                    // started (or the next one) — same rule as `!done`.
+                    let duties = commands::markable_duties(
+                        &state, &sender_person_id, (plan_year, plan_week), None,
+                    );
                     let root_eid = ev.content.relates_to.event_id.clone();
 
-                    if groups_to_mark.is_empty() {
+                    if duties.is_empty() {
                         drop(state);
                         if let Some(r) = client.get_room(&ctx.room_id) {
                             r.send(thread_reply(
@@ -472,50 +474,15 @@ async fn main() -> Result<()> {
                         return;
                     }
 
-                    let mut reaction_done: Option<ReactionDone> = None;
-                    for group in &groups_to_mark {
-                        if group.is_multi_slot() {
-                            for (slot_idx, slot) in group.slots.iter().enumerate() {
-                                if state.is_slot_completed(&group.id, &slot.id, plan_year, plan_week) { continue; }
-                                if state.slot_assignee(group, slot_idx, plan_year, plan_week, interval)
-                                    .is_some_and(|p| p.id == sender_person_id)
-                                {
-                                    state.apply_event(analytics::DomainEvent::CleaningCompleted {
-                                        group_id: group.id.clone(), slot_id: Some(slot.id.clone()),
-                                        person_id: sender_person_id.clone(),
-                                        responsible_person_ids: vec![sender_person_id.clone()],
-                                        iso_year: plan_year, iso_week: plan_week,
-                                    }).ok();
-                                    reaction_done.get_or_insert_with(|| ReactionDone {
-                                        group_id:        group.id.clone(),
-                                        completed_by_id: sender_person_id.clone(),
-                                        iso_year:        plan_year,
-                                        iso_week:        plan_week,
-                                    });
-                                }
-                            }
-                        } else {
-                            if state.is_completed(&group.id, plan_year, plan_week) { continue; }
-                            let resp_ids = state.responsible_person(group, plan_year, plan_week, interval)
-                                .map(|p| vec![p.id.clone()]).unwrap_or_default();
-                            state.apply_event(analytics::DomainEvent::CleaningCompleted {
-                                group_id: group.id.clone(), slot_id: None,
-                                person_id: sender_person_id.clone(),
-                                responsible_person_ids: resp_ids,
-                                iso_year: plan_year, iso_week: plan_week,
-                            }).ok();
-                            reaction_done.get_or_insert_with(|| ReactionDone {
-                                group_id:        group.id.clone(),
-                                completed_by_id: sender_person_id.clone(),
-                                iso_year:        plan_year,
-                                iso_week:        plan_week,
-                            });
-                        }
+                    if let Err(e) = commands::mark_duties_done(&mut state, &sender_person_id, &duties) {
+                        tracing::error!("Marking plan reaction done failed: {e}");
                     }
-
-                    if let Some(rd) = reaction_done {
-                        state.reaction_dones.insert(ev.event_id.to_string(), rd);
-                    }
+                    state.reaction_dones.insert(ev.event_id.to_string(), ReactionDone {
+                        group_id: duties[0].group.id.clone(),
+                        completed_by_id: sender_person_id.clone(),
+                        iso_year: plan_year,
+                        iso_week: plan_week,
+                    });
                     if let Err(e) = state.save(&ctx.state_path).await {
                         tracing::error!("Failed to save after plan reaction: {e}");
                     }

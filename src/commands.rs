@@ -22,9 +22,10 @@ use crate::{
         PersonId,
     },
     format, resolver,
+    rhythm::{parse_weekday, Turn},
     schedule::build_schedule,
     scheduler,
-    state::{add_weeks, current_iso_week, week_dates, weeks_between, SwapStatus},
+    state::{add_weeks, current_iso_week, week_dates, SwapStatus},
     BotContext,
 };
 
@@ -190,6 +191,7 @@ pub async fn handle(
         ("!groups", Some("weight")) => cmd_weight(ctx, sender, rest).await,
         ("!groups", Some("slot")) => cmd_groups_slot(ctx, sender, rest).await,
         ("!groups", Some("room")) => cmd_groups_room(ctx, sender, rest).await,
+        ("!groups", Some("rhythm")) => cmd_groups_rhythm(ctx, sender, rest).await,
         ("!groups", Some(_)) => cmd_groups(ctx, Some(&args.join(" "))).await,
         ("!validate", _) => cmd_validate(ctx, sender).await,
 
@@ -288,6 +290,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
             _ => with_sub(args[0], joined(rest)),
         },
         ("!groups", Some("add" | "enable" | "disable")) => with_sub(args[0], joined(rest)),
+        ("!groups", Some("rhythm")) => with_sub(args[0], group_first(state, rest, 0)),
         ("!groups", Some("slot" | "room")) if !rest.is_empty() => {
             let mut out = vec![args[0].to_owned(), rest[0].to_owned()];
             let tail = group_first(state, &rest[1..], 1);
@@ -347,8 +350,8 @@ fn help_text() -> String {
 !groups · all groups and their members
 !plan [N] · the next N weeks (default 6)
 !next [person] · when is your next turn?
-!takeover [group] [slot] [week N] · take a task over yourself
-!swap @user [group] [slot] [week N] · ask someone to swap · !swap accept|reject <id>
+!takeover [group] [slot] [week N] [on <day>] · take a turn over yourself
+!swap @user [group] [slot] [week N] [on <day>] · ask someone to swap · !swap accept|reject <id>
 !join <group> · !leave <group>
 !stats [person | group | fairness | load]
 !ical [N] · calendar feed of your turns · !ical reset
@@ -368,17 +371,18 @@ fn admin_help_text() -> String {
 !member back <person>
 
 **This week & plan**
-!plan skip [group] [slot] · excuse this week (not counted as missed)
+!plan skip [group] [slot] [on <day>] · excuse this week (not counted as missed)
 !plan remind [group] · send the reminder now
 !plan announce · (re)post and pin this week's plan
-!plan assign <group> [slot] <person> [week N]
-!plan unassign <group> [slot] [week N]
+!plan assign <group> [slot] <person> [week N] [on <day>]
+!plan unassign <group> [slot] [week N] [on <day>]
 !plan reset <group> · redistribute future weeks from the rotation
-!plan import [--replace] <YYYY-Www> <group>[/slot] <person> [; …]
+!plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
 !plan pdf [N] [group] · printable plan
 
 **Groups**
-!groups <group> · details: turn order, slots, rooms, weights
+!groups <group> · details: rhythm, turn order, slots, rooms, weights
+!groups rhythm <group> weekly | 2x | every 2 | mon thu · how often it is cleaned
 !groups add|enable|disable <group>
 !groups remove <group> [confirm] · deletes it with its history
 !groups slot add|remove <group> <slot>

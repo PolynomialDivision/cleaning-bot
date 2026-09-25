@@ -12,9 +12,9 @@
 
 use crate::{
     domain::{assignment_uid, slot_assignment_uid, GroupId, PersonId, SlotId},
-    state::{add_weeks, current_iso_week, week_dates, weeks_between, State},
+    state::{add_weeks, current_iso_week, State},
 };
-use chrono::{NaiveDate, Utc, Weekday};
+use chrono::{NaiveDate, Utc};
 
 // ── Sub-types ─────────────────────────────────────────────────────────────────
 
@@ -40,10 +40,18 @@ pub struct AssignmentInstance {
     pub room_names: Vec<String>,
     pub iso_year: i32,
     pub iso_week: u32,
-    pub week_monday: NaiveDate,
-    pub week_sunday: NaiveDate,
-    /// Pre-formatted "1–7 Jun" style string.
-    pub week_label: String,
+    /// Shift within the week (see `rhythm`).
+    #[allow(dead_code)]
+    pub shift: u8,
+    /// First and last day of the turn.
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+    /// "22 – 28 Sep", or "Thu–Sun 25 – 28 Sep" for a shift.
+    pub period_label: String,
+    /// "Mon–Wed" for a group split into shifts, else `None`.
+    pub shift_label: Option<String>,
+    /// The group's rhythm, e.g. "weekly" or "2× per week (Mon–Wed, Thu–Sun)".
+    pub rhythm: String,
     /// `None` means the group/slot exists but has no members this cycle.
     pub assignee: Option<PersonDetails>,
     pub is_completed: bool,
@@ -78,7 +86,6 @@ pub struct ScheduleSnapshot {
     /// Timestamp from state.last_modified (or state.created_at).
     /// Deterministic for unchanged state — used as DTSTAMP in ICS.
     pub state_timestamp: chrono::DateTime<Utc>,
-    pub interval_weeks: u32,
     pub assignments: Vec<AssignmentInstance>,
 }
 
@@ -133,137 +140,86 @@ impl ScheduleSnapshot {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 
-/// Build a deterministic schedule snapshot covering the next `weeks` due cycles.
-///
-/// Starting point is the first due week >= today, aligned to `state.tracking_start()`
-/// by stepping `interval_weeks` at a time.
+/// Build a deterministic schedule snapshot of the next `weeks` calendar
+/// weeks (from the current one): every turn of every active group in that
+/// range — each group in its own rhythm, one entry per slot of each turn —
+/// ordered by turn start, then group.
 ///
 /// Does NOT mutate state. Reads completions for status, then returns a fully
 /// resolved, immutable snapshot.
-pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSnapshot {
-    let (cur_y, cur_w) = current_iso_week();
-    let (start_y, start_w) = state.tracking_start();
-    let iv = interval as i64;
+pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
+    let first = current_iso_week();
+    let last = add_weeks(first.0, first.1, weeks.max(1) as i64 - 1);
+    let mut assignments = Vec::new();
 
-    // First due week >= current week.
-    let elapsed = weeks_between((start_y, start_w), (cur_y, cur_w));
-    let first_due = if elapsed < 0 {
-        (start_y, start_w)
-    } else {
-        let past = elapsed / iv;
-        if elapsed % iv == 0 {
-            (cur_y, cur_w)
-        } else {
-            add_weeks(start_y, start_w, (past + 1) * iv)
-        }
-    };
-
-    let mut assignments = Vec::with_capacity(weeks * state.cleaning_groups.len());
-
-    for i in 0..(weeks as i64) {
-        let (dy, dw) = add_weeks(first_due.0, first_due.1, i * iv);
-        let monday = NaiveDate::from_isoywd_opt(dy, dw, Weekday::Mon)
-            .unwrap_or_else(|| NaiveDate::from_ymd_opt(dy, 1, 4).unwrap());
-        let sunday = monday + chrono::Duration::days(6);
-
-        for group in state.cleaning_groups.iter().filter(|g| g.is_active) {
-            if group.is_multi_slot() {
-                // Emit one AssignmentInstance per slot.
-                for (slot_idx, slot) in group.slots.iter().enumerate() {
-                    let assignee =
-                        state
-                            .slot_assignee(group, slot_idx, dy, dw, interval)
-                            .map(|p| PersonDetails {
-                                id: p.id.clone(),
-                                name: p.display_name.clone(),
-                                mxid: p.matrix_id.clone(),
-                            });
-                    let person_part = assignee.as_ref().map(|p| p.id.as_str()).unwrap_or("none");
-                    let uid = slot_assignment_uid(&group.id, &slot.id, dy, dw, person_part);
-
-                    let completion = state.completions.iter().find(|c| {
-                        c.group_id == group.id
-                            && c.slot_id.as_deref() == Some(&slot.id)
-                            && c.iso_year == dy
-                            && c.iso_week == dw
-                    });
-                    let is_completed = completion.is_some();
-                    let is_skipped = completion.map(|c| c.skipped).unwrap_or(false);
-                    let completed_by = completion
-                        .and_then(|c| state.person_by_id(&c.completed_by_id))
-                        .map(|p| p.display_name.clone());
-                    let completed_at = completion
-                        .filter(|c| !c.skipped)
-                        .map(|c| c.completed_at.date_naive());
-
-                    assignments.push(AssignmentInstance {
-                        uid,
-                        group_id: group.id.clone(),
-                        group_name: group.name.clone(),
-                        slot_id: Some(slot.id.clone()),
-                        slot_name: Some(slot.name.clone()),
-                        room_names: slot.room_names.clone(),
-                        iso_year: dy,
-                        iso_week: dw,
-                        week_monday: monday,
-                        week_sunday: sunday,
-                        week_label: week_dates(dy, dw),
-                        assignee,
-                        is_completed,
-                        is_skipped,
-                        completed_by,
-                        completed_at,
-                    });
-                }
-            } else {
-                // Single-slot: existing behaviour.
+    for group in state.cleaning_groups.iter().filter(|g| g.is_active) {
+        for turn in state.turns_between(group, first, last) {
+            let (start, end) = turn.dates(&group.rhythm);
+            for slot_index in State::slot_indices(group) {
+                let slot = group.slots.get(slot_index);
                 let assignee =
                     state
-                        .responsible_person(group, dy, dw, interval)
+                        .slot_assignee(group, slot_index, turn)
                         .map(|p| PersonDetails {
                             id: p.id.clone(),
                             name: p.display_name.clone(),
                             mxid: p.matrix_id.clone(),
                         });
                 let person_part = assignee.as_ref().map(|p| p.id.as_str()).unwrap_or("none");
-                let uid = assignment_uid(&group.id, dy, dw, person_part);
+                // Whole-week turns keep the UID they always had, so existing
+                // calendar subscriptions don't see every event replaced.
+                let uid = match (slot, turn.shift) {
+                    (Some(slot), 0) => {
+                        slot_assignment_uid(&group.id, &slot.id, turn.year, turn.week, person_part)
+                    }
+                    (None, 0) => assignment_uid(&group.id, turn.year, turn.week, person_part),
+                    (slot, shift) => slot_assignment_uid(
+                        &group.id,
+                        &format!("{}#{shift}", slot.map_or("", |s| s.id.as_str())),
+                        turn.year,
+                        turn.week,
+                        person_part,
+                    ),
+                };
 
-                let completion = state.completions.iter().find(|c| {
-                    c.group_id == group.id
-                        && c.slot_id.is_none()
-                        && c.iso_year == dy
-                        && c.iso_week == dw
-                });
-                let is_completed = completion.is_some();
-                let is_skipped = completion.map(|c| c.skipped).unwrap_or(false);
-                let completed_by = completion
-                    .and_then(|c| state.person_by_id(&c.completed_by_id))
-                    .map(|p| p.display_name.clone());
-                let completed_at = completion
-                    .filter(|c| !c.skipped)
-                    .map(|c| c.completed_at.date_naive());
-
+                let completion = state.completion_for(group, slot_index, turn);
                 assignments.push(AssignmentInstance {
                     uid,
                     group_id: group.id.clone(),
                     group_name: group.name.clone(),
-                    slot_id: None,
-                    slot_name: None,
-                    room_names: group.room_names.clone(),
-                    iso_year: dy,
-                    iso_week: dw,
-                    week_monday: monday,
-                    week_sunday: sunday,
-                    week_label: week_dates(dy, dw),
+                    slot_id: slot.map(|s| s.id.clone()),
+                    slot_name: slot.map(|s| s.name.clone()),
+                    room_names: slot
+                        .map_or_else(|| group.room_names.clone(), |s| s.room_names.clone()),
+                    iso_year: turn.year,
+                    iso_week: turn.week,
+                    shift: turn.shift,
+                    start,
+                    end,
+                    period_label: turn.period_label(&group.rhythm),
+                    shift_label: turn.shift_label(&group.rhythm),
+                    rhythm: group.rhythm.describe(),
                     assignee,
-                    is_completed,
-                    is_skipped,
-                    completed_by,
-                    completed_at,
+                    is_completed: completion.is_some(),
+                    is_skipped: completion.is_some_and(|c| c.skipped),
+                    completed_by: completion
+                        .and_then(|c| state.person_by_id(&c.completed_by_id))
+                        .map(|p| p.display_name.clone()),
+                    completed_at: completion
+                        .filter(|c| !c.skipped)
+                        .map(|c| c.completed_at.date_naive()),
                 });
             }
         }
     }
+    let order: Vec<&GroupId> = state.cleaning_groups.iter().map(|g| &g.id).collect();
+    assignments.sort_by_key(|a| {
+        (
+            a.start,
+            order.iter().position(|id| **id == a.group_id),
+            a.slot_name.clone(),
+        )
+    });
 
     // Use state timestamp for deterministic DTSTAMP in ICS.
     let state_timestamp = state
@@ -273,7 +229,6 @@ pub fn build_schedule(state: &State, interval: u32, weeks: usize) -> ScheduleSna
 
     ScheduleSnapshot {
         state_timestamp,
-        interval_weeks: interval,
         assignments,
     }
 }
@@ -305,8 +260,8 @@ mod tests {
     #[test]
     fn snapshot_is_deterministic() {
         let st = simple_state();
-        let s1 = build_schedule(&st, 1, 4);
-        let s2 = build_schedule(&st, 1, 4);
+        let s1 = build_schedule(&st, 4);
+        let s2 = build_schedule(&st, 4);
 
         assert_eq!(s1.assignments.len(), s2.assignments.len());
         for (a, b) in s1.assignments.iter().zip(s2.assignments.iter()) {
@@ -320,16 +275,16 @@ mod tests {
     #[test]
     fn uid_is_stable_across_rebuilds() {
         let st = simple_state();
-        let s1 = build_schedule(&st, 1, 2);
-        let s2 = build_schedule(&st, 1, 2);
+        let s1 = build_schedule(&st, 2);
+        let s2 = build_schedule(&st, 2);
         assert_eq!(s1.assignments[0].uid, s2.assignments[0].uid);
     }
 
     #[test]
     fn state_timestamp_is_deterministic() {
         let st = simple_state();
-        let s1 = build_schedule(&st, 1, 2);
-        let s2 = build_schedule(&st, 1, 2);
+        let s1 = build_schedule(&st, 2);
+        let s2 = build_schedule(&st, 2);
         assert_eq!(s1.state_timestamp, s2.state_timestamp);
     }
 
@@ -339,7 +294,7 @@ mod tests {
         st.created_at = Some(Utc::now());
         st.cleaning_groups.push(CleaningGroup::new("EmptyGroup"));
 
-        let snap = build_schedule(&st, 1, 1);
+        let snap = build_schedule(&st, 1);
         assert_eq!(snap.assignments.len(), 1);
         assert!(snap.assignments[0].assignee.is_none());
     }
@@ -347,7 +302,7 @@ mod tests {
     #[test]
     fn for_person_filters_correctly() {
         let st = simple_state();
-        let snap = build_schedule(&st, 1, 4);
+        let snap = build_schedule(&st, 4);
         let person_id = st.persons[0].id.clone();
         let filtered = snap.for_person(&person_id);
         assert_eq!(

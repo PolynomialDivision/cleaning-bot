@@ -18,9 +18,8 @@ pub(crate) async fn cmd_cleanplan(
 
     let (snapshot, is_empty) = {
         let state = ctx.state.lock().await;
-        let interval = ctx.config.schedule.interval_weeks;
         let empty = state.cleaning_groups.is_empty();
-        (build_schedule(&state, interval, n), empty)
+        (build_schedule(&state, n), empty)
     };
 
     if is_empty {
@@ -57,13 +56,12 @@ pub(crate) async fn cmd_cleanplan(
     let uid_refs: Vec<&str> = all_mxids.iter().map(String::as_str).collect();
     let names = format::fetch_names(room, &uid_refs).await;
 
-    let interval = snapshot.interval_weeks;
     let (cur_y, cur_w) = current_iso_week();
+    let today = crate::state::today();
 
     let mut lines = vec![format!(
-        "📅 **Cleaning plan** · next {n} week{} · every {interval} week{}",
-        if n == 1 { "" } else { "s" },
-        if interval == 1 { "" } else { "s" }
+        "📅 **Cleaning plan** · next {n} week{}",
+        if n == 1 { "" } else { "s" }
     )];
 
     for (dy, dw) in snapshot.weeks() {
@@ -80,7 +78,7 @@ pub(crate) async fn cmd_cleanplan(
         for a in snapshot.for_group_in_week(dy, dw) {
             let icon = if a.is_completed {
                 "✅"
-            } else if is_cur {
+            } else if a.start <= today {
                 "🔲"
             } else {
                 "🗓"
@@ -108,7 +106,13 @@ pub(crate) async fn cmd_cleanplan(
                     }
                 }
             };
-            lines.push(format!("  {icon} {} : {detail}", a.group_name));
+            let what = match (&a.slot_name, &a.shift_label) {
+                (Some(slot), Some(shift)) => format!("{} / {slot} · {shift}", a.group_name),
+                (Some(slot), None) => format!("{} / {slot}", a.group_name),
+                (None, Some(shift)) => format!("{} · {shift}", a.group_name),
+                (None, None) => a.group_name.clone(),
+            };
+            lines.push(format!("  {icon} {what} : {detail}"));
         }
     }
 
@@ -155,8 +159,7 @@ pub(crate) async fn cmd_pdf(
 
     let (tex, file_name) = {
         let state = ctx.state.lock().await;
-        let interval = ctx.config.schedule.interval_weeks;
-        let mut snapshot = build_schedule(&state, interval, n);
+        let mut snapshot = build_schedule(&state, n);
         if let Some(ref name) = group_filter {
             match state.group_by_name(name) {
                 Some(g) => {
@@ -330,8 +333,7 @@ pub(crate) async fn cmd_ical(
     // Fallback: generate and upload as a Matrix file attachment.
     let ical_data = {
         let state = ctx.state.lock().await;
-        let interval = ctx.config.schedule.interval_weeks;
-        let snapshot = build_schedule(&state, interval, weeks);
+        let snapshot = build_schedule(&state, weeks);
         crate::ical::render_ics(&snapshot, &person_id)
     };
 
