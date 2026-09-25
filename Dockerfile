@@ -23,24 +23,27 @@ WORKDIR /build
 FROM chef AS planner
 COPY . .
 # git cache needed: Cargo.toml patches point at the PolynomialDivision fork
-RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git,sharing=private \
+    --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry,sharing=private \
     cargo chef prepare --recipe-path recipe.json
 
 # ── Builder ───────────────────────────────────────────────────────────────────
 FROM chef AS builder
+# Cargo only locks its registry/git caches within one container, so builds
+# running in parallel (build-bots.sh -j) get private copies of those caches
+# instead of racing while unpacking crates. sccache stays shared.
 COPY --from=planner /build/recipe.json recipe.json
 
 # Cook deps only — this layer is invalidated ONLY when Cargo.lock changes.
-RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git,sharing=private \
+    --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry,sharing=private \
     --mount=type=cache,id=shared-sccache,target=/sccache \
     --mount=type=cache,id=cleaning-bot-target,target=/build/target \
     cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
-RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git,sharing=private \
+    --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry,sharing=private \
     --mount=type=cache,id=shared-sccache,target=/sccache \
     --mount=type=cache,id=cleaning-bot-target,target=/build/target \
     cargo build --release && \
