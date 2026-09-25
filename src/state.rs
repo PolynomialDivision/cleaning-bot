@@ -174,17 +174,12 @@ pub struct State {
 
 impl State {
     pub async fn load(path: &Path) -> Result<Self> {
-        if tokio::fs::metadata(path).await.is_ok() {
-            let s = tokio::fs::read_to_string(path).await?;
-            let mut st: Self = serde_json::from_str(&s)?;
-            // Backfill event log from existing data on first load after upgrade.
-            if st.event_log.is_empty() && !st.completions.is_empty() {
-                st.event_log = crate::analytics::backfill_events(&st);
-            }
-            Ok(st)
-        } else {
-            Ok(Self::default())
+        let mut st: Self = mxbot_common::persist::load_json_or_default(path).await?;
+        // Backfill event log from existing data on first load after upgrade.
+        if st.event_log.is_empty() && !st.completions.is_empty() {
+            st.event_log = crate::analytics::backfill_events(&st);
         }
+        Ok(st)
     }
 
     /// Apply a domain event: mutate state **and** append to the event log.
@@ -719,10 +714,7 @@ impl State {
 
     pub async fn save(&mut self, path: &Path) -> Result<()> {
         self.last_modified = Some(Utc::now());
-        let tmp = path.with_extension("tmp");
-        tokio::fs::write(&tmp, serde_json::to_string_pretty(self)?).await?;
-        tokio::fs::rename(&tmp, path).await?;
-        Ok(())
+        mxbot_common::persist::save_json_atomic(path, self).await
     }
 
     pub fn alloc_id(&mut self) -> u64 {

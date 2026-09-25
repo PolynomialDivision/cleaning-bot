@@ -1,4 +1,4 @@
-pub use mxbot_common::config::{EncryptionStrategy, MatrixConfig, VerificationConfig};
+pub use mxbot_common::config::{MatrixConfig, SecurityConfig};
 use serde::Deserialize;
 
 /// Strategy used by the slot resolver to fill empty assignments.
@@ -18,20 +18,6 @@ pub struct Config {
     pub schedule: ScheduleConfig,
     /// If set, enables the HTTP iCal feed server.
     pub ical_server: Option<ICalServerConfig>,
-}
-
-#[derive(Deserialize, Default)]
-pub struct SecurityConfig {
-    /// Matrix user IDs allowed to invite the bot.
-    #[serde(default)]
-    pub allowed_inviters: Vec<String>,
-    /// Matrix user IDs that can run admin commands (!adduser, !removeuser, …).
-    #[serde(default)]
-    pub admin_users: Vec<String>,
-    #[serde(default)]
-    pub encryption_strategy: EncryptionStrategy,
-    #[serde(default)]
-    pub verification: VerificationConfig,
 }
 
 #[derive(Deserialize)]

@@ -1,27 +1,29 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
-use anyhow::{Context, Result};
-use matrix_sdk::{
-    config::SyncSettings,
-    ruma::{
-        api::client::filter::FilterDefinition,
-        events::{
-            reaction::{OriginalSyncReactionEvent, ReactionEventContent},
-            relation::{Annotation, Thread},
-            room::{
-                member::{MembershipState, OriginalSyncRoomMemberEvent, StrippedRoomMemberEvent},
-                message::{
-                    MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
+use anyhow::Result;
+use mxbot_common::{
+    admin::Dispatch,
+    matrix_sdk::{
+        deserialized_responses::EncryptionInfo,
+        ruma::{
+            events::{
+                reaction::{OriginalSyncReactionEvent, ReactionEventContent},
+                relation::Annotation,
+                room::{
+                    member::{MembershipState, OriginalSyncRoomMemberEvent},
+                    message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+                    redaction::OriginalSyncRoomRedactionEvent,
                 },
-                redaction::OriginalSyncRoomRedactionEvent,
             },
+            OwnedEventId, OwnedRoomId, OwnedUserId,
         },
-        OwnedEventId, OwnedRoomId, OwnedServerName, OwnedUserId, RoomOrAliasId,
+        Client, Room, RoomState,
     },
-    Client, Room, RoomState,
+    send::{in_thread, thread_root},
+    Bot,
 };
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 mod analytics;
 mod commands;
@@ -39,7 +41,6 @@ mod state;
 mod validate;
 
 use config::Config;
-use mxbot_common::verify::VerificationService;
 use state::{GreetingChoice, GreetingInfo, ReactionDone, State};
 
 /// Send the group-selection step of the greeting.
@@ -123,18 +124,8 @@ async fn send_join_greeting(ctx: &BotContext, room: &Room, user_id: &str, intro:
     }
 }
 
-fn add_thread_relation(
-    content: &mut RoomMessageEventContent,
-    root: OwnedEventId,
-    reply_to: OwnedEventId,
-) {
-    content.relates_to = Some(Relation::Thread(Thread::reply(root, reply_to)));
-}
-
 fn thread_reply(text: &str, root: OwnedEventId, reply_to: OwnedEventId) -> RoomMessageEventContent {
-    let mut content = format::mentionify(text);
-    add_thread_relation(&mut content, root, reply_to);
-    content
+    in_thread(format::mentionify(text), root, reply_to)
 }
 
 #[derive(Clone)]
@@ -148,21 +139,10 @@ pub struct BotContext {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "cleaning_bot=info,matrix_sdk=warn".parse().unwrap()),
-        )
-        .init();
+    mxbot_common::logging::init("cleaning_bot");
 
-    let config_path = std::env::args()
-        .find(|a| a.ends_with(".toml"))
-        .unwrap_or_else(|| "config.toml".to_owned());
-    let config: Config = toml::from_str(
-        &std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Reading config {config_path}"))?,
-    )
-    .context("Parsing config")?;
+    let config: Config =
+        mxbot_common::config::load_toml(&mxbot_common::config::config_path_from_args())?;
     let config = Arc::new(config);
 
     // Must happen before any `current_iso_week()` call (materialize below,
@@ -171,8 +151,7 @@ async fn main() -> Result<()> {
     // ticks.
     state::set_timezone(config.schedule.timezone.parse().unwrap_or(chrono_tz::UTC));
 
-    let store_path =
-        PathBuf::from(std::env::var("STORE_PATH").unwrap_or_else(|_| "store".to_owned()));
+    let store_path = mxbot_common::config::store_path_from_env();
     tokio::fs::create_dir_all(&store_path).await?;
 
     let state_path = store_path.join("state.json");
@@ -216,19 +195,8 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(Mutex::new(st));
 
-    let admin_users: HashSet<OwnedUserId> = config
-        .security
-        .admin_users
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let allowed_inviters: HashSet<String> =
-        config.security.allowed_inviters.iter().cloned().collect();
-    let room_id: OwnedRoomId = config
-        .schedule
-        .room_id
-        .parse()
-        .context("Invalid room_id in [schedule]")?;
+    let room_id =
+        mxbot_common::rooms::parse_room_id("[schedule] room_id", &config.schedule.room_id)?;
 
     // ── Optional HTTP iCal server ─────────────────────────────────────────────
     if let Some(ref ical_cfg) = config.ical_server {
@@ -242,77 +210,46 @@ async fn main() -> Result<()> {
         });
     }
 
-    let (client, bot_user_id) = mxbot_common::session::build_and_restore(
-        &config.matrix,
-        &store_path,
-        config.security.encryption_strategy.clone().into(),
-    )
-    .await?;
+    let bot = Bot::builder("cleaning-bot", env!("CARGO_PKG_VERSION"))
+        .store_path(&store_path)
+        .admin_help("Any admin command of the cleaning plan (!help lists them), e.g. !adduser, !assign, !resetplan")
+        .start(&config.matrix, &config.security)
+        .await?;
+    let client = bot.client.clone();
+    let bot_user_id = bot.user_id.clone();
 
-    let verification = VerificationService::allowlisted_tofu_from_config(
-        client.clone(),
-        &config.security.verification,
-        &config.security.allowed_inviters,
-    );
-    verification.install_handlers();
     let ctx = BotContext {
         state: state.clone(),
         state_path,
         config: Arc::clone(&config),
-        admin_users,
+        admin_users: bot.admins().clone(),
         room_id: room_id.clone(),
     };
-
-    // ── Invite handler ────────────────────────────────────────────────────────
-    client.add_event_handler({
-        let allowed_inviters = allowed_inviters.clone();
-        let bot_user_id = bot_user_id.clone();
-        move |ev: StrippedRoomMemberEvent, room: Room, client: Client| {
-            let allowed_inviters = allowed_inviters.clone();
-            let bot_user_id = bot_user_id.clone();
-            async move {
-                if ev.state_key != bot_user_id {
-                    return;
-                }
-                if !allowed_inviters.is_empty() && !allowed_inviters.contains(ev.sender.as_str()) {
-                    warn!("Rejecting invite from {}", ev.sender);
-                    room.leave().await.ok();
-                    return;
-                }
-                let room_id = room.room_id().to_owned();
-                let mut via: Vec<OwnedServerName> = vec![ev.sender.server_name().to_owned()];
-                if let Some(s) = room_id.server_name() {
-                    let s = s.to_owned();
-                    if !via.contains(&s) {
-                        via.push(s);
-                    }
-                }
-                if let Ok(roa) = RoomOrAliasId::parse(room_id.as_str()) {
-                    if let Err(e) = client.join_room_by_id_or_alias(&roa, &via).await {
-                        warn!("Join failed: {e}");
-                    }
-                }
-            }
-        }
-    });
 
     // ── Message / command handler ─────────────────────────────────────────────
     client.add_event_handler({
         let ctx = ctx.clone();
-        let bot_user_id = bot_user_id.clone();
-        let verification = verification.clone();
-        move |ev: OriginalSyncRoomMessageEvent, room: Room, client: Client| {
+        let bot = bot.clone();
+        move |ev: OriginalSyncRoomMessageEvent,
+              room: Room,
+              client: Client,
+              encryption: Option<EncryptionInfo>| {
             let ctx = ctx.clone();
-            let bot_user_id = bot_user_id.clone();
-            let verification = verification.clone();
+            let bot = bot.clone();
             async move {
-                if ev.sender == bot_user_id {
+                if ev.sender == bot.user_id {
                     return;
                 }
                 if room.state() != RoomState::Joined {
                     return;
                 }
-                if room.room_id() != ctx.room_id {
+                // Admin commands sent in a direct chat are answered there.
+                let admin_dm = match bot.admin.handle(&room, &ev, encryption.as_ref()).await {
+                    Dispatch::Handled => return,
+                    Dispatch::AdminDm => true,
+                    Dispatch::Continue => false,
+                };
+                if !admin_dm && room.room_id() != ctx.room_id {
                     return;
                 }
 
@@ -329,19 +266,10 @@ async fn main() -> Result<()> {
                     return;
                 }
 
-                let thread_root = match &ev.content.relates_to {
-                    Some(Relation::Thread(t)) => t.event_id.clone(),
-                    _ => ev.event_id.clone(),
-                };
+                let thread_root = thread_root(&ev);
 
                 let mut replies: Vec<RoomMessageEventContent> = Vec::new();
                 for line in cmd_lines {
-                    if verification
-                        .handle_admin_command(&ev.sender, &ctx.admin_users, line)
-                        .await
-                    {
-                        continue;
-                    }
                     match commands::handle(
                         &ctx,
                         &ev.sender,
@@ -361,7 +289,12 @@ async fn main() -> Result<()> {
                     }
                 }
                 if !replies.is_empty() {
-                    if let Some(r) = client.get_room(&ctx.room_id) {
+                    let target = if admin_dm {
+                        Some(room.clone())
+                    } else {
+                        client.get_room(&ctx.room_id)
+                    };
+                    if let Some(r) = target {
                         let mut content = if replies.len() == 1 {
                             replies.remove(0)
                         } else {
@@ -378,7 +311,9 @@ async fn main() -> Result<()> {
                                 .join("\n\n");
                             format::mentionify(&joined)
                         };
-                        add_thread_relation(&mut content, thread_root, ev.event_id.clone());
+                        if !admin_dm {
+                            content = in_thread(content, thread_root, ev.event_id.clone());
+                        }
                         r.send(content).await.ok();
                     }
                 }
@@ -754,10 +689,7 @@ async fn main() -> Result<()> {
     });
 
     // ── Initial sync ──────────────────────────────────────────────────────────
-    client
-        .sync_once(SyncSettings::default().filter(FilterDefinition::with_lazy_loading().into()))
-        .await
-        .context("Initial sync failed")?;
+    bot.initial_sync().await;
     info!("Initial sync complete");
 
     // Self-heal the current week's plan message against persisted state
@@ -768,13 +700,5 @@ async fn main() -> Result<()> {
 
     tokio::spawn(scheduler::run(ctx, client.clone()));
 
-    loop {
-        match client.sync(SyncSettings::default()).await {
-            Ok(()) => warn!("Sync loop exited — reconnecting"),
-            Err(e) => {
-                warn!("Sync error: {e} — reconnecting in 5s");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            }
-        }
-    }
+    bot.sync_forever().await
 }

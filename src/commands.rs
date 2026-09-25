@@ -12,6 +12,7 @@ use matrix_sdk::{
     },
     Room,
 };
+use mxbot_common::matrix_sdk;
 use uuid::Uuid;
 
 use crate::{
@@ -4021,13 +4022,14 @@ async fn cmd_ical(
         let state = ctx.state.lock().await;
         match args.first() {
             None => {
-                let pid =
-                    match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
-                        Some(id) => id,
-                        None => return Ok(Some(format::mentionify(&format!(
+                let pid = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+                    Some(id) => id,
+                    None => {
+                        return Ok(Some(format::mentionify(&format!(
                             "You ({sender_mxid}) are not registered. Ask an admin to use !adduser."
-                        )))),
-                    };
+                        ))))
+                    }
+                };
                 (pid, 26)
             }
             Some(first) => {

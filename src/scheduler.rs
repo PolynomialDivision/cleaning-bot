@@ -12,6 +12,7 @@ use matrix_sdk::{
     },
     Client, Room,
 };
+use mxbot_common::matrix_sdk;
 use tracing::{error, info, warn};
 
 use crate::{
