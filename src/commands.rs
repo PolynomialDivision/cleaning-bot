@@ -53,7 +53,9 @@ use stats::*;
 use swaps::*;
 
 /// Shell-like tokenizer: splits on whitespace but keeps "quoted strings" together.
-/// Quotes are stripped from the resulting tokens.
+/// Quotes are stripped from the resulting tokens. Straight and typographic
+/// double quotes (as phone keyboards insert them) both work; an apostrophe
+/// is just a letter, so names like `Nick's` stay intact.
 /// Example: `!groups room add "2. Stock" "Scharni Toilette"` → ["!groups", "room", "add", "2. Stock", "Scharni Toilette"]
 fn tokenize(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -61,7 +63,7 @@ fn tokenize(line: &str) -> Vec<String> {
     let mut quoted = false;
     for c in line.chars() {
         match c {
-            '"' | '\'' => quoted = !quoted,
+            '"' | '“' | '”' | '„' => quoted = !quoted,
             ' ' | '\t' if !quoted => {
                 if !cur.is_empty() {
                     tokens.push(std::mem::take(&mut cur));
@@ -112,6 +114,14 @@ pub async fn handle(
             }
         }
     }
+
+    // Multi-word group/person names work without quotes: regroup the tokens
+    // so each name is a single argument before any command sees them.
+    let normalized = {
+        let state = ctx.state.lock().await;
+        normalize_args(&state, cmd, &args)
+    };
+    let args: Vec<&str> = normalized.iter().map(String::as_str).collect();
 
     let sub = args.first().map(|a| a.to_ascii_lowercase());
     let sub = sub.as_deref();
@@ -201,6 +211,128 @@ pub async fn handle(
     }
 }
 
+// ── argument normalization ────────────────────────────────────────────────────
+
+fn joined(args: &[&str]) -> Vec<String> {
+    if args.is_empty() {
+        Vec::new()
+    } else {
+        vec![args.join(" ")]
+    }
+}
+
+/// `<group …> rest…`: the longest leading run of tokens that names a group
+/// becomes one token, leaving at least `min_rest` tokens after it.
+fn group_first(state: &crate::state::State, args: &[&str], min_rest: usize) -> Vec<String> {
+    for n in (2..=args.len().saturating_sub(min_rest)).rev() {
+        if let Some(group) = state.group_by_name(&args[..n].join(" ")) {
+            let mut out = vec![group.name.clone()];
+            out.extend(args[n..].iter().map(|a| a.to_string()));
+            return out;
+        }
+    }
+    args.iter().map(|a| a.to_string()).collect()
+}
+
+/// `<person …> <group …>`: the longest trailing run naming a group becomes
+/// one token, everything before it the person.
+fn person_then_group(state: &crate::state::State, args: &[&str]) -> Vec<String> {
+    for start in 1..args.len() {
+        if let Some(group) = state.group_by_name(&args[start..].join(" ")) {
+            return vec![args[..start].join(" "), group.name.clone()];
+        }
+    }
+    args.iter().map(|a| a.to_string()).collect()
+}
+
+/// `<person …> [N]`: a trailing number stays separate.
+fn person_then_number(args: &[&str]) -> Vec<String> {
+    match args.split_last() {
+        Some((last, head)) if !head.is_empty() && last.parse::<u32>().is_ok() => {
+            vec![head.join(" "), last.to_string()]
+        }
+        _ => joined(args),
+    }
+}
+
+/// Regroup the tokens of one command so multi-word names need no quotes.
+/// Quoted input still works — it simply already arrives as one token.
+pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&str]) -> Vec<String> {
+    let owned = |a: &[&str]| a.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let with_sub = |sub: &str, rest: Vec<String>| {
+        let mut out = vec![sub.to_owned()];
+        out.extend(rest);
+        out
+    };
+    let sub = args.first().map(|a| a.to_ascii_lowercase());
+    let rest = args.get(1..).unwrap_or_default();
+    match (cmd, sub.as_deref()) {
+        ("!done" | "!undo" | "!next" | "!join" | "!leave", _) => joined(args),
+        ("!takeover", _) => group_first(state, args, 0),
+        ("!swap", Some("accept" | "reject")) => owned(args),
+        ("!swap", Some(_)) => {
+            let mut out = vec![args[0].to_owned()];
+            out.extend(group_first(state, rest, 0));
+            out
+        }
+        ("!stats", Some("fairness")) => with_sub(args[0], joined(rest)),
+        ("!stats", _) => joined(args),
+        ("!ical", Some("reset")) => with_sub(args[0], joined(rest)),
+        ("!ical", _) => person_then_number(args),
+        ("!groups", Some("remove")) => match rest.split_last() {
+            Some((last, head)) if !head.is_empty() && last.eq_ignore_ascii_case("confirm") => {
+                let mut out = with_sub(args[0], joined(head));
+                out.push(last.to_string());
+                out
+            }
+            _ => with_sub(args[0], joined(rest)),
+        },
+        ("!groups", Some("add" | "enable" | "disable")) => with_sub(args[0], joined(rest)),
+        ("!groups", Some("slot" | "room")) if !rest.is_empty() => {
+            let mut out = vec![args[0].to_owned(), rest[0].to_owned()];
+            let tail = group_first(state, &rest[1..], 1);
+            if sub.as_deref() == Some("slot") {
+                // <group> <slot name …>
+                out.extend(tail.first().cloned());
+                out.extend(joined(
+                    &tail.iter().skip(1).map(String::as_str).collect::<Vec<_>>(),
+                ));
+            } else {
+                out.extend(tail);
+            }
+            out
+        }
+        ("!groups", Some("weight")) => match rest.split_last() {
+            // <group …> [room …] <factor>
+            Some((factor, head)) if !head.is_empty() => {
+                let head = group_first(state, head, 0);
+                let mut out = vec![args[0].to_owned(), head[0].clone()];
+                out.extend(joined(
+                    &head[1..].iter().map(String::as_str).collect::<Vec<_>>(),
+                ));
+                out.push(factor.to_string());
+                out
+            }
+            _ => owned(args),
+        },
+        ("!groups", Some(_)) => joined(args),
+        ("!plan", Some("skip" | "assign" | "unassign")) => {
+            with_sub(args[0], group_first(state, rest, 0))
+        }
+        ("!plan", Some("remind" | "reset")) => with_sub(args[0], joined(rest)),
+        ("!member", Some("add" | "remove")) => with_sub(args[0], person_then_group(state, rest)),
+        ("!member", Some("away")) => with_sub(args[0], person_then_number(rest)),
+        ("!member", Some("back")) => with_sub(args[0], joined(rest)),
+        ("!member", Some("link")) => match rest.split_last() {
+            Some((mxid, head)) if !head.is_empty() => {
+                vec![args[0].to_owned(), head.join(" "), mxid.to_string()]
+            }
+            _ => owned(args),
+        },
+        _ => owned(args),
+    }
+}
+
 // ── help ─────────────────────────────────────────────────────────────────────
 
 const PLAN_USAGE: &str = "Usage: !plan [N] | !plan assign|unassign|skip|remind|announce|pdf|reset|import … (see !help admin)";
@@ -216,7 +348,7 @@ fn help_text() -> String {
 !plan [N] · the next N weeks (default 6)
 !next [person] · when is your next turn?
 !takeover [group] [slot] [week N] · take a task over yourself
-!swap @user [group] [week N] · ask someone to swap · !swap accept|reject <id>
+!swap @user [group] [slot] [week N] · ask someone to swap · !swap accept|reject <id>
 !join <group> · !leave <group>
 !stats [person | group | fairness | load]
 !ical [N] · calendar feed of your turns · !ical reset
@@ -236,7 +368,7 @@ fn admin_help_text() -> String {
 !member back <person>
 
 **This week & plan**
-!plan skip [group] · excuse this week (not counted as missed)
+!plan skip [group] [slot] · excuse this week (not counted as missed)
 !plan remind [group] · send the reminder now
 !plan announce · (re)post and pin this week's plan
 !plan assign <group> [slot] <person> [week N]
@@ -247,7 +379,8 @@ fn admin_help_text() -> String {
 
 **Groups**
 !groups <group> · details: turn order, slots, rooms, weights
-!groups add|remove|enable|disable <group>
+!groups add|enable|disable <group>
+!groups remove <group> [confirm] · deletes it with its history
 !groups slot add|remove <group> <slot>
 !groups room add|remove <group> [slot] <room>
 !groups weight <group> [room] <factor>

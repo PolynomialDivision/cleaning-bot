@@ -159,6 +159,9 @@ pub enum DomainEvent {
         skipper_id: PersonId,
         iso_year: i32,
         iso_week: u32,
+        /// Only this slot; `None` = every open slot of the group.
+        #[serde(default)]
+        slot_id: Option<SlotId>,
     },
     CleaningUndone {
         group_id: GroupId,
@@ -176,6 +179,9 @@ pub enum DomainEvent {
         target_mxid: String,
         iso_year: i32,
         iso_week: u32,
+        /// Slot being swapped in a group with slots (0 otherwise).
+        #[serde(default)]
+        slot_index: usize,
     },
     SwapApproved {
         swap_id: u64,
@@ -248,6 +254,7 @@ pub fn backfill_events(state: &State) -> Vec<LoggedEvent> {
                 skipper_id: c.completed_by_id.clone(),
                 iso_year: c.iso_year,
                 iso_week: c.iso_week,
+                slot_id: c.slot_id.clone(),
             }
         } else {
             DomainEvent::CleaningCompleted {
@@ -313,15 +320,17 @@ pub struct PersonStats {
     pub display_name: String,
     /// Comma-joined names of all groups this person belongs to.
     pub group_names: String,
-    /// Closed (past) due weeks in the analysis range.
+    /// Their own past turns (assigned slots/weeks), excluding skipped ones.
     pub due_weeks: u32,
-    /// Weeks this person actually cleaned.
+    /// Own turns they cleaned themselves.
     pub completed: u32,
-    /// Weeks any of their groups were marked skipped.
+    /// Own turns that were marked skipped.
     pub skipped: u32,
-    /// Due weeks with no completion and no skip — genuinely missed.
+    /// Own turns nobody cleaned — genuinely missed.
     pub missed: u32,
-    /// completed / (due_weeks − skipped), or 1.0 when no effective duty.
+    /// Cleanings they did for someone else's turn.
+    pub helped: u32,
+    /// completed / due_weeks, or 1.0 when they had no turn yet.
     pub completion_rate: f64,
     /// Swaps they initiated (handed their duty to someone else).
     pub swaps_given: u32,
@@ -330,7 +339,7 @@ pub struct PersonStats {
     /// Total weeks marked absent (across all groups).
     #[allow(dead_code)]
     pub absent_weeks: u32,
-    /// Current consecutive-completed streak for their primary group.
+    /// Consecutive most recent own turns they cleaned themselves.
     pub streak: u32,
 }
 
@@ -474,7 +483,7 @@ pub struct WorkloadReport {
 /// Compute statistics for one person across all their groups.
 ///
 /// Returns `None` if the person is not registered or not in any group.
-pub fn person_stats(state: &State, person_id: &PersonId, interval: u32) -> Option<PersonStats> {
+pub fn person_stats(state: &State, person_id: &PersonId) -> Option<PersonStats> {
     let person = state.person_by_id(person_id)?;
     let groups: Vec<_> = state
         .groups_for_person(person_id)
@@ -484,43 +493,95 @@ pub fn person_stats(state: &State, person_id: &PersonId, interval: u32) -> Optio
     if groups.is_empty() {
         return None;
     }
+    let current = current_iso_week();
 
-    let (cur_y, cur_w) = current_iso_week();
-    let start = state.tracking_start();
-    let all_due = all_due_weeks_in_range(start, (cur_y, cur_w), interval);
-    let closed: Vec<_> = all_due
-        .iter()
-        .copied()
-        .filter(|&(y, w)| (y, w) != (cur_y, cur_w))
-        .collect();
-    let due_weeks = closed.len() as u32;
-
-    // Completions where this person was the one who cleaned.
-    let completed = state
-        .completions
-        .iter()
-        .filter(|c| c.completed_by_id == *person_id && !c.skipped)
-        .count() as u32;
-
-    // Skipped weeks in any of their groups.
-    let skipped = closed
-        .iter()
-        .filter(|(y, w)| {
-            groups.iter().any(|g| {
-                state.completions.iter().any(|c| {
-                    c.group_id == g.id && c.iso_year == *y && c.iso_week == *w && c.skipped
-                })
-            })
+    // One turn = one (group, slot, week) this person was responsible for,
+    // from the frozen plan, plus older completions that recorded them as
+    // responsible. The running week only counts once it is finished.
+    let completion_for = |group_id: &GroupId, slot_id: Option<&str>, year: i32, week: u32| {
+        state.completions.iter().find(|c| {
+            &c.group_id == group_id
+                && (c.iso_year, c.iso_week) == (year, week)
+                && (slot_id.is_none() || c.slot_id.as_deref() == slot_id)
         })
-        .count() as u32;
+    };
+    let mut turns: Vec<(GroupId, Option<String>, i32, u32)> = Vec::new();
+    for a in &state.slot_assignments {
+        if a.person_id.as_deref() != Some(person_id.as_str()) {
+            continue;
+        }
+        let Some(group) = state.group_by_id(&a.group_id).filter(|g| g.is_active) else {
+            continue;
+        };
+        let slot_id = if group.is_multi_slot() {
+            match group.slots.get(a.slot_index) {
+                Some(slot) => Some(slot.id.clone()),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        turns.push((a.group_id.clone(), slot_id, a.iso_year, a.iso_week));
+    }
+    for c in &state.completions {
+        if !c.responsible_person_ids.contains(person_id) {
+            continue;
+        }
+        let known = turns.iter().any(|(g, slot, y, w)| {
+            g == &c.group_id
+                && (*y, *w) == (c.iso_year, c.iso_week)
+                && (slot.is_none() || slot.as_deref() == c.slot_id.as_deref())
+        });
+        let active = state.group_by_id(&c.group_id).is_some_and(|g| g.is_active);
+        if !known && active {
+            turns.push((
+                c.group_id.clone(),
+                c.slot_id.clone(),
+                c.iso_year,
+                c.iso_week,
+            ));
+        }
+    }
+    turns.retain(|(g, slot, y, w)| {
+        (*y, *w) < current
+            || ((*y, *w) == current && completion_for(g, slot.as_deref(), *y, *w).is_some())
+    });
+    turns.sort_by_key(|(_, _, y, w)| (*y, *w));
 
-    let effective_due = due_weeks.saturating_sub(skipped);
-    let missed = effective_due.saturating_sub(completed);
-    let completion_rate = if effective_due > 0 {
-        (completed as f64 / effective_due as f64).min(1.0)
+    let (mut completed, mut skipped, mut missed, mut streak) = (0u32, 0u32, 0u32, 0u32);
+    for (g, slot, y, w) in &turns {
+        match completion_for(g, slot.as_deref(), *y, *w) {
+            Some(c) if c.skipped => skipped += 1,
+            Some(c) if c.completed_by_id == *person_id => {
+                completed += 1;
+                streak += 1;
+            }
+            Some(_) => streak = 0,
+            None => {
+                missed += 1;
+                streak = 0;
+            }
+        }
+    }
+    let due_weeks = turns.len() as u32 - skipped;
+    let completion_rate = if due_weeks > 0 {
+        completed as f64 / due_weeks as f64
     } else {
         1.0
     };
+    // Cleanings of weeks/slots that were not their own turn.
+    let helped = state
+        .completions
+        .iter()
+        .filter(|c| c.completed_by_id == *person_id && !c.skipped)
+        .filter(|c| {
+            !turns.iter().any(|(g, slot, y, w)| {
+                g == &c.group_id
+                    && (*y, *w) == (c.iso_year, c.iso_week)
+                    && (slot.is_none() || slot.as_deref() == c.slot_id.as_deref())
+            })
+        })
+        .count() as u32;
 
     let mxid = person.matrix_id.as_deref().unwrap_or("");
     let swaps_given = state
@@ -539,10 +600,6 @@ pub fn person_stats(state: &State, person_id: &PersonId, interval: u32) -> Optio
         .filter(|a| a.person_id == *person_id)
         .map(|a| a.duration_weeks)
         .sum();
-
-    let primary_group = groups[0];
-    let streak = state.streak_for(&primary_group.id, interval);
-
     let group_names = groups
         .iter()
         .map(|g| g.name.as_str())
@@ -557,6 +614,7 @@ pub fn person_stats(state: &State, person_id: &PersonId, interval: u32) -> Optio
         completed,
         skipped,
         missed,
+        helped,
         completion_rate,
         swaps_given,
         swaps_taken,
@@ -868,16 +926,21 @@ pub fn workload_report(state: &State, interval: u32) -> WorkloadReport {
 /// All persons with stats, sorted by completion rate then streak.
 ///
 /// Only includes persons who belong to at least one group.
-pub fn global_leaderboard(state: &State, interval: u32) -> Vec<PersonStats> {
+pub fn global_leaderboard(state: &State) -> Vec<PersonStats> {
     let mut all: Vec<PersonStats> = state
         .persons
         .iter()
-        .filter_map(|p| person_stats(state, &p.id, interval))
+        .filter_map(|p| person_stats(state, &p.id))
         .collect();
+    // People without a finished turn yet have nothing to rank — list them last.
     all.sort_by(|a, b| {
-        b.completion_rate
-            .partial_cmp(&a.completion_rate)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        (b.due_weeks > 0)
+            .cmp(&(a.due_weeks > 0))
+            .then(
+                b.completion_rate
+                    .partial_cmp(&a.completion_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
             .then(b.streak.cmp(&a.streak))
             .then(a.display_name.cmp(&b.display_name))
     });

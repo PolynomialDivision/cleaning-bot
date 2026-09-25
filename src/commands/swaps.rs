@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ── !swap @target [group] [week N] ───────────────────────────────────────────
+// ── !swap @target [group] [slot] [week N] ─────────────────────────────────────
 
 pub(crate) async fn cmd_swap(
     ctx: &BotContext,
@@ -11,7 +11,7 @@ pub(crate) async fn cmd_swap(
 ) -> Result<Option<String>> {
     let target_mxid = match args.first() {
         Some(t) => *t,
-        None => return Ok(Some("Usage: !swap @user [group] [week <N>]".into())),
+        None => return Ok(Some("Usage: !swap @user [group] [slot] [week <N>]".into())),
     };
     if !target_mxid.starts_with('@') {
         return Ok(Some(
@@ -23,7 +23,11 @@ pub(crate) async fn cmd_swap(
 
     let (group_args, (year, week)) = match extract_week_arg(&args[1..]) {
         Some(v) => v,
-        None => return Ok(Some("Usage: !swap @user [group] [week <1-53>]".into())),
+        None => {
+            return Ok(Some(
+                "Usage: !swap @user [group] [slot] [week <1-53>]".into(),
+            ))
+        }
     };
 
     if (year, week) < (cur_y, cur_w) {
@@ -43,49 +47,81 @@ pub(crate) async fn cmd_swap(
         None => return Ok(Some(format!("You ({sender_mxid}) are not registered."))),
     };
 
-    let group_id = if let Some(name) = group_args.first() {
-        match state.group_by_name(name) {
-            Some(g) => g.id.clone(),
-            None => return Ok(Some(format!("Group «{name}» not found."))),
-        }
-    } else {
-        match state
-            .groups_for_person(&sender_person_id)
-            .first()
-            .map(|g| g.id.clone())
-        {
-            Some(id) => id,
-            None => {
-                return Ok(Some(
-                    "You are not in any group. Specify: !swap @user <group>".into(),
-                ))
+    // Group: named, or else the sender's own group — not guessed among several.
+    let (group, slot_token) = match group_args.first() {
+        Some(&first) if state.group_by_name(first).is_some() => (
+            state.group_by_name(first).unwrap().clone(),
+            group_args.get(1).copied(),
+        ),
+        first => {
+            let own: Vec<CleaningGroup> = state
+                .groups_for_person(&sender_person_id)
+                .into_iter()
+                .cloned()
+                .collect();
+            match own.as_slice() {
+                [] => {
+                    return Ok(Some(
+                        "You are not in any group. Specify: !swap @user <group>".into(),
+                    ))
+                }
+                [g] => (g.clone(), first.copied()),
+                many => {
+                    return Ok(Some(format!(
+                        "You are in several groups — name one: {}\nUsage: !swap @user <group> [<slot>] [week <N>]",
+                        many.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
+                    )))
+                }
             }
         }
     };
+    let group_id = group.id.clone();
+    let interval = ctx.config.schedule.interval_weeks;
 
-    let group = match state.group_by_id(&group_id) {
-        Some(g) => g.clone(),
-        None => return Ok(Some("Group not found.".into())),
+    // Slot: the sender's own slot that week (named, or the only one they hold).
+    let slot_index = if group.is_multi_slot() {
+        let held = held_tasks(&state, &group, &sender_person_id, year, week, interval);
+        let chosen = match slot_token {
+            Some(name) => held
+                .iter()
+                .find(|(_, slot)| slot.eq_ignore_ascii_case(name))
+                .map(|(i, _)| i.unwrap_or(0)),
+            None if held.len() == 1 => held[0].0,
+            None => None,
+        };
+        match chosen {
+            Some(i) => i,
+            None if held.is_empty() => {
+                return Ok(Some(format!(
+                    "You have no slot in «{}» in week {week} — nothing to swap.",
+                    group.name
+                )))
+            }
+            None => {
+                return Ok(Some(format!(
+                    "Name the slot to swap — yours in «{}» week {week}: {}\nUsage: !swap @user {} <slot> [week <N>]",
+                    group.name,
+                    held.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(", "),
+                    group.name
+                )))
+            }
+        }
+    } else {
+        if slot_token.is_some() {
+            return Ok(Some(format!("«{}» does not have slots.", group.name)));
+        }
+        0
     };
 
-    // !swap/!swap accept only ever write slot_index 0 (see cmd_acceptswap) —
-    // fine for single-slot groups, but silently wrong for multi-slot ones
-    // (it would overwrite whichever slot happens to be first, not the one
-    // the requester actually holds). Point at the slot-aware commands instead.
-    if group.is_multi_slot() {
-        return Ok(Some(format!(
-            "«{}» has multiple slots — !swap doesn't support slot selection. \
-             Use !takeover {} <slot> or ask an admin for !plan assign instead.",
-            group.name, group.name
-        )));
-    }
-
-    if !group.member_ids.contains(&sender_person_id) {
+    if !group.member_ids.contains(&sender_person_id)
+        && !holds_any_slot(&state, &group, &sender_person_id, year, week, interval)
+    {
         return Ok(Some(format!("You are not a member of «{}».", group.name)));
     }
 
     let dupe = state.swap_requests.iter().any(|s| {
         s.group_id == group_id
+            && s.slot_index == slot_index
             && s.iso_year == year
             && s.iso_week == week
             && s.status == SwapStatus::Pending
@@ -104,17 +140,22 @@ pub(crate) async fn cmd_swap(
         target_mxid: target_mxid.to_owned(),
         iso_year: year,
         iso_week: week,
+        slot_index,
     })?;
     // The swap ID was allocated inside apply_event.
     let id = state.swap_requests.last().map(|s| s.id).unwrap_or(0);
     state.save(&ctx.state_path).await?;
 
+    let slot_suffix = group
+        .slots
+        .get(slot_index)
+        .map(|s| format!(" / {}", s.name))
+        .unwrap_or_default();
     Ok(Some(format!(
-        "🔄 Swap #{id} · «{}» week {week} ({})\n{target_mxid}: !swap accept {id} or !swap reject {id}",
+        "🔄 Swap #{id} · «{}»{slot_suffix} week {week} ({})\n{target_mxid}: !swap accept {id} or !swap reject {id}",
         group.name, week_dates(year, week)
     )))
 }
-
 // ── !swap accept <id> ──────────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_acceptswap(
@@ -143,9 +184,19 @@ pub(crate) async fn cmd_acceptswap(
     let group_id = req.group_id.clone();
     let iso_year = req.iso_year;
     let iso_week = req.iso_week;
+    let slot_index = req.slot_index;
+    let interval = ctx.config.schedule.interval_weeks;
+    let group = state.group_by_id(&group_id).cloned();
+    let slot = group
+        .as_ref()
+        .and_then(|g| g.slots.get(slot_index))
+        .cloned();
 
-    // A swap is only single-slot-group aware today, same as !swap itself.
-    if state.is_completed(&group_id, iso_year, iso_week) {
+    let already_done = match &slot {
+        Some(slot) => state.is_slot_completed(&group_id, &slot.id, iso_year, iso_week),
+        None => state.is_completed(&group_id, iso_year, iso_week),
+    };
+    if already_done {
         let group_name = state
             .group_by_id(&group_id)
             .map(|g| g.name.clone())
@@ -159,10 +210,17 @@ pub(crate) async fn cmd_acceptswap(
         .person_by_matrix_id(&requester)
         .map(|p| p.id.clone())
         .unwrap_or_else(|| requester.clone());
+    // PersonCreated is idempotent — the accepter must exist as a person to
+    // be assigned (same self-registration as !takeover).
+    state.apply_event(DomainEvent::PersonCreated {
+        person_id: Uuid::new_v4().to_string(),
+        display_name: sender_mxid.to_owned(),
+        matrix_id: Some(sender_mxid.to_owned()),
+    })?;
     let replacement_id = state
         .person_by_matrix_id(sender_mxid)
         .map(|p| p.id.clone())
-        .unwrap_or_else(|| sender_mxid.to_owned());
+        .expect("accepter was just registered");
 
     // The requester may no longer actually hold this week's assignment —
     // they could have left the group, or an admin/!takeover could have
@@ -170,11 +228,15 @@ pub(crate) async fn cmd_acceptswap(
     // silently hand the week to `sender` at the expense of whoever holds it
     // now, without their consent, so refuse and cancel the stale request
     // instead of blindly overwriting it.
-    let interval = ctx.config.schedule.interval_weeks;
-    let group = state.group_by_id(&group_id).cloned();
     let current_holder_id = group
         .as_ref()
-        .and_then(|g| state.responsible_person(g, iso_year, iso_week, interval))
+        .and_then(|g| {
+            if g.is_multi_slot() {
+                state.slot_assignee(g, slot_index, iso_year, iso_week, interval)
+            } else {
+                state.responsible_person(g, iso_year, iso_week, interval)
+            }
+        })
         .map(|p| p.id.clone());
     if current_holder_id.as_deref() != Some(requester_id.as_str()) {
         state.apply_event(DomainEvent::SwapRejected { swap_id: id })?;
@@ -206,7 +268,7 @@ pub(crate) async fn cmd_acceptswap(
     // even though the week was already materialized before the swap.
     state.apply_event(DomainEvent::SlotAssigned {
         group_id: group_id.clone(),
-        slot_index: 0,
+        slot_index,
         iso_year,
         iso_week,
         person_id: Some(replacement_id),
@@ -216,12 +278,10 @@ pub(crate) async fn cmd_acceptswap(
     })?;
     state.save(&ctx.state_path).await?;
 
-    let group_name = state
-        .group_by_id(&group_id)
-        .map(|g| g.name.clone())
-        .unwrap_or_default();
+    let group_name = group.map(|g| g.name).unwrap_or_default();
+    let slot_suffix = slot.map(|s| format!(" / {}", s.name)).unwrap_or_default();
     Ok(Some(format!(
-        "✅ Swap #{id} accepted. {sender_mxid} will clean «{group_name}» instead of {requester}."
+        "✅ Swap #{id} accepted. {sender_mxid} will clean «{group_name}»{slot_suffix} in week {iso_week} instead of {requester}."
     )))
 }
 

@@ -526,17 +526,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Nothing else reacts to a bare ✅: `reminder_event_ids`
-                // (the pre-consolidated-plan per-group reminders) has had no
-                // writer since the weekly-plan/`weekly_plan_event_ids` model
-                // replaced it, so any surviving entry only refers to a
-                // message from a long-past week. Resolving it against
-                // `current_iso_week()` — the only week it could ever be
-                // checked against, since the mapping never recorded which
-                // week the reminder was actually for — would silently mark
-                // *today's* week done from a reaction on an old message
-                // instead. Left unhandled, it's inert; the field stays for
-                // old `state.json` compatibility.
             }
         }
     });
@@ -694,6 +683,16 @@ async fn main() -> Result<()> {
     // ── Initial sync ──────────────────────────────────────────────────────────
     bot.initial_sync().await;
     info!("Initial sync complete");
+
+    // Show real Matrix display names in !status/!groups right away instead
+    // of Matrix usernames until each person sends their first command.
+    if let Some(room) = client.get_room(&ctx.room_id) {
+        commands::refresh_display_names(&ctx, &room).await;
+        let mut state = ctx.state.lock().await;
+        if let Err(e) = state.save(&ctx.state_path).await {
+            error!("Failed to save refreshed display names: {e}");
+        }
+    }
 
     // Self-heal the current week's plan message against persisted state
     // before the scheduler loop (or any further event handling) starts, so

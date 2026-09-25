@@ -958,6 +958,9 @@ fn command_may_change_current_plan_includes_importplan() {
         ("!plan", Some("unassign")),
         ("!plan", Some("reset")),
         ("!plan", Some("import")),
+        ("!groups", Some("disable")),
+        ("!groups", Some("enable")),
+        ("!member", Some("away")),
     ] {
         assert!(
             command_may_change_current_plan(cmd, sub),
@@ -972,6 +975,8 @@ fn command_may_change_current_plan_includes_importplan() {
         ("!plan", Some("6")),
         ("!swap", Some("@bob:example.org")),
         ("!groups", None),
+        ("!groups", Some("2nd floor")),
+        ("!member", Some("add")),
         ("", None),
     ] {
         assert!(
@@ -2862,27 +2867,51 @@ async fn explicit_group_and_slot_syntax_still_works_for_multi_slot_groups() {
 // ── Production-audit regression tests ────────────────────────────────
 
 #[tokio::test]
-async fn swap_is_refused_for_multi_slot_groups_instead_of_silently_targeting_slot_zero() {
-    // !acceptswap always writes slot_index 0 (it predates slots). For a
-    // multi-slot group that would silently overwrite whichever slot
-    // happens to be first, not the one the requester actually holds —
-    // so !swap must refuse up front rather than let that happen.
-    let (state, group_id, ..) = multi_slot_group_matrix();
+async fn swap_in_a_group_with_slots_moves_only_the_requesters_slot() {
+    // Alice holds Kitchen, Bob holds Bath this week. Alice swaps with Carla:
+    // Carla must get Kitchen — never Bath, and Bob's slot stays his.
+    let (mut state, group_id, _aid, bid, ..) = multi_slot_group_matrix();
+    let carla = Person::new_matrix("@carla:example.org");
+    let carla_id = carla.id.clone();
+    state.persons.push(carla);
     let (ctx, path, _admin) = test_context(state);
     let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
+    let carla = OwnedUserId::try_from("@carla:example.org").unwrap();
+    let (year, week) = current_iso_week();
 
-    let reply = cmd_swap(&ctx, &alice, &["@bob:example.org", "Floor"])
+    let reply = cmd_swap(&ctx, &alice, &["@carla:example.org", "Floor"])
         .await
         .unwrap()
         .unwrap();
-    assert!(reply.contains("multiple slots"), "{reply}");
+    assert!(reply.contains("Floor» / Kitchen"), "{reply}");
+    // Naming a slot Alice doesn't hold is refused.
+    let wrong = cmd_swap(&ctx, &alice, &["@carla:example.org", "Floor", "Bath"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(wrong.contains("Name the slot"), "{wrong}");
+
+    let id = ctx.state.lock().await.swap_requests[0].id.to_string();
+    let accepted = cmd_acceptswap(&ctx, &carla, &[id.as_str()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(accepted.contains("Kitchen"), "{accepted}");
 
     let state = ctx.state.lock().await;
-    assert!(
-        state.swap_requests.is_empty(),
-        "no swap request should be created for a multi-slot group"
+    let group = state.group_by_id(&group_id).unwrap().clone();
+    assert_eq!(
+        state
+            .slot_assignee(&group, 0, year, week, 1)
+            .map(|p| p.id.clone()),
+        Some(carla_id)
     );
-    let _ = group_id;
+    assert_eq!(
+        state
+            .slot_assignee(&group, 1, year, week, 1)
+            .map(|p| p.id.clone()),
+        Some(bid)
+    );
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -3454,4 +3483,215 @@ fn help_is_short_and_admin_help_is_separate() {
     assert!(help.contains("!groups"));
     assert!(!help.contains("!plan assign"));
     assert!(admin_help_text().contains("!plan assign"));
+}
+
+// ── Follow-up fixes: !next, names, deletion, stats, slots, away ──────────────
+
+fn freeze(
+    state: &mut State,
+    group_id: &GroupId,
+    slot_index: usize,
+    (year, week): (i32, u32),
+    person: &PersonId,
+) {
+    state.slot_assignments.push(SlotAssignment {
+        group_id: group_id.clone(),
+        slot_index,
+        iso_year: year,
+        iso_week: week,
+        person_id: Some(person.clone()),
+        source: Default::default(),
+    });
+}
+
+#[tokio::test]
+async fn next_names_the_persons_own_turn_not_just_the_next_due_week() {
+    let (mut state, group_id, alice_id, bob_id) = rotation_state();
+    let (y, w) = current_iso_week();
+    freeze(&mut state, &group_id, 0, (y, w), &alice_id);
+    freeze(&mut state, &group_id, 0, add_weeks(y, w, 1), &bob_id);
+    let (ctx, path, _admin) = test_context(state);
+    let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
+    let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
+
+    let reply = cmd_next(&ctx, &bob, &[]).await.unwrap().unwrap();
+    assert!(reply.contains("next week"), "{reply}");
+    let reply = cmd_next(&ctx, &alice, &[]).await.unwrap().unwrap();
+    assert!(reply.contains("this week"), "{reply}");
+
+    cmd_done(&ctx, &alice, &[]).await.unwrap();
+    let reply = cmd_next(&ctx, &alice, &[]).await.unwrap().unwrap();
+    assert!(!reply.contains("this week"), "{reply}");
+    assert!(reply.contains("Already done: 2nd Floor"), "{reply}");
+
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn apostrophes_are_letters_and_typographic_quotes_group_words() {
+    assert_eq!(
+        tokenize("!member add Nick's \u{201c}2nd Floor\u{201d}"),
+        ["!member", "add", "Nick's", "2nd Floor"]
+    );
+    assert_eq!(
+        tokenize("!groups add \"Dach Boden\""),
+        ["!groups", "add", "Dach Boden"]
+    );
+}
+
+#[test]
+fn multi_word_names_need_no_quotes() {
+    let (mut state, _group_id, _alice_id, _bob_id) = rotation_state();
+    let mut floor = CleaningGroup::new("Floor");
+    floor.slots = vec![CleaningSlot::new("Scharni Toilette")];
+    state.cleaning_groups.push(floor);
+    let norm = |cmd: &str, args: &[&str]| normalize_args(&state, cmd, args);
+
+    assert_eq!(
+        norm("!member", &["add", "Max", "Mustermann", "2nd", "Floor"]),
+        ["add", "Max Mustermann", "2nd Floor"]
+    );
+    assert_eq!(
+        norm(
+            "!plan",
+            &["assign", "2nd", "floor", "Max", "Mustermann", "week", "40"]
+        ),
+        ["assign", "2nd Floor", "Max", "Mustermann", "week", "40"]
+    );
+    assert_eq!(
+        norm(
+            "!groups",
+            &["weight", "2nd", "Floor", "Big", "Kitchen", "1.5"]
+        ),
+        ["weight", "2nd Floor", "Big Kitchen", "1.5"]
+    );
+    assert_eq!(
+        norm(
+            "!groups",
+            &["slot", "add", "2nd", "Floor", "Scharni", "Toilette"]
+        ),
+        ["slot", "add", "2nd Floor", "Scharni Toilette"]
+    );
+    assert_eq!(
+        norm("!groups", &["remove", "2nd", "Floor", "confirm"]),
+        ["remove", "2nd Floor", "confirm"]
+    );
+    assert_eq!(
+        norm("!member", &["away", "Max", "Mustermann", "3"]),
+        ["away", "Max Mustermann", "3"]
+    );
+    assert_eq!(norm("!done", &["2nd", "Floor"]), ["2nd Floor"]);
+    assert_eq!(
+        norm("!swap", &["@bob:example.org", "2nd", "Floor", "week", "40"]),
+        ["@bob:example.org", "2nd Floor", "week", "40"]
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_group_needs_confirmation_and_leaves_nothing_behind() {
+    let (mut state, group_id, alice_id, _bob_id) = rotation_state();
+    freeze(&mut state, &group_id, 0, current_iso_week(), &alice_id);
+    let (ctx, path, admin) = test_context(state);
+    let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
+    cmd_done(&ctx, &alice, &[]).await.unwrap();
+
+    let warning = cmd_removefloor(&ctx, &admin, &["2nd Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        warning.contains("!groups remove 2nd Floor confirm"),
+        "{warning}"
+    );
+    assert!(ctx.state.lock().await.group_by_id(&group_id).is_some());
+
+    cmd_removefloor(&ctx, &admin, &["2nd Floor", "confirm"])
+        .await
+        .unwrap();
+    let state = ctx.state.lock().await;
+    assert!(state.group_by_id(&group_id).is_none());
+    assert!(state
+        .slot_assignments
+        .iter()
+        .all(|a| a.group_id != group_id));
+    assert!(state.completions.iter().all(|c| c.group_id != group_id));
+    let report = crate::validate::validate_state(&state);
+    assert!(
+        !report.summary().contains(&group_id),
+        "no dangling references: {}",
+        report.summary()
+    );
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn personal_stats_count_own_turns_not_every_week_of_the_group() {
+    let (mut state, group_id, alice_id, bob_id) = rotation_state();
+    let (y, w) = current_iso_week();
+    // Four past weeks alternating Alice/Bob: Alice cleaned both of hers,
+    // Bob missed his first and cleaned his second.
+    for (back, person) in [(4, &alice_id), (3, &bob_id), (2, &alice_id), (1, &bob_id)] {
+        freeze(&mut state, &group_id, 0, add_weeks(y, w, -back), person);
+    }
+    for (back, by) in [(4, &alice_id), (2, &alice_id), (1, &bob_id)] {
+        let (cy, cw) = add_weeks(y, w, -back);
+        state.completions.push(crate::state::Completion {
+            group_id: group_id.clone(),
+            slot_id: None,
+            completed_by_id: by.clone(),
+            responsible_person_ids: vec![],
+            iso_year: cy,
+            iso_week: cw,
+            completed_at: Utc::now(),
+            skipped: false,
+        });
+    }
+
+    let alice = analytics::person_stats(&state, &alice_id).unwrap();
+    assert_eq!((alice.completed, alice.due_weeks, alice.missed), (2, 2, 0));
+    assert_eq!(alice.completion_rate, 1.0);
+    assert_eq!(alice.streak, 2);
+    let bob = analytics::person_stats(&state, &bob_id).unwrap();
+    assert_eq!((bob.completed, bob.due_weeks, bob.missed), (1, 2, 1));
+    assert_eq!(bob.streak, 1);
+}
+
+#[tokio::test]
+async fn skipping_one_slot_leaves_the_other_open() {
+    let (state, group_id, ..) = two_slot_week();
+    let (ctx, path, admin) = test_context(state);
+    let (year, week) = current_iso_week();
+
+    let reply = cmd_skip(&ctx, &admin, &["Floor", "Colbe"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.contains("Floor / Colbe"), "{reply}");
+    let state = ctx.state.lock().await;
+    assert!(state.is_slot_completed(&group_id, &"s1".to_owned(), year, week));
+    assert!(!state.is_slot_completed(&group_id, &"s0".to_owned(), year, week));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn going_away_points_out_weeks_already_planned_for_the_person() {
+    let (mut state, group_id, alice_id, _bob_id) = rotation_state();
+    let next = add_weeks(current_iso_week().0, current_iso_week().1, 1);
+    freeze(&mut state, &group_id, 0, next, &alice_id);
+    let (ctx, path, admin) = test_context(state);
+
+    let reply = cmd_absent(&ctx, &admin, &["@alice:example.org", "3"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        reply.contains(&format!(
+            "Still planned for them: week {} 2nd Floor",
+            next.1
+        )),
+        "{reply}"
+    );
+    let _ = tokio::fs::remove_file(path).await;
 }

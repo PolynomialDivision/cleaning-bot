@@ -18,6 +18,9 @@ pub(crate) fn command_may_change_current_plan(cmd: &str, sub: Option<&str>) -> b
             sub,
             Some("assign" | "unassign" | "skip" | "reset" | "import")
         ),
+        // Which groups/slots are shown, and who is marked away.
+        "!groups" => matches!(sub, Some("enable" | "disable" | "remove" | "slot")),
+        "!member" => matches!(sub, Some("remove" | "away" | "back")),
         _ => false,
     }
 }

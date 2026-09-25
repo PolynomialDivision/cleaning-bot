@@ -178,23 +178,24 @@ pub(crate) async fn cmd_done(
 
 pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
     let (start_y, start_w) = state.tracking_start();
 
     // Per-person view.
-    if let Some(query) = args.first().copied() {
+    if !args.is_empty() {
+        let query = args.join(" ");
+        let query = query.as_str();
         let person_id = match state.find_person(query).map(|p| p.id.clone()) {
             Some(id) => id,
             None => return Ok(Some(format!("Person «{query}» not found."))),
         };
-        let ps = match analytics::person_stats(&state, &person_id, interval) {
+        let ps = match analytics::person_stats(&state, &person_id) {
             Some(s) => s,
             None => return Ok(Some(format!("{query} is not in any cleaning group."))),
         };
         let mut completions: Vec<_> = state
             .completions
             .iter()
-            .filter(|c| c.completed_by_id == person_id)
+            .filter(|c| c.completed_by_id == person_id && !c.skipped)
             .collect();
         completions.sort_by_key(|c| std::cmp::Reverse(c.completed_at));
         let pct = (ps.completion_rate * 100.0).round() as u32;
@@ -209,11 +210,15 @@ pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<
                 ps.display_name,
                 week_dates(start_y, start_w)
             ),
+            format!("Groups: {}", ps.group_names),
             format!(
-                "Group: {} · {}/{} ({}%){streak_str}",
-                ps.group_names, ps.completed, ps.due_weeks, pct
+                "Own turns cleaned: {}/{} ({}%){streak_str}",
+                ps.completed, ps.due_weeks, pct
             ),
-            format!("Missed: {} · Skipped: {}", ps.missed, ps.skipped),
+            format!(
+                "Missed: {} · Skipped: {} · Helped others: {}",
+                ps.missed, ps.skipped, ps.helped
+            ),
         ];
         if ps.swaps_given > 0 || ps.swaps_taken > 0 {
             lines.push(format!(

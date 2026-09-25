@@ -43,10 +43,11 @@ pub(crate) async fn cmd_assign(
         Ok(v) => v,
         Err(e) => return Ok(Some(e)),
     };
-    let Some(person_query) = rest.first() else {
+    if rest.is_empty() {
         return Ok(Some(usage.into()));
-    };
-    let person = match state.find_person(person_query) {
+    }
+    let person_query = rest.join(" ");
+    let person = match state.find_person(&person_query) {
         Some(p) => p.clone(),
         None => {
             return Ok(Some(format!(
@@ -762,20 +763,48 @@ pub(crate) fn holds_any_slot(
     week: u32,
     interval: u32,
 ) -> bool {
+    !held_tasks(state, group, person_id, year, week, interval).is_empty()
+}
+
+/// What `person_id` is responsible for in `group` that week: slot names in a
+/// group with slots, the group name otherwise. Uses the frozen plan and, past
+/// its horizon, the rotation preview.
+pub(crate) fn held_tasks(
+    state: &crate::state::State,
+    group: &CleaningGroup,
+    person_id: &PersonId,
+    year: i32,
+    week: u32,
+    interval: u32,
+) -> Vec<(Option<usize>, String)> {
     if group.is_multi_slot() {
-        (0..group.slots.len()).any(|i| {
-            state
-                .slot_assignee(group, i, year, week, interval)
-                .is_some_and(|p| &p.id == person_id)
-        })
+        group
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                state
+                    .slot_assignee(group, *i, year, week, interval)
+                    .is_some_and(|p| &p.id == person_id)
+            })
+            .map(|(i, slot)| (Some(i), slot.name.clone()))
+            .collect()
+    } else if state
+        .responsible_person(group, year, week, interval)
+        .is_some_and(|p| &p.id == person_id)
+    {
+        vec![(None, group.name.clone())]
     } else {
-        state
-            .responsible_person(group, year, week, interval)
-            .is_some_and(|p| &p.id == person_id)
+        Vec::new()
     }
 }
 
-// ── !next [@user] ─────────────────────────────────────────────────────────────
+// ── !next [person] ────────────────────────────────────────────────────────────
+//
+// The person's own next turn: the first due week (from this one on) in which
+// they hold a slot/turn in one of their groups — frozen plan first, rotation
+// preview beyond it. A turn this week that is already done is mentioned and
+// the search continues.
 
 pub(crate) async fn cmd_next(
     ctx: &BotContext,
@@ -786,12 +815,21 @@ pub(crate) async fn cmd_next(
     let interval = ctx.config.schedule.interval_weeks;
     let (cur_y, cur_w) = current_iso_week();
 
-    let query = args.first().copied().unwrap_or_else(|| sender.as_str());
-    let person = match state.find_person(query) {
+    let query = if args.is_empty() {
+        sender.as_str().to_owned()
+    } else {
+        args.join(" ")
+    };
+    let person = match state.find_person(&query) {
         Some(p) => p.clone(),
         None => return Ok(Some(format!("{query} is not registered."))),
     };
-    let groups = state.groups_for_person(&person.id);
+    let groups: Vec<CleaningGroup> = state
+        .groups_for_person(&person.id)
+        .into_iter()
+        .filter(|g| g.is_active)
+        .cloned()
+        .collect();
     if groups.is_empty() {
         return Ok(Some(format!(
             "{} is not in any cleaning group.",
@@ -799,26 +837,58 @@ pub(crate) async fn cmd_next(
         )));
     }
 
-    let (dy, dw) = crate::state::first_due_week(&state, interval);
-    let away = weeks_between((cur_y, cur_w), (dy, dw));
-    let when = match away {
-        0 => "this week ⚠️".into(),
-        1 => "next week".into(),
-        n => format!("in {n} weeks"),
-    };
-    let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
-    let done = groups.iter().any(|g| state.is_cleaned(&g.id, dy, dw));
-    let suffix = if done { "  ✅ already done!" } else { "" };
-
+    // Due weeks are aligned to the tracking start (every `interval` weeks).
+    let first = crate::state::first_due_week(&state, interval);
+    let horizon = add_weeks(cur_y, cur_w, 104);
+    let due_weeks = crate::state::all_due_weeks_in_range(first, horizon, interval);
+    let mut done_now: Vec<String> = Vec::new();
+    for (y, w) in due_weeks {
+        let mut open: Vec<String> = Vec::new();
+        for group in &groups {
+            for (slot_index, label) in held_tasks(&state, group, &person.id, y, w, interval) {
+                let done = match slot_index {
+                    Some(i) => state.is_slot_completed(&group.id, &group.slots[i].id, y, w),
+                    None => state.is_completed(&group.id, y, w),
+                };
+                let label = if slot_index.is_some() {
+                    format!("{} / {label}", group.name)
+                } else {
+                    label
+                };
+                if done {
+                    done_now.push(label);
+                } else {
+                    open.push(label);
+                }
+            }
+        }
+        if open.is_empty() {
+            continue;
+        }
+        let away = weeks_between((cur_y, cur_w), (y, w));
+        let when = match away {
+            0 => "this week ⚠️".to_owned(),
+            1 => "next week".to_owned(),
+            n => format!("in {n} weeks"),
+        };
+        let mut reply = format!(
+            "📅 Next turn for {}: **week {w} ({})** ({when}) · {}",
+            person.display_name,
+            week_dates(y, w),
+            open.join(", ")
+        );
+        if !done_now.is_empty() {
+            reply.push_str(&format!("\nAlready done: {} ✅", done_now.join(", ")));
+        }
+        return Ok(Some(reply));
+    }
     Ok(Some(format!(
-        "📅 Next due for {name}: **Week {dw} ({dates})** ({when}) · {groups}{suffix}",
-        name = person.display_name,
-        dates = week_dates(dy, dw),
-        groups = group_names.join(", "),
+        "No upcoming turn found for {} in the next two years.",
+        person.display_name
     )))
 }
 
-// ── Admin: !plan skip [group] ─────────────────────────────────────────────────────
+// ── Admin: !plan skip [group [slot]] ─────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_skip(
     ctx: &BotContext,
@@ -830,18 +900,46 @@ pub(crate) async fn cmd_skip(
     let interval = ctx.config.schedule.interval_weeks;
     let mut state = ctx.state.lock().await;
 
-    let target_ids: Vec<String> = if let Some(name) = args.first() {
-        match state.group_by_name(name) {
-            Some(g) => vec![g.id.clone()],
-            None => return Ok(Some(format!("Group «{name}» not found."))),
-        }
-    } else {
-        state
+    // (group id, only this slot) — `None` = every open slot / the whole group.
+    let targets: Vec<(String, Option<(String, String)>)> = match args {
+        [] => state
             .cleaning_groups
             .iter()
             .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval))
-            .map(|g| g.id.clone())
-            .collect()
+            .map(|g| (g.id.clone(), None))
+            .collect(),
+        [name, slot @ ..] => {
+            let Some(group) = state.group_by_name(name) else {
+                return Ok(Some(format!("Group «{name}» not found.")));
+            };
+            if slot.is_empty() {
+                vec![(group.id.clone(), None)]
+            } else {
+                let slot_name = slot.join(" ");
+                match group.slot_by_name(&slot_name) {
+                    Some(s) => vec![(group.id.clone(), Some((s.id.clone(), s.name.clone())))],
+                    None => {
+                        return Ok(Some(format!(
+                            "«{}» has no slot «{slot_name}».{}",
+                            group.name,
+                            if group.is_multi_slot() {
+                                format!(
+                                    " Slots: {}",
+                                    group
+                                        .slots
+                                        .iter()
+                                        .map(|s| s.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            } else {
+                                String::new()
+                            }
+                        )))
+                    }
+                }
+            }
+        }
     };
 
     let mut skipped = vec![];
@@ -852,13 +950,20 @@ pub(crate) async fn cmd_skip(
         .map(|p| p.id.clone())
         .unwrap_or_else(|| sender_mxid.to_owned());
 
-    for group_id in &target_ids {
-        let name = state
+    for (group_id, slot) in &targets {
+        let group_name = state
             .group_by_id(group_id)
             .map(|g| g.name.clone())
             .unwrap_or_default();
-        if state.is_completed(group_id, year, week) {
-            already.push(name);
+        let (label, done) = match slot {
+            Some((slot_id, slot_name)) => (
+                format!("{group_name} / {slot_name}"),
+                state.is_slot_completed(group_id, slot_id, year, week),
+            ),
+            None => (group_name, state.is_completed(group_id, year, week)),
+        };
+        if done {
+            already.push(label);
             continue;
         }
         state.apply_event(DomainEvent::CleaningSkipped {
@@ -866,8 +971,9 @@ pub(crate) async fn cmd_skip(
             skipper_id: sender_pid.clone(),
             iso_year: year,
             iso_week: week,
+            slot_id: slot.as_ref().map(|(id, _)| id.clone()),
         })?;
-        skipped.push(name);
+        skipped.push(label);
     }
 
     state.save(&ctx.state_path).await?;

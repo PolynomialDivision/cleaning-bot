@@ -6,9 +6,7 @@ use super::*;
 
 pub(crate) async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let interval = ctx.config.schedule.interval_weeks;
-
-    let board = analytics::global_leaderboard(&state, interval);
+    let board = analytics::global_leaderboard(&state);
     if board.is_empty() {
         return Ok(Some("No members assigned to any group yet.".into()));
     }

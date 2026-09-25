@@ -415,18 +415,43 @@ pub(crate) async fn cmd_removefloor(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !groups remove <name>".into())),
+    let (name, confirmed) = match args {
+        [name] => (name.to_string(), false),
+        [name, confirm] if confirm.eq_ignore_ascii_case("confirm") => (name.to_string(), true),
+        _ => return Ok(Some("Usage: !groups remove <name> [confirm]".into())),
     };
     let mut state = ctx.state.lock().await;
-    let group_id = match state.group_by_name(&name) {
-        Some(g) => g.id.clone(),
+    let group = match state.group_by_name(&name) {
+        Some(g) => g.clone(),
         None => return Ok(Some(format!("Group «{name}» not found."))),
     };
-    state.apply_event(DomainEvent::GroupDeleted { group_id })?;
+    let history = state
+        .completions
+        .iter()
+        .filter(|c| c.group_id == group.id)
+        .count();
+    let planned = state
+        .slot_assignments
+        .iter()
+        .filter(|a| a.group_id == group.id)
+        .count();
+    if !confirmed && (!group.member_ids.is_empty() || history > 0 || planned > 0) {
+        return Ok(Some(format!(
+            "⚠️ «{}» has {} member(s), {history} done/skipped mark(s) and {planned} planned week(s). \
+             Deleting removes all of that for good.\n\
+             To stop scheduling it but keep its history: !groups disable {}\n\
+             To delete it anyway: !groups remove {} confirm",
+            group.name,
+            group.member_ids.len(),
+            group.name,
+            group.name
+        )));
+    }
+    state.apply_event(DomainEvent::GroupDeleted {
+        group_id: group.id.clone(),
+    })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed group «{name}».")))
+    Ok(Some(format!("✅ Removed group «{}».", group.name)))
 }
 
 // ── Admin: !groups slot add <group> <slot_name> ──────────────────────────────────────
@@ -812,8 +837,49 @@ pub(crate) async fn cmd_absent(
     state.save(&ctx.state_path).await?;
 
     let end = add_weeks(from_y, from_w, weeks as i64);
+
+    // Weeks already planned stay as they are — point out the ones still on
+    // this person so someone can take them over.
+    let mut still_planned: Vec<((i32, u32), String)> = state
+        .slot_assignments
+        .iter()
+        .filter(|a| a.person_id.as_deref() == Some(person.id.as_str()))
+        .filter(|a| (a.iso_year, a.iso_week) >= (from_y, from_w) && (a.iso_year, a.iso_week) < end)
+        .filter_map(|a| {
+            let group = state.group_by_id(&a.group_id)?;
+            let (label, done) = match group.slots.get(a.slot_index) {
+                Some(slot) if group.is_multi_slot() => (
+                    format!("{} / {}", group.name, slot.name),
+                    state.is_slot_completed(&group.id, &slot.id, a.iso_year, a.iso_week),
+                ),
+                _ => (
+                    group.name.clone(),
+                    state.is_completed(&group.id, a.iso_year, a.iso_week),
+                ),
+            };
+            (!done).then(|| {
+                (
+                    (a.iso_year, a.iso_week),
+                    format!("week {} {label}", a.iso_week),
+                )
+            })
+        })
+        .collect();
+    still_planned.sort();
+    let note = if still_planned.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n⚠️ Still planned for them: {}. Hand these over with !takeover, !swap or !plan assign.",
+            still_planned
+                .into_iter()
+                .map(|(_, l)| l)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     Ok(Some(format!(
-        "🌴 {} away for {weeks} week{} · back week {} ({})",
+        "🌴 {} away for {weeks} week{} · back week {} ({}){note}",
         person.display_name,
         if weeks == 1 { "" } else { "s" },
         end.1,

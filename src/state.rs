@@ -57,6 +57,9 @@ pub struct SwapRequest {
     pub iso_week: u32,
     pub created_at: DateTime<Utc>,
     pub status: SwapStatus,
+    /// Slot being swapped in a group with slots (0 otherwise).
+    #[serde(default)]
+    pub slot_index: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -142,9 +145,6 @@ pub struct State {
     /// Updated on every save; used as deterministic DTSTAMP in ICS exports.
     #[serde(default)]
     pub last_modified: Option<DateTime<Utc>>,
-    /// event_id → group_id  (legacy per-group reminder messages)
-    #[serde(default)]
-    pub reminder_event_ids: HashMap<String, GroupId>,
     /// event_id → (iso_year, iso_week)  (consolidated weekly plan / final-reminder messages)
     #[serde(default)]
     pub weekly_plan_event_ids: HashMap<String, (i32, u32)>,
@@ -186,7 +186,7 @@ impl State {
     ///
     /// This is the **only** permitted way to mutate domain state (persons,
     /// groups, completions, swaps, absences).  Bot-infrastructure state
-    /// (reminder_event_ids, reaction_dones, greeted_users, calendar_tokens)
+    /// (reaction_dones, greeted_users, calendar_tokens)
     /// may still be mutated directly.
     ///
     /// Returns `Ok(())` whether the event caused a state change or was a
@@ -219,6 +219,15 @@ impl State {
                 if self.cleaning_groups.len() == before {
                     anyhow::bail!("Group not found: {group_id}");
                 }
+                // Nothing may keep pointing at the deleted group: its plan,
+                // history, absences, swaps and reminder bookkeeping go with it
+                // (`!groups disable` is the way to keep them).
+                self.slot_assignments.retain(|a| &a.group_id != group_id);
+                self.completions.retain(|c| &c.group_id != group_id);
+                self.absences.retain(|a| &a.group_id != group_id);
+                self.swap_requests.retain(|s| &s.group_id != group_id);
+                self.sent_reminders.retain(|r| &r.group_id != group_id);
+                self.reaction_dones.retain(|_, rd| &rd.group_id != group_id);
                 true
             }
             E::GroupDisabled { group_id } => {
@@ -558,14 +567,21 @@ impl State {
                 skipper_id,
                 iso_year,
                 iso_week,
+                slot_id,
             } => {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
-                // For multi-slot groups, skip all slots not yet completed.
+                // For multi-slot groups, skip the given slot, or else all
+                // slots not yet completed.
                 let group = self.group_by_id(group_id).unwrap().clone();
                 if group.is_multi_slot() {
-                    let slots: Vec<_> = group.slots.iter().map(|s| s.id.clone()).collect();
+                    let slots: Vec<_> = group
+                        .slots
+                        .iter()
+                        .map(|s| s.id.clone())
+                        .filter(|id| slot_id.as_ref().is_none_or(|only| only == id))
+                        .collect();
                     let mut changed = false;
                     for sid in slots {
                         if !self.is_slot_completed(group_id, &sid, *iso_year, *iso_week) {
@@ -623,6 +639,7 @@ impl State {
                 target_mxid,
                 iso_year,
                 iso_week,
+                slot_index,
             } => {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
@@ -638,6 +655,7 @@ impl State {
                     iso_week: *iso_week,
                     created_at: Utc::now(),
                     status: SwapStatus::Pending,
+                    slot_index: *slot_index,
                 });
                 true
             }
@@ -892,6 +910,7 @@ impl State {
         // 2. Swap override.
         if let Some(swap) = self.swap_requests.iter().find(|s| {
             s.group_id == group.id
+                && s.slot_index == 0
                 && s.iso_year == year
                 && s.iso_week == week
                 && s.status == SwapStatus::Accepted
