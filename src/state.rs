@@ -1,23 +1,29 @@
 use anyhow::Result;
 use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
-use std::{collections::{HashMap, HashSet}, path::Path, sync::OnceLock};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::OnceLock,
+};
 
-use crate::domain::{CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId};
+use crate::domain::{
+    CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId,
+};
 
 // ── Scheduling records ────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Completion {
-    pub group_id:               GroupId,
+    pub group_id: GroupId,
     /// `Some` for multi-slot groups; `None` for single-slot groups.
     #[serde(default)]
-    pub slot_id:                Option<SlotId>,
-    pub completed_by_id:        PersonId,
+    pub slot_id: Option<SlotId>,
+    pub completed_by_id: PersonId,
     #[serde(default)]
     pub responsible_person_ids: Vec<PersonId>,
-    pub iso_year:     i32,
-    pub iso_week:     u32,
+    pub iso_year: i32,
+    pub iso_week: u32,
     pub completed_at: DateTime<Utc>,
     #[serde(default)]
     pub skipped: bool,
@@ -25,7 +31,7 @@ pub struct Completion {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReactionDone {
-    pub group_id:        GroupId,
+    pub group_id: GroupId,
     pub completed_by_id: PersonId,
     pub iso_year: i32,
     pub iso_week: u32,
@@ -33,60 +39,69 @@ pub struct ReactionDone {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Absence {
-    pub person_id:      PersonId,
-    pub group_id:       GroupId,
-    pub from_year:      i32,
-    pub from_week:      u32,
+    pub person_id: PersonId,
+    pub group_id: GroupId,
+    pub from_year: i32,
+    pub from_week: u32,
     pub duration_weeks: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SwapRequest {
-    pub id:         u64,
+    pub id: u64,
     /// Requester / target are Matrix MXIDs — swaps are Matrix-only.
-    pub requester:  String,
-    pub target:     String,
-    pub group_id:   GroupId,
-    pub iso_year:   i32,
-    pub iso_week:   u32,
+    pub requester: String,
+    pub target: String,
+    pub group_id: GroupId,
+    pub iso_year: i32,
+    pub iso_week: u32,
     pub created_at: DateTime<Utc>,
-    pub status:     SwapStatus,
+    pub status: SwapStatus,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum SwapStatus { Pending, Accepted, Rejected, Cancelled }
+pub enum SwapStatus {
+    Pending,
+    Accepted,
+    Rejected,
+    Cancelled,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum ReminderKind { Initial, Final, WeeklySummary }
+pub enum ReminderKind {
+    Initial,
+    Final,
+    WeeklySummary,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SentReminder {
     pub group_id: GroupId,
     pub iso_year: i32,
     pub iso_week: u32,
-    pub kind:     ReminderKind,
+    pub kind: ReminderKind,
     #[serde(default)]
-    pub sent_at:  Option<DateTime<Utc>>,
+    pub sent_at: Option<DateTime<Utc>>,
 }
 
 // ── Greeting ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GreetingChoice {
-    pub emoji:      String,
-    pub group_id:   GroupId,
+    pub emoji: String,
+    pub group_id: GroupId,
     pub group_name: String,
     /// Set when this choice links the joining user to an existing non-Matrix person.
     #[serde(default)]
-    pub person_id:  Option<PersonId>,
+    pub person_id: Option<PersonId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GreetingInfo {
     pub for_user: String,
-    pub choices:  Vec<GreetingChoice>,
+    pub choices: Vec<GreetingChoice>,
     /// True during the identity-linking step (choosing which non-Matrix placeholder you are).
     #[serde(default)]
     pub is_linking: bool,
@@ -99,7 +114,7 @@ pub use crate::domain::CalendarToken;
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct State {
     #[serde(default)]
-    pub persons:         Vec<Person>,
+    pub persons: Vec<Person>,
     #[serde(default)]
     pub cleaning_groups: Vec<CleaningGroup>,
     #[serde(default)]
@@ -110,11 +125,11 @@ pub struct State {
     #[serde(default)]
     pub slot_assignments: Vec<SlotAssignment>,
     #[serde(default)]
-    pub completions:    Vec<Completion>,
+    pub completions: Vec<Completion>,
     #[serde(default)]
-    pub swap_requests:  Vec<SwapRequest>,
+    pub swap_requests: Vec<SwapRequest>,
     #[serde(default)]
-    pub absences:       Vec<Absence>,
+    pub absences: Vec<Absence>,
     #[serde(default)]
     pub sent_reminders: Vec<SentReminder>,
     /// Append-only domain event log.  Backfilled from completions/swaps on first load.
@@ -122,8 +137,8 @@ pub struct State {
     pub event_log: Vec<crate::analytics::LoggedEvent>,
 
     #[serde(default)]
-    pub next_id:       u64,
-    pub created_at:    Option<DateTime<Utc>>,
+    pub next_id: u64,
+    pub created_at: Option<DateTime<Utc>>,
     /// Updated on every save; used as deterministic DTSTAMP in ICS exports.
     #[serde(default)]
     pub last_modified: Option<DateTime<Utc>>,
@@ -148,11 +163,11 @@ pub struct State {
     #[serde(default)]
     pub weekly_plan_rendered: HashMap<String, String>,
     #[serde(default)]
-    pub reaction_dones:     HashMap<String, ReactionDone>,
+    pub reaction_dones: HashMap<String, ReactionDone>,
     #[serde(default)]
     pub greeting_event_ids: HashMap<String, GreetingInfo>,
     #[serde(default)]
-    pub greeted_users:      HashSet<String>,
+    pub greeted_users: HashSet<String>,
 }
 
 // ── Load / Save ───────────────────────────────────────────────────────────────
@@ -212,23 +227,42 @@ impl State {
                 true
             }
             E::GroupDisabled { group_id } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                if !g.is_active { return Ok(()); }
+                if !g.is_active {
+                    return Ok(());
+                }
                 g.is_active = false;
                 true
             }
             E::GroupEnabled { group_id } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                if g.is_active { return Ok(()); }
+                if g.is_active {
+                    return Ok(());
+                }
                 g.is_active = true;
                 true
             }
-            E::SlotAdded { group_id, slot_id, slot_name } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+            E::SlotAdded {
+                group_id,
+                slot_id,
+                slot_name,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                if g.slots.iter().any(|s| &s.id == slot_id) { return Ok(()); }
+                if g.slots.iter().any(|s| &s.id == slot_id) {
+                    return Ok(());
+                }
                 let mut s = CleaningSlot::new(slot_name);
                 s.id = slot_id.clone();
                 g.slots.push(s);
@@ -236,11 +270,17 @@ impl State {
             }
             E::SlotRemoved { group_id, slot_id } => {
                 let removed_index = {
-                    let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                    let g = self
+                        .cleaning_groups
+                        .iter_mut()
+                        .find(|g| &g.id == group_id)
                         .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
                     match g.slots.iter().position(|s| &s.id == slot_id) {
-                        Some(idx) => { g.slots.remove(idx); idx }
-                        None      => return Ok(()),
+                        Some(idx) => {
+                            g.slots.remove(idx);
+                            idx
+                        }
+                        None => return Ok(()),
                     }
                 };
                 // `SlotAssignment.slot_index` is a raw position into
@@ -252,9 +292,8 @@ impl State {
                 // survivors at the same physical slot — reversing the order
                 // would shift a later assignment down onto `removed_index`
                 // and have it deleted by the very next step.
-                self.slot_assignments.retain(|a| {
-                    !(a.group_id == *group_id && a.slot_index == removed_index)
-                });
+                self.slot_assignments
+                    .retain(|a| !(a.group_id == *group_id && a.slot_index == removed_index));
                 for a in self.slot_assignments.iter_mut() {
                     if a.group_id == *group_id && a.slot_index > removed_index {
                         a.slot_index -= 1;
@@ -262,45 +301,86 @@ impl State {
                 }
                 true
             }
-            E::SlotAssigned { group_id, slot_index, iso_year, iso_week, person_id, source, actor_id: _, previous_person_id: _ } => {
+            E::SlotAssigned {
+                group_id,
+                slot_index,
+                iso_year,
+                iso_week,
+                person_id,
+                source,
+                actor_id: _,
+                previous_person_id: _,
+            } => {
                 // Upsert: replace any existing assignment for this (group, slot, year, week).
                 self.slot_assignments.retain(|a| {
-                    !(a.group_id == *group_id && a.slot_index == *slot_index
-                        && a.iso_year == *iso_year && a.iso_week == *iso_week)
+                    !(a.group_id == *group_id
+                        && a.slot_index == *slot_index
+                        && a.iso_year == *iso_year
+                        && a.iso_week == *iso_week)
                 });
                 self.slot_assignments.push(SlotAssignment {
-                    group_id:   group_id.clone(),
+                    group_id: group_id.clone(),
                     slot_index: *slot_index,
-                    iso_year:   *iso_year,
-                    iso_week:   *iso_week,
-                    person_id:  person_id.clone(),
-                    source:     source.clone(),
+                    iso_year: *iso_year,
+                    iso_week: *iso_week,
+                    person_id: person_id.clone(),
+                    source: source.clone(),
                 });
                 true
             }
-            E::RoomAdded { group_id, slot_id, room_name } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+            E::RoomAdded {
+                group_id,
+                slot_id,
+                room_name,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
                 match slot_id {
                     Some(sid) => {
-                        let s = g.slots.iter_mut().find(|s| &s.id == sid)
+                        let s = g
+                            .slots
+                            .iter_mut()
+                            .find(|s| &s.id == sid)
                             .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
-                        if s.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)) { return Ok(()); }
+                        if s.room_names
+                            .iter()
+                            .any(|r| r.eq_ignore_ascii_case(room_name))
+                        {
+                            return Ok(());
+                        }
                         s.room_names.push(room_name.clone());
                     }
                     None => {
-                        if g.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)) { return Ok(()); }
+                        if g.room_names
+                            .iter()
+                            .any(|r| r.eq_ignore_ascii_case(room_name))
+                        {
+                            return Ok(());
+                        }
                         g.room_names.push(room_name.clone());
                     }
                 }
                 true
             }
-            E::RoomRemoved { group_id, slot_id, room_name } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+            E::RoomRemoved {
+                group_id,
+                slot_id,
+                room_name,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
                 match slot_id {
                     Some(sid) => {
-                        let s = g.slots.iter_mut().find(|s| &s.id == sid)
+                        let s = g
+                            .slots
+                            .iter_mut()
+                            .find(|s| &s.id == sid)
                             .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
                         let before = s.room_names.len();
                         s.room_names.retain(|r| !r.eq_ignore_ascii_case(room_name));
@@ -315,104 +395,175 @@ impl State {
             }
 
             // ── Persons ───────────────────────────────────────────────────────
-            E::PersonCreated { person_id, display_name, matrix_id } => {
+            E::PersonCreated {
+                person_id,
+                display_name,
+                matrix_id,
+            } => {
                 if self.persons.iter().any(|p| &p.id == person_id) {
                     return Ok(());
                 }
                 if let Some(mxid) = matrix_id {
-                    if self.persons.iter().any(|p| p.matrix_id.as_deref() == Some(mxid)) {
+                    if self
+                        .persons
+                        .iter()
+                        .any(|p| p.matrix_id.as_deref() == Some(mxid))
+                    {
                         return Ok(());
                     }
                 }
                 let mut p = match matrix_id.as_deref() {
                     Some(mxid) => Person::new_matrix(mxid),
-                    None       => Person::new_named(display_name),
+                    None => Person::new_named(display_name),
                 };
                 p.id = person_id.clone();
                 self.persons.push(p);
                 true
             }
-            E::PersonJoinedGroup { person_id, group_id } => {
+            E::PersonJoinedGroup {
+                person_id,
+                group_id,
+            } => {
                 if !self.persons.iter().any(|p| &p.id == person_id) {
                     anyhow::bail!("Person not found: {person_id}");
                 }
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                if g.member_ids.contains(person_id) { return Ok(()); }
+                if g.member_ids.contains(person_id) {
+                    return Ok(());
+                }
                 g.member_ids.push(person_id.clone());
                 true
             }
-            E::PersonLeftGroup { person_id, group_id } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+            E::PersonLeftGroup {
+                person_id,
+                group_id,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
                 let before = g.member_ids.len();
                 g.member_ids.retain(|id| id != person_id);
                 g.member_ids.len() < before
             }
             E::RotationQueueSet { group_id, queue } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                if &g.rotation_queue == queue { return Ok(()); }
+                if &g.rotation_queue == queue {
+                    return Ok(());
+                }
                 g.rotation_queue = queue.clone();
                 true
             }
-            E::RoomWeightSet { group_id, slot_id, room_name, weight } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+            E::RoomWeightSet {
+                group_id,
+                slot_id,
+                room_name,
+                weight,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
                 let weights = match slot_id {
                     Some(sid) => {
-                        let s = g.slots.iter_mut().find(|s| &s.id == sid)
+                        let s = g
+                            .slots
+                            .iter_mut()
+                            .find(|s| &s.id == sid)
                             .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
                         &mut s.room_weights
                     }
                     None => &mut g.room_weights,
                 };
-                if weights.get(room_name).copied() == Some(*weight) { return Ok(()); }
+                if weights.get(room_name).copied() == Some(*weight) {
+                    return Ok(());
+                }
                 weights.insert(room_name.clone(), *weight);
                 true
             }
             E::GroupWeightSet { group_id, weight } => {
-                let g = self.cleaning_groups.iter_mut().find(|g| &g.id == group_id)
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                if (g.weight - weight).abs() < f64::EPSILON { return Ok(()); }
+                if (g.weight - weight).abs() < f64::EPSILON {
+                    return Ok(());
+                }
                 g.weight = *weight;
                 true
             }
-            E::PersonMatrixLinked { person_id, matrix_id } => {
-                if self.persons.iter().any(|p| p.matrix_id.as_deref() == Some(matrix_id) && &p.id != person_id) {
+            E::PersonMatrixLinked {
+                person_id,
+                matrix_id,
+            } => {
+                if self
+                    .persons
+                    .iter()
+                    .any(|p| p.matrix_id.as_deref() == Some(matrix_id) && &p.id != person_id)
+                {
                     anyhow::bail!("{matrix_id} is already linked to another person");
                 }
-                let p = self.persons.iter_mut().find(|p| &p.id == person_id)
+                let p = self
+                    .persons
+                    .iter_mut()
+                    .find(|p| &p.id == person_id)
                     .ok_or_else(|| anyhow::anyhow!("Person not found: {person_id}"))?;
-                if p.matrix_id.as_deref() == Some(matrix_id) { return Ok(()); }
+                if p.matrix_id.as_deref() == Some(matrix_id) {
+                    return Ok(());
+                }
                 p.matrix_id = Some(matrix_id.clone());
                 true
             }
 
             // ── Cleaning ──────────────────────────────────────────────────────
-            E::CleaningCompleted { group_id, slot_id, person_id, responsible_person_ids, iso_year, iso_week } => {
+            E::CleaningCompleted {
+                group_id,
+                slot_id,
+                person_id,
+                responsible_person_ids,
+                iso_year,
+                iso_week,
+            } => {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
                 // Idempotency: check whether this specific slot (or the whole group) is already done.
                 let already_done = match slot_id {
                     Some(sid) => self.is_slot_completed(group_id, sid, *iso_year, *iso_week),
-                    None      => self.is_completed(group_id, *iso_year, *iso_week),
+                    None => self.is_completed(group_id, *iso_year, *iso_week),
                 };
-                if already_done { return Ok(()); }
+                if already_done {
+                    return Ok(());
+                }
                 self.completions.push(Completion {
-                    group_id:               group_id.clone(),
-                    slot_id:                slot_id.clone(),
-                    completed_by_id:        person_id.clone(),
+                    group_id: group_id.clone(),
+                    slot_id: slot_id.clone(),
+                    completed_by_id: person_id.clone(),
                     responsible_person_ids: responsible_person_ids.clone(),
-                    iso_year:  *iso_year,
-                    iso_week:  *iso_week,
+                    iso_year: *iso_year,
+                    iso_week: *iso_week,
                     completed_at: Utc::now(),
                     skipped: false,
                 });
                 true
             }
-            E::CleaningSkipped { group_id, skipper_id, iso_year, iso_week } => {
+            E::CleaningSkipped {
+                group_id,
+                skipper_id,
+                iso_year,
+                iso_week,
+            } => {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
@@ -424,12 +575,12 @@ impl State {
                     for sid in slots {
                         if !self.is_slot_completed(group_id, &sid, *iso_year, *iso_week) {
                             self.completions.push(Completion {
-                                group_id:               group_id.clone(),
-                                slot_id:                Some(sid),
-                                completed_by_id:        skipper_id.clone(),
+                                group_id: group_id.clone(),
+                                slot_id: Some(sid),
+                                completed_by_id: skipper_id.clone(),
                                 responsible_person_ids: vec![],
-                                iso_year:  *iso_year,
-                                iso_week:  *iso_week,
+                                iso_year: *iso_year,
+                                iso_week: *iso_week,
                                 completed_at: Utc::now(),
                                 skipped: true,
                             });
@@ -438,21 +589,27 @@ impl State {
                     }
                     changed
                 } else {
-                    if self.is_completed(group_id, *iso_year, *iso_week) { return Ok(()); }
+                    if self.is_completed(group_id, *iso_year, *iso_week) {
+                        return Ok(());
+                    }
                     self.completions.push(Completion {
-                        group_id:               group_id.clone(),
-                        slot_id:                None,
-                        completed_by_id:        skipper_id.clone(),
+                        group_id: group_id.clone(),
+                        slot_id: None,
+                        completed_by_id: skipper_id.clone(),
                         responsible_person_ids: vec![],
-                        iso_year:  *iso_year,
-                        iso_week:  *iso_week,
+                        iso_year: *iso_year,
+                        iso_week: *iso_week,
                         completed_at: Utc::now(),
                         skipped: true,
                     });
                     true
                 }
             }
-            E::CleaningUndone { group_id, iso_year, iso_week } => {
+            E::CleaningUndone {
+                group_id,
+                iso_year,
+                iso_week,
+            } => {
                 let before = self.completions.len();
                 self.completions.retain(|c| {
                     !(&c.group_id == group_id && c.iso_year == *iso_year && c.iso_week == *iso_week)
@@ -461,7 +618,13 @@ impl State {
             }
 
             // ── Swaps ─────────────────────────────────────────────────────────
-            E::SwapRequested { group_id, requester_mxid, target_mxid, iso_year, iso_week } => {
+            E::SwapRequested {
+                group_id,
+                requester_mxid,
+                target_mxid,
+                iso_year,
+                iso_week,
+            } => {
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
@@ -469,20 +632,30 @@ impl State {
                 self.next_id += 1;
                 self.swap_requests.push(SwapRequest {
                     id,
-                    requester:  requester_mxid.clone(),
-                    target:     target_mxid.clone(),
-                    group_id:   group_id.clone(),
-                    iso_year:   *iso_year,
-                    iso_week:   *iso_week,
+                    requester: requester_mxid.clone(),
+                    target: target_mxid.clone(),
+                    group_id: group_id.clone(),
+                    iso_year: *iso_year,
+                    iso_week: *iso_week,
                     created_at: Utc::now(),
-                    status:     SwapStatus::Pending,
+                    status: SwapStatus::Pending,
                 });
                 true
             }
-            E::SwapApproved { swap_id, requester_id: _, replacement_id: _, .. } => {
-                let req = self.swap_requests.iter_mut().find(|r| r.id == *swap_id)
+            E::SwapApproved {
+                swap_id,
+                requester_id: _,
+                replacement_id: _,
+                ..
+            } => {
+                let req = self
+                    .swap_requests
+                    .iter_mut()
+                    .find(|r| r.id == *swap_id)
                     .ok_or_else(|| anyhow::anyhow!("Swap not found: {swap_id}"))?;
-                if req.status == SwapStatus::Accepted { return Ok(()); }
+                if req.status == SwapStatus::Accepted {
+                    return Ok(());
+                }
                 if req.status != SwapStatus::Pending {
                     anyhow::bail!("Swap #{swap_id} is not pending");
                 }
@@ -490,9 +663,14 @@ impl State {
                 true
             }
             E::SwapRejected { swap_id } => {
-                let req = self.swap_requests.iter_mut().find(|r| r.id == *swap_id)
+                let req = self
+                    .swap_requests
+                    .iter_mut()
+                    .find(|r| r.id == *swap_id)
                     .ok_or_else(|| anyhow::anyhow!("Swap not found: {swap_id}"))?;
-                if req.status == SwapStatus::Rejected { return Ok(()); }
+                if req.status == SwapStatus::Rejected {
+                    return Ok(());
+                }
                 if req.status != SwapStatus::Pending {
                     anyhow::bail!("Swap #{swap_id} is not pending");
                 }
@@ -501,19 +679,26 @@ impl State {
             }
 
             // ── Absences ──────────────────────────────────────────────────────
-            E::AbsenceRecorded { person_id, group_id, from_year, from_week, duration_weeks } => {
+            E::AbsenceRecorded {
+                person_id,
+                group_id,
+                from_year,
+                from_week,
+                duration_weeks,
+            } => {
                 if !self.persons.iter().any(|p| &p.id == person_id) {
                     anyhow::bail!("Person not found: {person_id}");
                 }
                 if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
                     anyhow::bail!("Group not found: {group_id}");
                 }
-                self.absences.retain(|a| !(&a.person_id == person_id && &a.group_id == group_id));
+                self.absences
+                    .retain(|a| !(&a.person_id == person_id && &a.group_id == group_id));
                 self.absences.push(Absence {
-                    person_id:      person_id.clone(),
-                    group_id:       group_id.clone(),
-                    from_year:      *from_year,
-                    from_week:      *from_week,
+                    person_id: person_id.clone(),
+                    group_id: group_id.clone(),
+                    from_year: *from_year,
+                    from_week: *from_week,
                     duration_weeks: *duration_weeks,
                 });
                 true
@@ -526,7 +711,8 @@ impl State {
         };
 
         if changed {
-            self.event_log.push(crate::analytics::LoggedEvent::now(event));
+            self.event_log
+                .push(crate::analytics::LoggedEvent::now(event));
         }
         Ok(())
     }
@@ -550,28 +736,43 @@ impl State {
 
 impl State {
     pub fn person_by_matrix_id(&self, mxid: &str) -> Option<&Person> {
-        self.persons.iter().find(|p| p.matrix_id.as_deref() == Some(mxid))
+        self.persons
+            .iter()
+            .find(|p| p.matrix_id.as_deref() == Some(mxid))
     }
     pub fn person_by_id(&self, id: &PersonId) -> Option<&Person> {
         self.persons.iter().find(|p| &p.id == id)
     }
     pub fn find_person(&self, query: &str) -> Option<&Person> {
-        self.persons.iter().find(|p| p.id == query || p.matches(query))
+        self.persons
+            .iter()
+            .find(|p| p.id == query || p.matches(query))
     }
     pub fn group_by_name(&self, name: &str) -> Option<&CleaningGroup> {
-        self.cleaning_groups.iter().find(|g| g.name.eq_ignore_ascii_case(name))
+        self.cleaning_groups
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name))
     }
     pub fn group_by_name_mut(&mut self, name: &str) -> Option<&mut CleaningGroup> {
-        self.cleaning_groups.iter_mut().find(|g| g.name.eq_ignore_ascii_case(name))
+        self.cleaning_groups
+            .iter_mut()
+            .find(|g| g.name.eq_ignore_ascii_case(name))
     }
     pub fn group_by_id(&self, id: &GroupId) -> Option<&CleaningGroup> {
         self.cleaning_groups.iter().find(|g| &g.id == id)
     }
     pub fn groups_for_person(&self, person_id: &PersonId) -> Vec<&CleaningGroup> {
-        self.cleaning_groups.iter().filter(|g| g.member_ids.contains(person_id)).collect()
+        self.cleaning_groups
+            .iter()
+            .filter(|g| g.member_ids.contains(person_id))
+            .collect()
     }
     pub fn members_of<'a>(&'a self, group: &CleaningGroup) -> Vec<&'a Person> {
-        group.member_ids.iter().filter_map(|id| self.person_by_id(id)).collect()
+        group
+            .member_ids
+            .iter()
+            .filter_map(|id| self.person_by_id(id))
+            .collect()
     }
 }
 
@@ -581,24 +782,47 @@ impl State {
     /// True when the group (or ALL slots for a multi-slot group) are completed this week.
     pub fn is_completed(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
         match self.group_by_id(group_id) {
-            Some(g) if g.is_multi_slot() => g.slots.iter().all(|s| self.is_slot_completed(group_id, &s.id, year, week)),
-            _ => self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week),
+            Some(g) if g.is_multi_slot() => g
+                .slots
+                .iter()
+                .all(|s| self.is_slot_completed(group_id, &s.id, year, week)),
+            _ => self
+                .completions
+                .iter()
+                .any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week),
         }
     }
 
     pub fn is_cleaned(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
         match self.group_by_id(group_id) {
             Some(g) if g.is_multi_slot() => g.slots.iter().all(|s| {
-                self.completions.iter().any(|c| &c.group_id == group_id && c.slot_id.as_deref() == Some(&s.id) && c.iso_year == year && c.iso_week == week && !c.skipped)
+                self.completions.iter().any(|c| {
+                    &c.group_id == group_id
+                        && c.slot_id.as_deref() == Some(&s.id)
+                        && c.iso_year == year
+                        && c.iso_week == week
+                        && !c.skipped
+                })
             }),
-            _ => self.completions.iter().any(|c| &c.group_id == group_id && c.iso_year == year && c.iso_week == week && !c.skipped),
+            _ => self.completions.iter().any(|c| {
+                &c.group_id == group_id && c.iso_year == year && c.iso_week == week && !c.skipped
+            }),
         }
     }
 
     /// True when the specific slot is marked completed.
-    pub fn is_slot_completed(&self, group_id: &GroupId, slot_id: &SlotId, year: i32, week: u32) -> bool {
+    pub fn is_slot_completed(
+        &self,
+        group_id: &GroupId,
+        slot_id: &SlotId,
+        year: i32,
+        week: u32,
+    ) -> bool {
         self.completions.iter().any(|c| {
-            &c.group_id == group_id && c.slot_id.as_deref() == Some(slot_id) && c.iso_year == year && c.iso_week == week
+            &c.group_id == group_id
+                && c.slot_id.as_deref() == Some(slot_id)
+                && c.iso_year == year
+                && c.iso_week == week
         })
     }
 
@@ -615,18 +839,34 @@ impl State {
     /// disappearing once `is_due` flips to false. Only relevant for
     /// refreshing/reposting an existing week's plan, not for deciding what
     /// belongs in a brand-new one.
-    pub fn belongs_in_weekly_plan(&self, group_id: &GroupId, year: i32, week: u32, interval: u32) -> bool {
+    pub fn belongs_in_weekly_plan(
+        &self,
+        group_id: &GroupId,
+        year: i32,
+        week: u32,
+        interval: u32,
+    ) -> bool {
         self.is_due(group_id, year, week, interval) || self.is_completed(group_id, year, week)
     }
-    pub fn is_absent(&self, person_id: &PersonId, group_id: &GroupId, year: i32, week: u32) -> bool {
+    pub fn is_absent(
+        &self,
+        person_id: &PersonId,
+        group_id: &GroupId,
+        year: i32,
+        week: u32,
+    ) -> bool {
         self.absences.iter().any(|a| {
-            if &a.person_id != person_id || &a.group_id != group_id { return false; }
+            if &a.person_id != person_id || &a.group_id != group_id {
+                return false;
+            }
             let end = add_weeks(a.from_year, a.from_week, a.duration_weeks as i64);
             (year, week) >= (a.from_year, a.from_week) && (year, week) < end
         })
     }
     pub fn reminder_sent(&self, group_id: &str, year: i32, week: u32, kind: &ReminderKind) -> bool {
-        self.sent_reminders.iter().any(|r| r.group_id == group_id && r.iso_year == year && r.iso_week == week && &r.kind == kind)
+        self.sent_reminders.iter().any(|r| {
+            r.group_id == group_id && r.iso_year == year && r.iso_week == week && &r.kind == kind
+        })
     }
     pub fn mark_reminder_sent(&mut self, group_id: &str, year: i32, week: u32, kind: ReminderKind) {
         self.sent_reminders.push(SentReminder {
@@ -634,7 +874,7 @@ impl State {
             iso_year: year,
             iso_week: week,
             kind,
-            sent_at:  Some(Utc::now()),
+            sent_at: Some(Utc::now()),
         });
     }
 
@@ -642,17 +882,28 @@ impl State {
     /// Checks stored `slot_assignments` first (stable); falls back to a pure
     /// preview of the rotation queue only when no materialized assignment
     /// exists yet (e.g. projecting past the materialized horizon).
-    pub fn responsible_person(&self, group: &CleaningGroup, year: i32, week: u32, interval: u32) -> Option<&Person> {
+    pub fn responsible_person(
+        &self,
+        group: &CleaningGroup,
+        year: i32,
+        week: u32,
+        interval: u32,
+    ) -> Option<&Person> {
         // 1. Frozen stored assignment (stable across membership changes).
         if let Some(a) = self.slot_assignments.iter().find(|a| {
             a.group_id == group.id && a.slot_index == 0 && a.iso_year == year && a.iso_week == week
         }) {
             return a.person_id.as_ref().and_then(|pid| self.person_by_id(pid));
         }
-        if group.member_ids.is_empty() { return None; }
+        if group.member_ids.is_empty() {
+            return None;
+        }
         // 2. Swap override.
         if let Some(swap) = self.swap_requests.iter().find(|s| {
-            s.group_id == group.id && s.iso_year == year && s.iso_week == week && s.status == SwapStatus::Accepted
+            s.group_id == group.id
+                && s.iso_year == year
+                && s.iso_week == week
+                && s.status == SwapStatus::Accepted
         }) {
             return self.person_by_matrix_id(&swap.target);
         }
@@ -664,27 +915,51 @@ impl State {
 
     /// For multi-slot groups: the person assigned to `slot_index` this cycle.
     /// Checks stored `slot_assignments` first; falls back to the same queue preview.
-    pub fn slot_assignee(&self, group: &CleaningGroup, slot_index: usize, year: i32, week: u32, interval: u32) -> Option<&Person> {
+    pub fn slot_assignee(
+        &self,
+        group: &CleaningGroup,
+        slot_index: usize,
+        year: i32,
+        week: u32,
+        interval: u32,
+    ) -> Option<&Person> {
         if let Some(a) = self.slot_assignments.iter().find(|a| {
-            a.group_id == group.id && a.slot_index == slot_index && a.iso_year == year && a.iso_week == week
+            a.group_id == group.id
+                && a.slot_index == slot_index
+                && a.iso_year == year
+                && a.iso_week == week
         }) {
             return a.person_id.as_ref().and_then(|pid| self.person_by_id(pid));
         }
-        if group.member_ids.is_empty() { return None; }
+        if group.member_ids.is_empty() {
+            return None;
+        }
         crate::resolver::preview_slot_assignee(self, group, slot_index, year, week, interval)
             .and_then(|pid| self.person_by_id(&pid))
     }
 
     /// All (slot, Option<Person>) pairs for a multi-slot group in a given week.
     /// Falls back to single-slot behaviour for non-slotted groups.
-    pub fn slot_assignments<'a>(&'a self, group: &'a CleaningGroup, year: i32, week: u32, interval: u32) -> Vec<(&'a CleaningSlot, Option<&'a Person>)> {
-        group.slots.iter().enumerate().map(|(i, slot)| {
-            (slot, self.slot_assignee(group, i, year, week, interval))
-        }).collect()
+    pub fn slot_assignments<'a>(
+        &'a self,
+        group: &'a CleaningGroup,
+        year: i32,
+        week: u32,
+        interval: u32,
+    ) -> Vec<(&'a CleaningSlot, Option<&'a Person>)> {
+        group
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| (slot, self.slot_assignee(group, i, year, week, interval)))
+            .collect()
     }
 
     pub fn last_completion(&self, group_id: &GroupId) -> Option<&Completion> {
-        self.completions.iter().filter(|c| &c.group_id == group_id).max_by_key(|c| c.completed_at)
+        self.completions
+            .iter()
+            .filter(|c| &c.group_id == group_id)
+            .max_by_key(|c| c.completed_at)
     }
 }
 
@@ -707,7 +982,8 @@ impl State {
     }
     pub fn missed_weeks_for(&self, group_id: &GroupId, interval: u32) -> Vec<(i32, u32)> {
         let cur = current_iso_week();
-        self.all_due_weeks(interval, cur).into_iter()
+        self.all_due_weeks(interval, cur)
+            .into_iter()
             .filter(|&(y, w)| (y, w) != cur && !self.is_completed(group_id, y, w))
             .collect()
     }
@@ -715,9 +991,17 @@ impl State {
         let cur = current_iso_week();
         let mut streak = 0u32;
         for &(y, w) in self.all_due_weeks(interval, cur).iter().rev() {
-            if (y, w) == cur && !self.is_cleaned(group_id, y, w) { continue; }
-            if self.is_completed(group_id, y, w) && !self.is_cleaned(group_id, y, w) { continue; }
-            if self.is_cleaned(group_id, y, w) { streak += 1; } else { break; }
+            if (y, w) == cur && !self.is_cleaned(group_id, y, w) {
+                continue;
+            }
+            if self.is_completed(group_id, y, w) && !self.is_cleaned(group_id, y, w) {
+                continue;
+            }
+            if self.is_cleaned(group_id, y, w) {
+                streak += 1;
+            } else {
+                break;
+            }
         }
         streak
     }
@@ -726,7 +1010,9 @@ impl State {
 // ── Week arithmetic ───────────────────────────────────────────────────────────
 
 pub fn weeks_ago(year: i32, week: u32, n: u32) -> (i32, u32) {
-    if n == 0 { return (year, week); }
+    if n == 0 {
+        return (year, week);
+    }
     let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
     let d = mon - chrono::Duration::weeks(n as i64);
@@ -745,12 +1031,19 @@ pub fn weeks_between(from: (i32, u32), to: (i32, u32)) -> i64 {
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(to.0, 1, 4).unwrap());
     (b - a).num_weeks()
 }
-pub fn all_due_weeks_in_range(start: (i32, u32), end: (i32, u32), interval: u32) -> Vec<(i32, u32)> {
+pub fn all_due_weeks_in_range(
+    start: (i32, u32),
+    end: (i32, u32),
+    interval: u32,
+) -> Vec<(i32, u32)> {
     let total = weeks_between(start, end);
-    if total < 0 { return vec![]; }
-    (0..).map(|n| add_weeks(start.0, start.1, n * interval as i64))
-         .take_while(|&w| weeks_between(start, w) <= total)
-         .collect()
+    if total < 0 {
+        return vec![];
+    }
+    (0..)
+        .map(|n| add_weeks(start.0, start.1, n * interval as i64))
+        .take_while(|&w| weeks_between(start, w) <= total)
+        .collect()
 }
 /// The configured wall-clock timezone (`schedule.timezone`), set once at
 /// startup by `main` before any command runs. Everything that decides "what
@@ -802,7 +1095,11 @@ pub fn first_due_week(state: &State, interval: u32) -> (i32, u32) {
         (start_y, start_w)
     } else {
         let past = elapsed / iv;
-        if elapsed % iv == 0 { (cur_y, cur_w) } else { add_weeks(start_y, start_w, (past + 1) * iv) }
+        if elapsed % iv == 0 {
+            (cur_y, cur_w)
+        } else {
+            add_weeks(start_y, start_w, (past + 1) * iv)
+        }
     }
 }
 pub fn week_dates(year: i32, week: u32) -> String {
@@ -810,7 +1107,12 @@ pub fn week_dates(year: i32, week: u32) -> String {
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
     let sun = mon + chrono::Duration::days(6);
     if mon.month() == sun.month() {
-        format!("{} – {} {}", mon.format("%-d"), sun.format("%-d"), mon.format("%b"))
+        format!(
+            "{} – {} {}",
+            mon.format("%-d"),
+            sun.format("%-d"),
+            mon.format("%b")
+        )
     } else {
         format!("{} – {}", mon.format("%-d %b"), sun.format("%-d %b"))
     }
@@ -830,7 +1132,11 @@ mod tests {
         // `!takeover`, materialize, and a bot restart landing in that window
         // would all disagree with what week users experience locally.
         let sunday_2330_utc: DateTime<Utc> = "2024-01-14T23:30:00Z".parse().unwrap();
-        assert_eq!(iso_week_at(sunday_2330_utc, chrono_tz::UTC), (2024, 2), "still week 2 in UTC itself");
+        assert_eq!(
+            iso_week_at(sunday_2330_utc, chrono_tz::UTC),
+            (2024, 2),
+            "still week 2 in UTC itself"
+        );
         assert_eq!(
             iso_week_at(sunday_2330_utc, chrono_tz::Europe::Berlin),
             (2024, 3),
@@ -849,19 +1155,29 @@ mod tests {
         let mut state = State::default();
         let (year, week) = (2024, 10);
 
-        assert!(state.belongs_in_weekly_plan(&group_id, year, week, 1), "nothing completed yet, so due");
+        assert!(
+            state.belongs_in_weekly_plan(&group_id, year, week, 1),
+            "nothing completed yet, so due"
+        );
 
         state.completions.push(Completion {
             group_id: group_id.clone(),
             slot_id: None,
             completed_by_id: "p1".into(),
             responsible_person_ids: vec!["p1".into()],
-            iso_year: year, iso_week: week,
+            iso_year: year,
+            iso_week: week,
             completed_at: Utc::now(),
             skipped: false,
         });
 
-        assert!(!state.is_due(&group_id, year, week, 1), "is_due alone flips false once completed");
-        assert!(state.belongs_in_weekly_plan(&group_id, year, week, 1), "completed group must stay visible");
+        assert!(
+            !state.is_due(&group_id, year, week, 1),
+            "is_due alone flips false once completed"
+        );
+        assert!(
+            state.belongs_in_weekly_plan(&group_id, year, week, 1),
+            "completed group must stay visible"
+        );
     }
 }

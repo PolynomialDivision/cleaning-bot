@@ -10,34 +10,31 @@
 //!
 //! The raw token is never stored — only its SHA-256 hash lives in state.json.
 
-use std::sync::Arc;
 use axum::{
-    Router,
     extract::{Path, State as AxumState},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
+    Router,
 };
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 
 use crate::{
-    config::Config,
-    domain::verify_calendar_token,
-    ical::render_ics,
-    schedule::build_schedule,
+    config::Config, domain::verify_calendar_token, ical::render_ics, schedule::build_schedule,
     state::State,
 };
 
 struct AppState {
-    state:  Arc<Mutex<State>>,
+    state: Arc<Mutex<State>>,
     config: Arc<Config>,
 }
 
 pub async fn run(
-    state:     Arc<Mutex<State>>,
-    config:    Arc<Config>,
+    state: Arc<Mutex<State>>,
+    config: Arc<Config>,
     bind_addr: &str,
 ) -> anyhow::Result<()> {
     let shared = Arc::new(AppState { state, config });
@@ -56,12 +53,17 @@ async fn serve_ical(
     AxumState(app): AxumState<Arc<AppState>>,
 ) -> Response {
     let token = token_ics.trim_end_matches(".ics");
-    info!("iCal request: token_prefix={}", &token.chars().take(8).collect::<String>());
+    info!(
+        "iCal request: token_prefix={}",
+        &token.chars().take(8).collect::<String>()
+    );
 
     let state = app.state.lock().await;
 
     // Token validation: strict hash comparison — no name-based fallbacks.
-    let person_id = state.calendar_tokens.iter()
+    let person_id = state
+        .calendar_tokens
+        .iter()
         .find(|ct| !ct.revoked && verify_calendar_token(token, &ct.token_hash))
         .map(|ct| ct.person_id.clone());
 
@@ -85,15 +87,20 @@ async fn serve_ical(
     // ETag = SHA-256 of the ICS body (deterministic for unchanged state).
     let etag = format!("\"{}\"", hex::encode(Sha256::digest(ics_body.as_bytes())));
     // Last-Modified in RFC 7231 format.
-    let last_mod_str = last_modified.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    let last_mod_str = last_modified
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE,        "text/calendar; charset=utf-8")
-        .header(header::CONTENT_DISPOSITION, "inline; filename=\"cleaning.ics\"")
-        .header(header::ETAG,                etag)
-        .header(header::LAST_MODIFIED,       last_mod_str)
-        .header("Cache-Control",             "private, no-cache, must-revalidate")
+        .header(header::CONTENT_TYPE, "text/calendar; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "inline; filename=\"cleaning.ics\"",
+        )
+        .header(header::ETAG, etag)
+        .header(header::LAST_MODIFIED, last_mod_str)
+        .header("Cache-Control", "private, no-cache, must-revalidate")
         .body(axum::body::Body::from(ics_body))
         .unwrap()
 }

@@ -1,26 +1,30 @@
 use anyhow::Result;
 use chrono::Utc;
 use matrix_sdk::{
-    Room,
     ruma::{
-        OwnedEventId, OwnedUserId, UInt,
         events::{
             relation::{Reply, Thread},
-            room::message::{FileInfo, FileMessageEventContent, MessageType, Relation, RoomMessageEventContent},
+            room::message::{
+                FileInfo, FileMessageEventContent, MessageType, Relation, RoomMessageEventContent,
+            },
         },
+        OwnedEventId, OwnedUserId, UInt,
     },
+    Room,
 };
 use uuid::Uuid;
 
 use crate::{
-    BotContext, format, resolver, scheduler,
     analytics::{self, DomainEvent},
-    domain::{new_calendar_token, AssignmentSource, CalendarToken, CleaningGroup, GroupId, Person, PersonId},
-    schedule::build_schedule,
-    state::{
-        SwapStatus,
-        add_weeks, current_iso_week, week_dates, weeks_between,
+    domain::{
+        new_calendar_token, AssignmentSource, CalendarToken, CleaningGroup, GroupId, Person,
+        PersonId,
     },
+    format, resolver,
+    schedule::build_schedule,
+    scheduler,
+    state::{add_weeks, current_iso_week, week_dates, weeks_between, SwapStatus},
+    BotContext,
 };
 
 /// Shell-like tokenizer: splits on whitespace but keeps "quoted strings" together.
@@ -34,12 +38,16 @@ fn tokenize(line: &str) -> Vec<String> {
         match c {
             '"' | '\'' => quoted = !quoted,
             ' ' | '\t' if !quoted => {
-                if !cur.is_empty() { tokens.push(std::mem::take(&mut cur)); }
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
             }
             _ => cur.push(c),
         }
     }
-    if !cur.is_empty() { tokens.push(cur); }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
     tokens
 }
 
@@ -52,8 +60,12 @@ pub async fn handle(
     thread_root: OwnedEventId,
 ) -> Result<Option<RoomMessageEventContent>> {
     let mut tokens = tokenize(body);
-    let cmd_owned  = if tokens.is_empty() { String::new() } else { tokens.remove(0) };
-    let cmd        = cmd_owned.as_str();
+    let cmd_owned = if tokens.is_empty() {
+        String::new()
+    } else {
+        tokens.remove(0)
+    };
+    let cmd = cmd_owned.as_str();
     let arg_strings = tokens;
     let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
 
@@ -65,7 +77,11 @@ pub async fn handle(
         if let Some(name) = fetched.get(sender_mxid.as_str()) {
             if !name.is_empty() && name != &sender_mxid {
                 let mut state = ctx.state.lock().await;
-                if let Some(p) = state.persons.iter_mut().find(|p| p.matrix_id.as_deref() == Some(&sender_mxid)) {
+                if let Some(p) = state
+                    .persons
+                    .iter_mut()
+                    .find(|p| p.matrix_id.as_deref() == Some(&sender_mxid))
+                {
                     p.display_name = name.clone();
                 }
             }
@@ -78,62 +94,62 @@ pub async fn handle(
             let s = cmd_linkmatrix(ctx, sender, room, &args).await?;
             return Ok(s.map(RoomMessageEventContent::text_plain));
         }
-        "!cleanplan"      => return cmd_cleanplan(ctx, sender, room, &args).await,
-        "!remind"         => return cmd_remind(ctx, sender, room, &args).await,
-        "!announceweek"   => return cmd_announceweek(ctx, sender, room).await,
-        "!repostplan"     => return cmd_announceweek(ctx, sender, room).await,
+        "!cleanplan" => return cmd_cleanplan(ctx, sender, room, &args).await,
+        "!remind" => return cmd_remind(ctx, sender, room, &args).await,
+        "!announceweek" => return cmd_announceweek(ctx, sender, room).await,
+        "!repostplan" => return cmd_announceweek(ctx, sender, room).await,
         "!testnotify" => return cmd_testnotify(room).await,
-        "!pdf"        => return cmd_pdf(ctx, sender, room, &args, event_id, thread_root).await,
-        "!ical"       => return cmd_ical(ctx, sender, room, &args).await,
-        "!icalreset"  => return cmd_icalreset(ctx, sender, room, &args).await,
+        "!pdf" => return cmd_pdf(ctx, sender, room, &args, event_id, thread_root).await,
+        "!ical" => return cmd_ical(ctx, sender, room, &args).await,
+        "!icalreset" => return cmd_icalreset(ctx, sender, room, &args).await,
         _ => {}
     }
 
     let reply: Option<String> = match cmd {
-        "!done"         => cmd_done(ctx, sender, &args).await,
-        "!status"       => cmd_status(ctx).await,
-        "!stats"        => cmd_stats(ctx, &args).await,
-        "!groups"       => cmd_floors(ctx).await,
-        "!cleaning"     => cmd_cleaning(ctx, sender, &args).await,
-        "!joingroup"    => cmd_joinfloor(ctx, sender, &args).await,
-        "!leavegroup"   => cmd_leavefloor(ctx, sender, &args).await,
-        "!swap"         => cmd_swap(ctx, sender, &args).await,
-        "!acceptswap"   => cmd_acceptswap(ctx, sender, &args).await,
-        "!rejectswap"   => cmd_rejectswap(ctx, sender, &args).await,
-        "!assign"       => cmd_assign(ctx, sender, &args).await,
-        "!unassign"     => cmd_unassign(ctx, sender, &args).await,
-        "!importplan"   => cmd_importplan(ctx, sender, &args).await,
-        "!takeover"     => cmd_takeover(ctx, sender, &args).await,
-        "!adduser"      => cmd_adduser(ctx, sender, &args).await,
-        "!removeuser"   => cmd_removeuser(ctx, sender, &args).await,
-        "!addperson"    => cmd_addperson(ctx, sender, &args).await,
+        "!done" => cmd_done(ctx, sender, &args).await,
+        "!status" => cmd_status(ctx).await,
+        "!stats" => cmd_stats(ctx, &args).await,
+        "!groups" => cmd_floors(ctx).await,
+        "!cleaning" => cmd_cleaning(ctx, sender, &args).await,
+        "!joingroup" => cmd_joinfloor(ctx, sender, &args).await,
+        "!leavegroup" => cmd_leavefloor(ctx, sender, &args).await,
+        "!swap" => cmd_swap(ctx, sender, &args).await,
+        "!acceptswap" => cmd_acceptswap(ctx, sender, &args).await,
+        "!rejectswap" => cmd_rejectswap(ctx, sender, &args).await,
+        "!assign" => cmd_assign(ctx, sender, &args).await,
+        "!unassign" => cmd_unassign(ctx, sender, &args).await,
+        "!importplan" => cmd_importplan(ctx, sender, &args).await,
+        "!takeover" => cmd_takeover(ctx, sender, &args).await,
+        "!adduser" => cmd_adduser(ctx, sender, &args).await,
+        "!removeuser" => cmd_removeuser(ctx, sender, &args).await,
+        "!addperson" => cmd_addperson(ctx, sender, &args).await,
         "!removeperson" => cmd_removeperson(ctx, sender, &args).await,
-        "!addgroup"     => cmd_addfloor(ctx, sender, &args).await,
-        "!removegroup"  => cmd_removefloor(ctx, sender, &args).await,
-        "!resetplan"    => cmd_resetplan(ctx, sender, &args).await,
-        "!addslot"      => cmd_addslot(ctx, sender, &args).await,
-        "!removeslot"   => cmd_removeslot(ctx, sender, &args).await,
-        "!addroom"      => cmd_addroom(ctx, sender, &args).await,
-        "!removeroom"   => cmd_removeroom(ctx, sender, &args).await,
-        "!undo"         => cmd_undo(ctx, sender, &args).await,
-        "!next"         => cmd_next(ctx, sender, &args).await,
-        "!skip"         => cmd_skip(ctx, sender, &args).await,
-        "!leaderboard"  => cmd_leaderboard(ctx).await,
-        "!fairness"        => cmd_fairness(ctx, &args).await,
-        "!planfairness"    => cmd_fairness(ctx, &args).await,
-        "!workload"        => cmd_workload(ctx).await,
-        "!groupstats"      => cmd_groupstats(ctx).await,
-        "!setgroupweight"  => cmd_setgroupweight(ctx, sender, &args).await,
-        "!setroomweight"   => cmd_setroomweight(ctx, sender, &args).await,
+        "!addgroup" => cmd_addfloor(ctx, sender, &args).await,
+        "!removegroup" => cmd_removefloor(ctx, sender, &args).await,
+        "!resetplan" => cmd_resetplan(ctx, sender, &args).await,
+        "!addslot" => cmd_addslot(ctx, sender, &args).await,
+        "!removeslot" => cmd_removeslot(ctx, sender, &args).await,
+        "!addroom" => cmd_addroom(ctx, sender, &args).await,
+        "!removeroom" => cmd_removeroom(ctx, sender, &args).await,
+        "!undo" => cmd_undo(ctx, sender, &args).await,
+        "!next" => cmd_next(ctx, sender, &args).await,
+        "!skip" => cmd_skip(ctx, sender, &args).await,
+        "!leaderboard" => cmd_leaderboard(ctx).await,
+        "!fairness" => cmd_fairness(ctx, &args).await,
+        "!planfairness" => cmd_fairness(ctx, &args).await,
+        "!workload" => cmd_workload(ctx).await,
+        "!groupstats" => cmd_groupstats(ctx).await,
+        "!setgroupweight" => cmd_setgroupweight(ctx, sender, &args).await,
+        "!setroomweight" => cmd_setroomweight(ctx, sender, &args).await,
         "!disablegroup" => cmd_disablegroup(ctx, sender, &args).await,
-        "!enablegroup"  => cmd_enablegroup(ctx, sender, &args).await,
-        "!listgroups"   => cmd_listgroups(ctx).await,
-        "!validate"     => cmd_validate(ctx, sender).await,
-        "!absent"       => cmd_absent(ctx, sender, &args).await,
-        "!back"         => cmd_back(ctx, sender, &args).await,
-        "!blame"        => cmd_blame(ctx, &args).await,
-        "!help"         => Ok(Some(help_text())),
-        _               => Ok(None),
+        "!enablegroup" => cmd_enablegroup(ctx, sender, &args).await,
+        "!listgroups" => cmd_listgroups(ctx).await,
+        "!validate" => cmd_validate(ctx, sender).await,
+        "!absent" => cmd_absent(ctx, sender, &args).await,
+        "!back" => cmd_back(ctx, sender, &args).await,
+        "!blame" => cmd_blame(ctx, &args).await,
+        "!help" => Ok(Some(help_text())),
+        _ => Ok(None),
     }?;
 
     // Every mutation that can change who's responsible for, or the status
@@ -146,7 +162,7 @@ pub async fn handle(
     }
 
     match reply {
-        None    => Ok(None),
+        None => Ok(None),
         Some(s) => Ok(Some(format::mentionify_rich(&s, room).await)),
     }
 }
@@ -163,12 +179,25 @@ pub async fn handle(
 /// covered by a direct unit test instead of only being verified by reading
 /// the dispatcher.
 fn command_may_change_current_plan(cmd: &str) -> bool {
-    matches!(cmd, "!done" | "!skip" | "!undo" | "!assign" | "!unassign" | "!takeover" | "!acceptswap" | "!importplan")
+    matches!(
+        cmd,
+        "!done"
+            | "!skip"
+            | "!undo"
+            | "!assign"
+            | "!unassign"
+            | "!takeover"
+            | "!acceptswap"
+            | "!importplan"
+    )
 }
 
 fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
-    if ctx.admin_users.contains(sender) { Ok(()) }
-    else { Err(anyhow::anyhow!("__not_admin__")) }
+    if ctx.admin_users.contains(sender) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("__not_admin__"))
+    }
 }
 
 /// Returns the MXID or display_name depending on whether the person has Matrix.
@@ -181,7 +210,13 @@ fn person_key(p: &Person) -> &str {
 /// Thresholds:  > +10% → overloaded  |  < -10% → under-contributing  |  else → balanced
 fn load_icon(actual: f64, expected: f64) -> &'static str {
     let (_, label) = load_delta_pct(actual, expected);
-    if label == "under-contributing" { "🔴" } else if label == "overloaded" { "🟠" } else { "🟢" }
+    if label == "under-contributing" {
+        "🔴"
+    } else if label == "overloaded" {
+        "🟠"
+    } else {
+        "🟢"
+    }
 }
 
 fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
@@ -197,7 +232,13 @@ fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
     } else {
         format!("{pct:.1}%")
     };
-    let label = if pct > 10.0 { "overloaded" } else if pct < -10.0 { "under-contributing" } else { "balanced" };
+    let label = if pct > 10.0 {
+        "overloaded"
+    } else if pct < -10.0 {
+        "under-contributing"
+    } else {
+        "balanced"
+    };
     (pct_str, label)
 }
 
@@ -206,7 +247,11 @@ fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
 /// additive — `resolver::materialize` never revisits or changes a week it
 /// already froze, so this is safe to call at any time without disturbing
 /// anyone's existing plan.
-fn materialize_and_apply(ctx: &BotContext, state: &mut crate::state::State, weeks_ahead: usize) -> anyhow::Result<()> {
+fn materialize_and_apply(
+    ctx: &BotContext,
+    state: &mut crate::state::State,
+    weeks_ahead: usize,
+) -> anyhow::Result<()> {
     let interval = ctx.config.schedule.interval_weeks;
     for ev in resolver::materialize(state, interval, weeks_ahead) {
         state.apply_event(ev)?;
@@ -217,9 +262,15 @@ fn materialize_and_apply(ctx: &BotContext, state: &mut crate::state::State, week
 /// How many due-cycles ahead of `first_due_week` a group is *already*
 /// materialized (i.e. has a frozen `SlotAssignment` for), based on its
 /// furthest currently-stored assignment. 0 means nothing is frozen yet.
-fn group_horizon_weeks_ahead(state: &crate::state::State, group_id: &GroupId, interval: u32) -> usize {
+fn group_horizon_weeks_ahead(
+    state: &crate::state::State,
+    group_id: &GroupId,
+    interval: u32,
+) -> usize {
     let first_due = crate::state::first_due_week(state, interval);
-    let max_offset = state.slot_assignments.iter()
+    let max_offset = state
+        .slot_assignments
+        .iter()
         .filter(|a| a.group_id == *group_id)
         .filter_map(|a| {
             let d = crate::state::weeks_between(first_due, (a.iso_year, a.iso_week));
@@ -228,7 +279,7 @@ fn group_horizon_weeks_ahead(state: &crate::state::State, group_id: &GroupId, in
         .max();
     match max_offset {
         Some(d) => d / (interval.max(1) as usize) + 1,
-        None    => 0,
+        None => 0,
     }
 }
 
@@ -245,16 +296,14 @@ fn reset_and_rematerialize(
     let before = state.slot_assignments.len();
     // Drop assignments after the active week; they'll be rebuilt with the full list.
     state.slot_assignments.retain(|a| {
-        a.group_id != group_id
-            || a.iso_year < cur_y
-            || (a.iso_year == cur_y && a.iso_week <= cur_w)
+        a.group_id != group_id || a.iso_year < cur_y || (a.iso_year == cur_y && a.iso_week <= cur_w)
     });
     let cleared = before - state.slot_assignments.len();
 
     if let Some(group) = state.group_by_id(&group_id.to_owned()).cloned() {
         state.apply_event(DomainEvent::RotationQueueSet {
             group_id: group_id.to_owned(),
-            queue:    group.member_ids.clone(),
+            queue: group.member_ids.clone(),
         })?;
     }
     // Explicit admin escape hatch: commit the full configured horizon, not
@@ -289,7 +338,8 @@ pub(crate) fn apply_group_join(
     group_id: &GroupId,
     person_id: &PersonId,
 ) -> anyhow::Result<()> {
-    let rotation_was_empty = state.group_by_id(group_id)
+    let rotation_was_empty = state
+        .group_by_id(group_id)
         .is_some_and(|g| g.member_ids.is_empty());
 
     // Freeze the active week (if not already frozen) using the OLD queue,
@@ -299,16 +349,26 @@ pub(crate) fn apply_group_join(
     if let Some(group) = state.group_by_id(group_id).cloned() {
         let mut queue = resolver::reconcile_queue(state, &group);
         queue.retain(|id| id != person_id);
-        let has_had_a_turn = |pid: &PersonId| state.slot_assignments.iter()
-            .any(|a| a.group_id == *group_id && a.person_id.as_deref() == Some(pid.as_str()));
-        let insert_at = queue.iter().rposition(|pid| !has_had_a_turn(pid)).map_or(0, |i| i + 1);
+        let has_had_a_turn = |pid: &PersonId| {
+            state
+                .slot_assignments
+                .iter()
+                .any(|a| a.group_id == *group_id && a.person_id.as_deref() == Some(pid.as_str()))
+        };
+        let insert_at = queue
+            .iter()
+            .rposition(|pid| !has_had_a_turn(pid))
+            .map_or(0, |i| i + 1);
         queue.insert(insert_at, person_id.clone());
-        state.apply_event(DomainEvent::RotationQueueSet { group_id: group_id.clone(), queue })?;
+        state.apply_event(DomainEvent::RotationQueueSet {
+            group_id: group_id.clone(),
+            queue,
+        })?;
     }
 
     state.apply_event(DomainEvent::PersonJoinedGroup {
         person_id: person_id.clone(),
-        group_id:  group_id.clone(),
+        group_id: group_id.clone(),
     })?;
 
     if rotation_was_empty {
@@ -347,7 +407,10 @@ fn apply_group_departure(
 
     if let Some(group) = state.group_by_id(group_id).cloned() {
         let queue = resolver::reconcile_queue(state, &group);
-        state.apply_event(DomainEvent::RotationQueueSet { group_id: group_id.clone(), queue })?;
+        state.apply_event(DomainEvent::RotationQueueSet {
+            group_id: group_id.clone(),
+            queue,
+        })?;
     }
 
     // Refill within whatever horizon this group already had — a leave
@@ -385,7 +448,9 @@ fn extract_week_arg<'a>(args: &'a [&'a str]) -> Option<(&'a [&'a str], (i32, u32
     let (cur_y, cur_w) = current_iso_week();
     match args.iter().position(|a| a.eq_ignore_ascii_case("week")) {
         Some(pos) => {
-            let n: u32 = args.get(pos + 1).and_then(|s| s.parse().ok())
+            let n: u32 = args
+                .get(pos + 1)
+                .and_then(|s| s.parse().ok())
                 .filter(|n| (1..=53).contains(n))?;
             let y = if n < cur_w { cur_y + 1 } else { cur_y };
             Some((&args[..pos], (y, n)))
@@ -404,14 +469,25 @@ fn resolve_group_and_slot<'a>(
     group_name: &str,
     rest: &'a [&'a str],
 ) -> std::result::Result<(GroupId, usize, &'a [&'a str]), String> {
-    let group = state.group_by_name(group_name)
+    let group = state
+        .group_by_name(group_name)
         .ok_or_else(|| format!("Group «{group_name}» not found."))?;
     if group.is_multi_slot() {
-        match rest.first().and_then(|s| group.slots.iter().position(|slot| slot.name.eq_ignore_ascii_case(s))) {
+        match rest.first().and_then(|s| {
+            group
+                .slots
+                .iter()
+                .position(|slot| slot.name.eq_ignore_ascii_case(s))
+        }) {
             Some(idx) => Ok((group.id.clone(), idx, &rest[1..])),
             None => Err(format!(
                 "«{group_name}» has slots. Specify one: {}",
-                group.slots.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+                group
+                    .slots
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     } else {
@@ -441,7 +517,10 @@ fn resolve_takeover_target(
     week: u32,
     interval: u32,
 ) -> std::result::Result<(GroupId, usize), String> {
-    fn own_group(state: &crate::state::State, sender_person_id: &PersonId) -> std::result::Result<CleaningGroup, String> {
+    fn own_group(
+        state: &crate::state::State,
+        sender_person_id: &PersonId,
+    ) -> std::result::Result<CleaningGroup, String> {
         match state.groups_for_person(sender_person_id).as_slice() {
             [] => Err("You are not in any cleaning group. Specify one: !takeover <group> [<slot>]".into()),
             [g] => Ok((*g).clone()),
@@ -453,10 +532,12 @@ fn resolve_takeover_target(
     }
 
     let (group, slot_token): (CleaningGroup, Option<&str>) = match rest.first() {
-        Some(&first) if state.group_by_name(first).is_some() =>
-            (state.group_by_name(first).unwrap().clone(), rest.get(1).copied()),
+        Some(&first) if state.group_by_name(first).is_some() => (
+            state.group_by_name(first).unwrap().clone(),
+            rest.get(1).copied(),
+        ),
         Some(&first) => (own_group(state, sender_person_id)?, Some(first)),
-        None          => (own_group(state, sender_person_id)?, None),
+        None => (own_group(state, sender_person_id)?, None),
     };
 
     let slot_index = match slot_token {
@@ -464,13 +545,24 @@ fn resolve_takeover_target(
             if !group.is_multi_slot() {
                 return Err(format!("«{}» does not have slots.", group.name));
             }
-            match group.slots.iter().position(|s| s.name.eq_ignore_ascii_case(name)) {
+            match group
+                .slots
+                .iter()
+                .position(|s| s.name.eq_ignore_ascii_case(name))
+            {
                 Some(idx) => idx,
-                None => return Err(format!(
-                    "«{name}» is not a group or a slot of «{}». Slots: {}",
-                    group.name,
-                    group.slots.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
-                )),
+                None => {
+                    return Err(format!(
+                        "«{name}» is not a group or a slot of «{}». Slots: {}",
+                        group.name,
+                        group
+                            .slots
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }
             }
         }
         None => auto_pick_takeover_slot(state, &group, sender_person_id, year, week, interval)?,
@@ -493,10 +585,14 @@ fn auto_pick_takeover_slot(
     if !group.is_multi_slot() {
         return Ok(0);
     }
-    let candidates: Vec<usize> = group.slots.iter().enumerate()
+    let candidates: Vec<usize> = group
+        .slots
+        .iter()
+        .enumerate()
         .filter(|(i, slot)| {
             !state.is_slot_completed(&group.id, &slot.id, year, week)
-                && state.slot_assignee(group, *i, year, week, interval)
+                && state
+                    .slot_assignee(group, *i, year, week, interval)
                     .is_none_or(|p| &p.id != sender_person_id)
         })
         .map(|(i, _)| i)
@@ -535,8 +631,12 @@ fn freeze_schedule_before_join(
         // otherwise whoever got picked would stay stuck at the queue's front
         // and get reused for the very next week too.
         let applies = match &event {
-            DomainEvent::SlotAssigned { group_id: g, iso_year, iso_week, .. } =>
-                g == group_id && *iso_year == cur_y && *iso_week == cur_w,
+            DomainEvent::SlotAssigned {
+                group_id: g,
+                iso_year,
+                iso_week,
+                ..
+            } => g == group_id && *iso_year == cur_y && *iso_week == cur_w,
             DomainEvent::RotationQueueSet { group_id: g, .. } => g == group_id,
             _ => false,
         };
@@ -612,16 +712,21 @@ fn current_open_assignments(
     }
 
     if group.is_multi_slot() {
-        group.slots.iter().enumerate()
+        group
+            .slots
+            .iter()
+            .enumerate()
             .filter(|(_, slot)| !state.is_slot_completed(group_id, &slot.id, year, week))
             .filter_map(|(index, slot)| {
-                state.slot_assignee(group, index, year, week, interval)
+                state
+                    .slot_assignee(group, index, year, week, interval)
                     .filter(|person| &person.id == person_id)
                     .map(|_| slot.name.clone())
             })
             .collect()
     } else if !state.is_completed(group_id, year, week)
-        && state.responsible_person(group, year, week, interval)
+        && state
+            .responsible_person(group, year, week, interval)
             .is_some_and(|person| &person.id == person_id)
     {
         vec![group.name.clone()]
@@ -638,10 +743,7 @@ fn person_label(person: &Person) -> String {
     }
 }
 
-fn next_assignment_summary(
-    state: &crate::state::State,
-    group_id: &GroupId,
-) -> String {
+fn next_assignment_summary(state: &crate::state::State, group_id: &GroupId) -> String {
     let (cur_y, cur_w) = current_iso_week();
     let Some(group) = state.group_by_id(group_id) else {
         return "Next: unavailable.".to_owned();
@@ -650,7 +752,9 @@ fn next_assignment_summary(
         return "Next: rotation is empty.".to_owned();
     }
 
-    let next_week = state.slot_assignments.iter()
+    let next_week = state
+        .slot_assignments
+        .iter()
         .filter(|a| {
             a.group_id == *group_id
                 && (a.iso_year > cur_y || (a.iso_year == cur_y && a.iso_week > cur_w))
@@ -661,14 +765,20 @@ fn next_assignment_summary(
     let Some((year, week)) = next_week else {
         return "Next: no future assignment is materialized.".to_owned();
     };
-    let mut names: Vec<String> = state.slot_assignments.iter()
+    let mut names: Vec<String> = state
+        .slot_assignments
+        .iter()
         .filter(|a| a.group_id == *group_id && a.iso_year == year && a.iso_week == week)
         .filter_map(|a| a.person_id.as_ref())
         .filter_map(|id| state.person_by_id(id))
         .map(person_label)
         .collect();
     names.dedup();
-    let who = if names.is_empty() { "unassigned".to_owned() } else { names.join(", ") };
+    let who = if names.is_empty() {
+        "unassigned".to_owned()
+    } else {
+        names.join(", ")
+    };
     let dates = week_dates(year, week);
     format!("Next: {who} · week {week} ({dates}).")
 }
@@ -677,12 +787,22 @@ fn next_assignment_summary(
 /// Keeps Person.display_name in sync with the real Matrix profile name.
 /// Called before PDF generation and whenever a command comes in.
 async fn refresh_display_names(ctx: &BotContext, room: &Room) {
-    let mxids: Vec<String> = ctx.state.lock().await.persons.iter()
-        .filter_map(|p| p.matrix_id.clone()).collect();
-    if mxids.is_empty() { return; }
+    let mxids: Vec<String> = ctx
+        .state
+        .lock()
+        .await
+        .persons
+        .iter()
+        .filter_map(|p| p.matrix_id.clone())
+        .collect();
+    if mxids.is_empty() {
+        return;
+    }
     let refs: Vec<&str> = mxids.iter().map(String::as_str).collect();
     let fetched = format::fetch_names(room, &refs).await;
-    if fetched.is_empty() { return; }
+    if fetched.is_empty() {
+        return;
+    }
     let mut state = ctx.state.lock().await;
     for p in &mut state.persons {
         if let Some(mxid) = &p.matrix_id {
@@ -698,26 +818,32 @@ async fn refresh_display_names(ctx: &BotContext, room: &Room) {
 // ── !done [group] ─────────────────────────────────────────────────────────────
 
 async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    let (year, week)  = current_iso_week();
-    let sender_mxid   = sender.as_str();
-    let mut state     = ctx.state.lock().await;
+    let (year, week) = current_iso_week();
+    let sender_mxid = sender.as_str();
+    let mut state = ctx.state.lock().await;
 
     // Resolve sender to a Person.
     let sender_person_id = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
         Some(id) => id,
-        None => return Ok(Some(format!(
-            "You are not registered. Ask an admin to run !adduser {sender_mxid} <group>."
-        ))),
+        None => {
+            return Ok(Some(format!(
+                "You are not registered. Ask an admin to run !adduser {sender_mxid} <group>."
+            )))
+        }
     };
 
     // Determine target group(s).
     let target_group_ids: Vec<String> = if let Some(name) = args.first() {
         match state.group_by_name(name) {
             Some(g) => vec![g.id.clone()],
-            None    => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
-        state.groups_for_person(&sender_person_id).iter().map(|g| g.id.clone()).collect()
+        state
+            .groups_for_person(&sender_person_id)
+            .iter()
+            .map(|g| g.id.clone())
+            .collect()
     };
 
     if target_group_ids.is_empty() {
@@ -738,10 +864,14 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
         // never the original round-robin pick.
         let is_current_assignee = if group.is_multi_slot() {
             group.slots.iter().enumerate().any(|(i, _)| {
-                state.slot_assignee(&group, i, year, week, interval).is_some_and(|p| p.id == sender_person_id)
+                state
+                    .slot_assignee(&group, i, year, week, interval)
+                    .is_some_and(|p| p.id == sender_person_id)
             })
         } else {
-            state.responsible_person(&group, year, week, interval).is_some_and(|p| p.id == sender_person_id)
+            state
+                .responsible_person(&group, year, week, interval)
+                .is_some_and(|p| p.id == sender_person_id)
         };
         if !is_member && !is_current_assignee {
             return Ok(Some(format!("You are not a member of «{}».", group.name)));
@@ -749,16 +879,25 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
         if group.is_multi_slot() {
             // Mark the slot(s) assigned to this person.
-            let slot_assignments: Vec<(String, String)> = group.slots.iter().enumerate()
+            let slot_assignments: Vec<(String, String)> = group
+                .slots
+                .iter()
+                .enumerate()
                 .filter_map(|(slot_idx, slot)| {
                     let assignee = state.slot_assignee(&group, slot_idx, year, week, interval)?;
-                    if assignee.id == sender_person_id { Some((slot.id.clone(), slot.name.clone())) } else { None }
+                    if assignee.id == sender_person_id {
+                        Some((slot.id.clone(), slot.name.clone()))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
             if slot_assignments.is_empty() {
                 let name = group.name.clone();
-                return Ok(Some(format!("You are not assigned to any slot in «{name}» this week.")));
+                return Ok(Some(format!(
+                    "You are not assigned to any slot in «{name}» this week."
+                )));
             }
 
             for (slot_id, slot_name) in slot_assignments {
@@ -768,11 +907,12 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
                 }
                 let responsible_ids = vec![sender_person_id.clone()];
                 state.apply_event(DomainEvent::CleaningCompleted {
-                    group_id:               group_id.clone(),
-                    slot_id:                Some(slot_id),
-                    person_id:              sender_person_id.clone(),
+                    group_id: group_id.clone(),
+                    slot_id: Some(slot_id),
+                    person_id: sender_person_id.clone(),
                     responsible_person_ids: responsible_ids,
-                    iso_year: year, iso_week: week,
+                    iso_year: year,
+                    iso_week: week,
                 })?;
                 // Report group as fully done only when all slots complete.
                 if state.is_completed(group_id, year, week) {
@@ -786,14 +926,17 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
                 already_done.push(group.name.clone());
                 continue;
             }
-            let responsible_ids: Vec<String> = state.responsible_person(&group, year, week, interval)
-                .map(|p| vec![p.id.clone()]).unwrap_or_default();
+            let responsible_ids: Vec<String> = state
+                .responsible_person(&group, year, week, interval)
+                .map(|p| vec![p.id.clone()])
+                .unwrap_or_default();
             state.apply_event(DomainEvent::CleaningCompleted {
-                group_id:               group_id.clone(),
-                slot_id:                None,
-                person_id:              sender_person_id.clone(),
+                group_id: group_id.clone(),
+                slot_id: None,
+                person_id: sender_person_id.clone(),
                 responsible_person_ids: responsible_ids,
-                iso_year: year, iso_week: week,
+                iso_year: year,
+                iso_week: week,
             })?;
             marked.push(group.name.clone());
         }
@@ -803,8 +946,12 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     drop(state);
 
     let mut lines = vec![];
-    if !marked.is_empty()       { lines.push(format!("✅ Cleaned: {}", marked.join(", "))); }
-    if !already_done.is_empty() { lines.push(format!("Already done: {}", already_done.join(", "))); }
+    if !marked.is_empty() {
+        lines.push(format!("✅ Cleaned: {}", marked.join(", ")));
+    }
+    if !already_done.is_empty() {
+        lines.push(format!("Already done: {}", already_done.join(", ")));
+    }
     Ok(Some(lines.join("\n")))
 }
 
@@ -812,20 +959,29 @@ async fn cmd_done(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
 async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
     let (year, week) = current_iso_week();
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
 
-    let active_groups: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    let active_groups: Vec<_> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active)
+        .collect();
     if active_groups.is_empty() {
         return Ok(Some("No active cleaning groups configured yet.".into()));
     }
 
-    let mut lines = vec![format!("📋 **Cleaning status** · week {week} ({})", week_dates(year, week))];
+    let mut lines = vec![format!(
+        "📋 **Cleaning status** · week {week} ({})",
+        week_dates(year, week)
+    )];
     for group in &active_groups {
         let done = state.is_completed(&group.id, year, week);
         let icon = if done { "✅" } else { "❌" };
         let who = if done {
-            state.completions.iter()
+            state
+                .completions
+                .iter()
                 .find(|c| c.group_id == group.id && c.iso_year == year && c.iso_week == week)
                 .and_then(|c| state.person_by_id(&c.completed_by_id))
                 .map(|p| format!(" · {}", p.display_name))
@@ -833,10 +989,13 @@ async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
         } else {
             match state.responsible_person(group, year, week, interval) {
                 Some(p) => format!(" · {}", person_key(p)),
-                None    => " · (nobody assigned)".into(),
+                None => " · (nobody assigned)".into(),
             }
         };
-        let rooms_str = group.rooms_text().map(|r| format!("\n  {r}")).unwrap_or_default();
+        let rooms_str = group
+            .rooms_text()
+            .map(|r| format!("\n  {r}"))
+            .unwrap_or_default();
         lines.push(format!("{icon} **{}**{who}{rooms_str}", group.name));
     }
     Ok(Some(lines.join("\n")))
@@ -845,7 +1004,7 @@ async fn cmd_status(ctx: &BotContext) -> Result<Option<String>> {
 // ── !stats [@user] ────────────────────────────────────────────────────────────
 
 async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
     let (start_y, start_w) = state.tracking_start();
 
@@ -853,43 +1012,77 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     if let Some(query) = args.first().copied() {
         let person_id = match state.find_person(query).map(|p| p.id.clone()) {
             Some(id) => id,
-            None     => return Ok(Some(format!("Person «{query}» not found."))),
+            None => return Ok(Some(format!("Person «{query}» not found."))),
         };
         let ps = match analytics::person_stats(&state, &person_id, interval) {
             Some(s) => s,
-            None    => return Ok(Some(format!("{query} is not in any cleaning group."))),
+            None => return Ok(Some(format!("{query} is not in any cleaning group."))),
         };
-        let mut completions: Vec<_> = state.completions.iter()
+        let mut completions: Vec<_> = state
+            .completions
+            .iter()
             .filter(|c| c.completed_by_id == person_id)
             .collect();
-        completions.sort_by(|a,b| b.completed_at.cmp(&a.completed_at));
+        completions.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
         let pct = (ps.completion_rate * 100.0).round() as u32;
-        let streak_str = if ps.streak >= 2 { format!(" 🔥{}", ps.streak) } else { String::new() };
+        let streak_str = if ps.streak >= 2 {
+            format!(" 🔥{}", ps.streak)
+        } else {
+            String::new()
+        };
         let mut lines = vec![
-            format!("📊 **Stats** · {} · since W{start_w} ({})", ps.display_name, week_dates(start_y, start_w)),
-            format!("Group: {} · {}/{} ({}%){streak_str}", ps.group_names, ps.completed, ps.due_weeks, pct),
+            format!(
+                "📊 **Stats** · {} · since W{start_w} ({})",
+                ps.display_name,
+                week_dates(start_y, start_w)
+            ),
+            format!(
+                "Group: {} · {}/{} ({}%){streak_str}",
+                ps.group_names, ps.completed, ps.due_weeks, pct
+            ),
             format!("Missed: {} · Skipped: {}", ps.missed, ps.skipped),
         ];
         if ps.swaps_given > 0 || ps.swaps_taken > 0 {
-            lines.push(format!("Swaps: given {} · taken {}", ps.swaps_given, ps.swaps_taken));
+            lines.push(format!(
+                "Swaps: given {} · taken {}",
+                ps.swaps_given, ps.swaps_taken
+            ));
         }
         if let Some(last) = completions.first() {
-            lines.push(format!("Last: week {} ({})", last.iso_week, week_dates(last.iso_year, last.iso_week)));
+            lines.push(format!(
+                "Last: week {} ({})",
+                last.iso_week,
+                week_dates(last.iso_year, last.iso_week)
+            ));
         }
         if completions.len() > 1 {
             lines.push("Recent:".into());
             for c in completions.iter().take(5) {
-                let gname = state.group_by_id(&c.group_id).map(|g| g.name.as_str()).unwrap_or("?");
-                lines.push(format!("  • {gname} · week {} ({})", c.iso_week, week_dates(c.iso_year, c.iso_week)));
+                let gname = state
+                    .group_by_id(&c.group_id)
+                    .map(|g| g.name.as_str())
+                    .unwrap_or("?");
+                lines.push(format!(
+                    "  • {gname} · week {} ({})",
+                    c.iso_week,
+                    week_dates(c.iso_year, c.iso_week)
+                ));
             }
         }
         return Ok(Some(lines.join("\n")));
     }
 
     // Group summary view.
-    let mut lines = vec![format!("📊 **Cleaning stats** · since week {start_w} ({})", week_dates(start_y, start_w))];
+    let mut lines = vec![format!(
+        "📊 **Cleaning stats** · since week {start_w} ({})",
+        week_dates(start_y, start_w)
+    )];
     let (cur_y, cur_w) = current_iso_week();
-    let active_groups: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    let active_groups: Vec<_> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active)
+        .collect();
     if active_groups.is_empty() {
         lines.push("  No active cleaning groups configured yet.".into());
         return Ok(Some(lines.join("\n")));
@@ -897,23 +1090,41 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
 
     for group in &active_groups {
         let gs = match analytics::group_stats(&state, &group.id, interval) {
-            Some(s) => s, None => continue,
+            Some(s) => s,
+            None => continue,
         };
         let pct = (gs.completion_rate * 100.0).round() as u32;
         let this_week = state.is_completed(&group.id, cur_y, cur_w);
         lines.push(String::new());
         lines.push(format!("🏢 {} ({} members)", group.name, gs.member_count));
-        lines.push(format!("Completed: {}/{} ({pct}%) · Missed: {}", gs.completed, gs.due_weeks, gs.missed));
-        lines.push(format!("Streak: {} · This week: {}", gs.current_streak, if this_week { "✅" } else { "❌" }));
+        lines.push(format!(
+            "Completed: {}/{} ({pct}%) · Missed: {}",
+            gs.completed, gs.due_weeks, gs.missed
+        ));
+        lines.push(format!(
+            "Streak: {} · This week: {}",
+            gs.current_streak,
+            if this_week { "✅" } else { "❌" }
+        ));
         if let Some(last) = state.last_completion(&group.id) {
-            let by = state.person_by_id(&last.completed_by_id).map(|p| p.display_name.as_str()).unwrap_or("?");
-            lines.push(format!("Last: week {} ({}) by {by}", last.iso_week, week_dates(last.iso_year, last.iso_week)));
+            let by = state
+                .person_by_id(&last.completed_by_id)
+                .map(|p| p.display_name.as_str())
+                .unwrap_or("?");
+            lines.push(format!(
+                "Last: week {} ({}) by {by}",
+                last.iso_week,
+                week_dates(last.iso_year, last.iso_week)
+            ));
         }
         // Per-member counts
         for pid in &group.member_ids {
             if let Some(p) = state.person_by_id(pid) {
-                let cnt = state.completions.iter()
-                    .filter(|c| c.group_id == group.id && c.completed_by_id == *pid && !c.skipped).count();
+                let cnt = state
+                    .completions
+                    .iter()
+                    .filter(|c| c.group_id == group.id && c.completed_by_id == *pid && !c.skipped)
+                    .count();
                 lines.push(format!("  {}: {cnt}", p.display_name));
             }
         }
@@ -925,7 +1136,11 @@ async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
 
 async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let active: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    let active: Vec<_> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active)
+        .collect();
     if active.is_empty() {
         return Ok(Some("No active cleaning groups configured.".into()));
     }
@@ -934,11 +1149,16 @@ async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
         let members_text = if group.member_ids.is_empty() {
             "(no members)".to_owned()
         } else {
-            group.member_ids.iter()
+            group
+                .member_ids
+                .iter()
                 .filter_map(|id| state.person_by_id(id))
                 .map(|p| {
-                    if p.matrix_id.is_some() { p.display_name.clone() }
-                    else { format!("{} (no Matrix)", p.display_name) }
+                    if p.matrix_id.is_some() {
+                        p.display_name.clone()
+                    } else {
+                        format!("{} (no Matrix)", p.display_name)
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -955,25 +1175,35 @@ async fn cmd_floors(ctx: &BotContext) -> Result<Option<String>> {
 
 // ── !joinfloor <group> ────────────────────────────────────────────────────────
 
-async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_joinfloor(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !joingroup <group>".into())),
+        None => return Ok(Some("Usage: !joingroup <group>".into())),
     };
     let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
 
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
     // PersonCreated is idempotent — safe even if this Matrix user already exists.
     let new_person_id = uuid::Uuid::new_v4().to_string();
     state.apply_event(DomainEvent::PersonCreated {
-        person_id: new_person_id, display_name: mxid.to_owned(), matrix_id: Some(mxid.to_owned()),
+        person_id: new_person_id,
+        display_name: mxid.to_owned(),
+        matrix_id: Some(mxid.to_owned()),
     })?;
     let person_id = state.person_by_matrix_id(mxid).unwrap().id.clone();
-    if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
+    if state
+        .group_by_id(&group_id)
+        .map(|g| g.member_ids.contains(&person_id))
+        .unwrap_or(false)
+    {
         return Ok(Some(format!("You are already in «{group_name}».")));
     }
     apply_group_join(ctx, &mut state, &group_id, &person_id)?;
@@ -983,23 +1213,31 @@ async fn cmd_joinfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
 
 // ── !leavefloor <group> ───────────────────────────────────────────────────────
 
-async fn cmd_leavefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_leavefloor(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !leavegroup <group>".into())),
+        None => return Ok(Some("Usage: !leavegroup <group>".into())),
     };
     let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
 
     let person_id = match state.person_by_matrix_id(mxid).map(|p| p.id.clone()) {
         Some(id) => id,
-        None     => return Ok(Some("You are not registered in any group.".into())),
+        None => return Ok(Some("You are not registered in any group.".into())),
     };
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    if !state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
+    if !state
+        .group_by_id(&group_id)
+        .map(|g| g.member_ids.contains(&person_id))
+        .unwrap_or(false)
+    {
         return Ok(Some(format!("You are not in «{group_name}».")));
     }
     let open = current_open_assignments(
@@ -1015,7 +1253,10 @@ async fn cmd_leavefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
             open.join(", ")
         )));
     }
-    state.apply_event(DomainEvent::PersonLeftGroup { person_id: person_id.clone(), group_id: group_id.clone() })?;
+    state.apply_event(DomainEvent::PersonLeftGroup {
+        person_id: person_id.clone(),
+        group_id: group_id.clone(),
+    })?;
     apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Left «{group_name}».")))
@@ -1047,7 +1288,11 @@ async fn cmd_cleaning_people(ctx: &BotContext, args: &[&str]) -> Result<Option<S
             Some(group) => vec![group],
             None => return Ok(Some(format!("Group «{group_name}» not found."))),
         },
-        None => state.cleaning_groups.iter().filter(|group| group.is_active).collect(),
+        None => state
+            .cleaning_groups
+            .iter()
+            .filter(|group| group.is_active)
+            .collect(),
     };
 
     if groups.is_empty() {
@@ -1061,7 +1306,8 @@ async fn cmd_cleaning_people(ctx: &BotContext, args: &[&str]) -> Result<Option<S
             lines.push("Rotation is empty.".to_owned());
         } else {
             for (index, person_id) in group.member_ids.iter().enumerate() {
-                let label = state.person_by_id(person_id)
+                let label = state
+                    .person_by_id(person_id)
                     .map(person_label)
                     .unwrap_or_else(|| format!("unknown ({person_id})"));
                 lines.push(format!("{}. {label}", index + 1));
@@ -1095,10 +1341,13 @@ async fn add_matrix_participant(
     };
 
     if let Some(person) = state.person_by_matrix_id(mxid) {
-        if state.group_by_id(&group_id)
+        if state
+            .group_by_id(&group_id)
             .is_some_and(|group| group.member_ids.contains(&person.id))
         {
-            return Ok(Some(format!("{mxid} is already in «{group_name}». No changes made.")));
+            return Ok(Some(format!(
+                "{mxid} is already in «{group_name}». No changes made."
+            )));
         }
     } else {
         state.apply_event(DomainEvent::PersonCreated {
@@ -1108,7 +1357,8 @@ async fn add_matrix_participant(
         })?;
     }
 
-    let person_id = state.person_by_matrix_id(mxid)
+    let person_id = state
+        .person_by_matrix_id(mxid)
         .expect("validated Matrix person must exist")
         .id
         .clone();
@@ -1130,7 +1380,11 @@ async fn remove_matrix_participant(
     require_admin(ctx, sender)?;
     let (mxid, group_name) = match (args.first(), args.get(1)) {
         (Some(mxid), Some(group)) => (*mxid, *group),
-        _ => return Ok(Some("Usage: !cleaning remove @user:server <group>".to_owned())),
+        _ => {
+            return Ok(Some(
+                "Usage: !cleaning remove @user:server <group>".to_owned(),
+            ))
+        }
     };
     if let Err(message) = validate_matrix_user_id(mxid) {
         return Ok(Some(message));
@@ -1145,10 +1399,13 @@ async fn remove_matrix_participant(
         Some(group) => group.id.clone(),
         None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    if !state.group_by_id(&group_id)
+    if !state
+        .group_by_id(&group_id)
         .is_some_and(|group| group.member_ids.contains(&person_id))
     {
-        return Ok(Some(format!("{mxid} is not in «{group_name}». No changes made.")));
+        return Ok(Some(format!(
+            "{mxid} is not in «{group_name}». No changes made."
+        )));
     }
 
     let open = current_open_assignments(
@@ -1182,17 +1439,29 @@ async fn remove_matrix_participant(
 
 // ── Admin: legacy Matrix participant aliases ──────────────────────────────────
 
-async fn cmd_adduser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_adduser(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     add_matrix_participant(ctx, sender, args).await
 }
 
-async fn cmd_removeuser(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_removeuser(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     remove_matrix_participant(ctx, sender, args).await
 }
 
 // ── Admin: !addperson <name> <group> ─────────────────────────────────────────
 
-async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_addperson(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (name, group_name) = match (args.first(), args.get(1)) {
         (Some(n), Some(f)) => (n.to_string(), f.to_string()),
@@ -1201,7 +1470,7 @@ async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
     let person_id = if let Some(person) = state.find_person(&name) {
         person.id.clone()
@@ -1211,10 +1480,20 @@ async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
             display_name: name.clone(),
             matrix_id: None,
         })?;
-        state.find_person(&name).expect("created person must exist").id.clone()
+        state
+            .find_person(&name)
+            .expect("created person must exist")
+            .id
+            .clone()
     };
-    if state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
-        return Ok(Some(format!("{name} is already in «{group_name}». No changes made.")));
+    if state
+        .group_by_id(&group_id)
+        .map(|g| g.member_ids.contains(&person_id))
+        .unwrap_or(false)
+    {
+        return Ok(Some(format!(
+            "{name} is already in «{group_name}». No changes made."
+        )));
     }
     apply_group_join(ctx, &mut state, &group_id, &person_id)?;
     let next = next_assignment_summary(&state, &group_id);
@@ -1227,7 +1506,11 @@ async fn cmd_addperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) ->
 
 // ── Admin: !removeperson <name> <group> ──────────────────────────────────────
 
-async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_removeperson(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (query, group_name) = match (args.first(), args.get(1)) {
         (Some(n), Some(f)) => (n.to_string(), f.to_string()),
@@ -1236,14 +1519,20 @@ async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str])
     let mut state = ctx.state.lock().await;
     let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
         Some(id) => id,
-        None     => return Ok(Some(format!("Person «{query}» not found."))),
+        None => return Ok(Some(format!("Person «{query}» not found."))),
     };
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    if !state.group_by_id(&group_id).map(|g| g.member_ids.contains(&person_id)).unwrap_or(false) {
-        return Ok(Some(format!("{query} is not in «{group_name}». No changes made.")));
+    if !state
+        .group_by_id(&group_id)
+        .map(|g| g.member_ids.contains(&person_id))
+        .unwrap_or(false)
+    {
+        return Ok(Some(format!(
+            "{query} is not in «{group_name}». No changes made."
+        )));
     }
     let open = current_open_assignments(
         &state,
@@ -1258,7 +1547,10 @@ async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str])
             open.join(", ")
         )));
     }
-    state.apply_event(DomainEvent::PersonLeftGroup { person_id: person_id.clone(), group_id: group_id.clone() })?;
+    state.apply_event(DomainEvent::PersonLeftGroup {
+        person_id: person_id.clone(),
+        group_id: group_id.clone(),
+    })?;
     let refilled = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
     let next = next_assignment_summary(&state, &group_id);
     state.save(&ctx.state_path).await?;
@@ -1279,14 +1571,25 @@ async fn cmd_removeperson(ctx: &BotContext, sender: &OwnedUserId, args: &[&str])
 // only an invalid one may be replaced, never a valid one overwritten by
 // another.
 
-async fn cmd_linkmatrix(ctx: &BotContext, sender: &OwnedUserId, room: &Room, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_linkmatrix(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (name, mxid) = match (args.first(), args.get(1)) {
         (Some(n), Some(m)) => (n.to_string(), m.to_string()),
-        _ => return Ok(Some("Usage: !linkmatrix <display_name> <@user:server>".into())),
+        _ => {
+            return Ok(Some(
+                "Usage: !linkmatrix <display_name> <@user:server>".into(),
+            ))
+        }
     };
     if !mxid.starts_with('@') || !mxid.contains(':') {
-        return Ok(Some(format!("«{mxid}» does not look like a Matrix ID (@user:server).")));
+        return Ok(Some(format!(
+            "«{mxid}» does not look like a Matrix ID (@user:server)."
+        )));
     }
 
     // Fetch the Matrix display name immediately so the record looks the same
@@ -1295,7 +1598,8 @@ async fn cmd_linkmatrix(ctx: &BotContext, sender: &OwnedUserId, room: &Room, arg
     // into `apply_linkmatrix` so that logic (including the repair path) is
     // directly unit-testable without a `Room`.
     let fetched = format::fetch_names(room, &[mxid.as_str()]).await;
-    let display_name = fetched.get(mxid.as_str())
+    let display_name = fetched
+        .get(mxid.as_str())
         .filter(|n| !n.is_empty() && n.as_str() != mxid.as_str())
         .cloned();
 
@@ -1311,9 +1615,18 @@ async fn cmd_linkmatrix(ctx: &BotContext, sender: &OwnedUserId, room: &Room, arg
 /// same-named records is actually somebody" question should also count
 /// group membership and open assignments as "real".
 fn person_has_activity(state: &crate::state::State, person_id: &str) -> bool {
-    state.cleaning_groups.iter().any(|g| g.member_ids.iter().any(|m| m == person_id))
-        || state.slot_assignments.iter().any(|a| a.person_id.as_deref() == Some(person_id))
-        || state.completions.iter().any(|c| c.completed_by_id == person_id)
+    state
+        .cleaning_groups
+        .iter()
+        .any(|g| g.member_ids.iter().any(|m| m == person_id))
+        || state
+            .slot_assignments
+            .iter()
+            .any(|a| a.person_id.as_deref() == Some(person_id))
+        || state
+            .completions
+            .iter()
+            .any(|c| c.completed_by_id == person_id)
 }
 
 /// Room-independent core of `!linkmatrix`: resolves `name`, decides whether
@@ -1337,7 +1650,9 @@ async fn apply_linkmatrix(
         // whichever comes first in storage order, which is exactly what let
         // an unrelated already-linked stub silently block repairing the real
         // participant. Consider every match instead.
-        let matches: Vec<&Person> = state.persons.iter()
+        let matches: Vec<&Person> = state
+            .persons
+            .iter()
             .filter(|p| p.id == name || p.matches(name))
             .collect();
         let Some(&first) = matches.first() else {
@@ -1347,12 +1662,20 @@ async fn apply_linkmatrix(
         // Only records whose *current* matrix_id is missing or doesn't even
         // parse are candidates for linking/repair — a match that already has
         // a valid, different matrix_id is never a target for this command.
-        let repairable: Vec<&Person> = matches.iter()
-            .filter(|p| p.matrix_id.as_deref().is_none_or(|m| validate_matrix_user_id(m).is_err()))
+        let repairable: Vec<&Person> = matches
+            .iter()
+            .filter(|p| {
+                p.matrix_id
+                    .as_deref()
+                    .is_none_or(|m| validate_matrix_user_id(m).is_err())
+            })
             .copied()
             .collect();
         let Some(&chosen) = repairable.first() else {
-            return Ok(Some(format!("«{}» already has a Matrix account linked.", first.display_name)));
+            return Ok(Some(format!(
+                "«{}» already has a Matrix account linked.",
+                first.display_name
+            )));
         };
 
         let chosen = if repairable.len() == 1 {
@@ -1363,14 +1686,20 @@ async fn apply_linkmatrix(
             // placeholder among them is skipped, never preferred. Two (or
             // more) with real activity is genuine ambiguity: refuse rather
             // than silently guess which one the admin meant.
-            let real: Vec<&Person> = repairable.iter().copied()
+            let real: Vec<&Person> = repairable
+                .iter()
+                .copied()
                 .filter(|p| person_has_activity(&state, &p.id))
                 .collect();
             match real.as_slice() {
                 [only] => *only,
                 [] => chosen, // none has activity — equally arbitrary, pick deterministically (first by storage order)
                 _ => {
-                    let ids = real.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", ");
+                    let ids = real
+                        .iter()
+                        .map(|p| p.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     return Ok(Some(format!(
                         "Multiple people named «{name}» need a Matrix link and more than one has real \
                          activity (group membership, an assignment, or a completion) — refusing to guess. \
@@ -1389,20 +1718,25 @@ async fn apply_linkmatrix(
     // Auto-merge: if the MXID belongs to a stub person created by the greeting
     // reaction (no cleaning history), remove it so the link can proceed cleanly.
     if let Some(stub_id) = state.person_by_matrix_id(mxid).map(|p| p.id.clone()) {
-        let has_history = state.completions.iter().any(|c| c.completed_by_id == stub_id);
+        let has_history = state
+            .completions
+            .iter()
+            .any(|c| c.completed_by_id == stub_id);
         if has_history {
             return Ok(Some(format!(
                 "{mxid} is linked to another person who already has cleaning history. Cannot auto-merge."
             )));
         }
-        let stub_group_ids: Vec<String> = state.cleaning_groups.iter()
+        let stub_group_ids: Vec<String> = state
+            .cleaning_groups
+            .iter()
             .filter(|g| g.member_ids.contains(&stub_id))
             .map(|g| g.id.clone())
             .collect();
         for gid in &stub_group_ids {
             state.apply_event(DomainEvent::PersonLeftGroup {
                 person_id: stub_id.clone(),
-                group_id:  gid.clone(),
+                group_id: gid.clone(),
             })?;
             apply_group_departure(ctx, &mut state, &stub_id, gid)?;
         }
@@ -1422,39 +1756,52 @@ async fn apply_linkmatrix(
 
     let shown = fetched_display_name.unwrap_or(name);
     let verb = if was_repair { "repaired" } else { "linked" };
-    Ok(Some(format!("✅ {shown} ({mxid}) {verb}. All previous history preserved.")))
+    Ok(Some(format!(
+        "✅ {shown} ({mxid}) {verb}. All previous history preserved."
+    )))
 }
 
 // ── Admin: !addfloor <name> ───────────────────────────────────────────────────
 
-async fn cmd_addfloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_addfloor(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !addgroup <name>".into())),
+        None => return Ok(Some("Usage: !addgroup <name>".into())),
     };
     let mut state = ctx.state.lock().await;
     if state.group_by_name(&name).is_some() {
         return Ok(Some(format!("Group «{name}» already exists.")));
     }
     let group_id = uuid::Uuid::new_v4().to_string();
-    state.apply_event(DomainEvent::GroupCreated { group_id, name: name.clone() })?;
+    state.apply_event(DomainEvent::GroupCreated {
+        group_id,
+        name: name.clone(),
+    })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Created cleaning group «{name}».")))
 }
 
 // ── Admin: !removefloor <name> ────────────────────────────────────────────────
 
-async fn cmd_removefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_removefloor(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !removegroup <name>".into())),
+        None => return Ok(Some("Usage: !removegroup <name>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{name}» not found."))),
+        None => return Ok(Some(format!("Group «{name}» not found."))),
     };
     state.apply_event(DomainEvent::GroupDeleted { group_id })?;
     state.save(&ctx.state_path).await?;
@@ -1469,31 +1816,42 @@ async fn cmd_removefloor(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) 
 // rotation to distribute fairly from now on.  Safe to run at any time — past
 // completed weeks are never touched.
 
-async fn cmd_resetplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_resetplan(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !resetplan <group>".into())),
+        None => return Ok(Some("Usage: !resetplan <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
     reset_and_rematerialize(ctx, &mut state, &group_id)?;
     let assignee = {
         let interval = ctx.config.schedule.interval_weeks;
         let (cur_y, cur_w) = current_iso_week();
         let g = state.group_by_id(&group_id).unwrap().clone();
-        state.responsible_person(&g, cur_y, cur_w, interval)
+        state
+            .responsible_person(&g, cur_y, cur_w, interval)
             .map(|p| p.display_name.clone())
             .unwrap_or_else(|| "(nobody)".into())
     };
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Plan reset for «{group_name}». This week: {assignee}.")))
+    Ok(Some(format!(
+        "✅ Plan reset for «{group_name}». This week: {assignee}."
+    )))
 }
 
-async fn cmd_addslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_addslot(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
         (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
@@ -1502,20 +1860,36 @@ async fn cmd_addslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> R
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    if state.group_by_id(&group_id).and_then(|g| g.slot_by_name(&slot_name)).is_some() {
-        return Ok(Some(format!("Slot «{slot_name}» already exists in «{group_name}».")));
+    if state
+        .group_by_id(&group_id)
+        .and_then(|g| g.slot_by_name(&slot_name))
+        .is_some()
+    {
+        return Ok(Some(format!(
+            "Slot «{slot_name}» already exists in «{group_name}»."
+        )));
     }
     let slot_id = uuid::Uuid::new_v4().to_string();
-    state.apply_event(DomainEvent::SlotAdded { group_id, slot_id, slot_name: slot_name.clone() })?;
+    state.apply_event(DomainEvent::SlotAdded {
+        group_id,
+        slot_id,
+        slot_name: slot_name.clone(),
+    })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Added slot «{slot_name}» to «{group_name}».")))
+    Ok(Some(format!(
+        "✅ Added slot «{slot_name}» to «{group_name}»."
+    )))
 }
 
 // ── Admin: !removeslot <group> <slot_name> ───────────────────────────────────
 
-async fn cmd_removeslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_removeslot(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
         (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
@@ -1525,13 +1899,19 @@ async fn cmd_removeslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     let (group_id, slot_id) = match state.group_by_name(&group_name) {
         Some(g) => match g.slot_by_name(&slot_name) {
             Some(s) => (g.id.clone(), s.id.clone()),
-            None    => return Ok(Some(format!("Slot «{slot_name}» not found in «{group_name}»."))),
+            None => {
+                return Ok(Some(format!(
+                    "Slot «{slot_name}» not found in «{group_name}»."
+                )))
+            }
         },
         None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
     state.apply_event(DomainEvent::SlotRemoved { group_id, slot_id })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed slot «{slot_name}» from «{group_name}».")))
+    Ok(Some(format!(
+        "✅ Removed slot «{slot_name}» from «{group_name}»."
+    )))
 }
 
 // ── Admin: !addroom <group> [<slot>] <room> ──────────────────────────────────
@@ -1540,7 +1920,11 @@ async fn cmd_removeslot(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
 // is added to that slot.  Otherwise the room is added to the group directly
 // (single-slot mode, or a group-level room for backwards compatibility).
 
-async fn cmd_addroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_addroom(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     if args.len() < 2 {
         return Ok(Some("Usage: !addroom <group> [<slot>] <room name>".into()));
@@ -1549,7 +1933,7 @@ async fn cmd_addroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> R
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
 
     // Detect slot targeting: if args[1] matches a slot name and there are more args, route to slot.
@@ -1571,23 +1955,33 @@ async fn cmd_addroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> R
         }
     };
 
-    state.apply_event(DomainEvent::RoomAdded { group_id, slot_id, room_name: room_name.clone() })?;
+    state.apply_event(DomainEvent::RoomAdded {
+        group_id,
+        slot_id,
+        room_name: room_name.clone(),
+    })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added room «{room_name}».")))
 }
 
 // ── Admin: !removeroom <group> [<slot>] <room> ───────────────────────────────
 
-async fn cmd_removeroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_removeroom(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     if args.len() < 2 {
-        return Ok(Some("Usage: !removeroom <group> [<slot>] <room name>".into()));
+        return Ok(Some(
+            "Usage: !removeroom <group> [<slot>] <room name>".into(),
+        ));
     }
     let group_name = args[0].to_string();
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
 
     let (slot_id, room_name) = {
@@ -1603,9 +1997,15 @@ async fn cmd_removeroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
         }
     };
 
-    state.apply_event(DomainEvent::RoomRemoved { group_id, slot_id, room_name: room_name.clone() })?;
+    state.apply_event(DomainEvent::RoomRemoved {
+        group_id,
+        slot_id,
+        room_name: room_name.clone(),
+    })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed room «{room_name}» from «{group_name}».")))
+    Ok(Some(format!(
+        "✅ Removed room «{room_name}» from «{group_name}»."
+    )))
 }
 
 // ── !swap @target [group] [week N] ───────────────────────────────────────────
@@ -1613,21 +2013,26 @@ async fn cmd_removeroom(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
 async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     let target_mxid = match args.first() {
         Some(t) => *t,
-        None    => return Ok(Some("Usage: !swap @user [group] [week <N>]".into())),
+        None => return Ok(Some("Usage: !swap @user [group] [week <N>]".into())),
     };
     if !target_mxid.starts_with('@') {
-        return Ok(Some("Swap targets must be Matrix users (@user:server).".into()));
+        return Ok(Some(
+            "Swap targets must be Matrix users (@user:server).".into(),
+        ));
     }
-    let sender_mxid  = sender.as_str();
+    let sender_mxid = sender.as_str();
     let (cur_y, cur_w) = current_iso_week();
 
     let (group_args, (year, week)) = match extract_week_arg(&args[1..]) {
         Some(v) => v,
-        None    => return Ok(Some("Usage: !swap @user [group] [week <1-53>]".into())),
+        None => return Ok(Some("Usage: !swap @user [group] [week <1-53>]".into())),
     };
 
     if (year, week) < (cur_y, cur_w) {
-        return Ok(Some(format!("Week {week} ({}) is in the past.", week_dates(year, week))));
+        return Ok(Some(format!(
+            "Week {week} ({}) is in the past.",
+            week_dates(year, week)
+        )));
     }
     if sender_mxid == target_mxid {
         return Ok(Some("You cannot swap with yourself.".into()));
@@ -1637,24 +2042,32 @@ async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
     let sender_person_id = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
         Some(id) => id,
-        None     => return Ok(Some(format!("You ({sender_mxid}) are not registered."))),
+        None => return Ok(Some(format!("You ({sender_mxid}) are not registered."))),
     };
 
     let group_id = if let Some(name) = group_args.first() {
         match state.group_by_name(name) {
             Some(g) => g.id.clone(),
-            None    => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
-        match state.groups_for_person(&sender_person_id).first().map(|g| g.id.clone()) {
+        match state
+            .groups_for_person(&sender_person_id)
+            .first()
+            .map(|g| g.id.clone())
+        {
             Some(id) => id,
-            None     => return Ok(Some("You are not in any group. Specify: !swap @user <group>".into())),
+            None => {
+                return Ok(Some(
+                    "You are not in any group. Specify: !swap @user <group>".into(),
+                ))
+            }
         }
     };
 
     let group = match state.group_by_id(&group_id) {
         Some(g) => g.clone(),
-        None    => return Ok(Some("Group not found.".into())),
+        None => return Ok(Some("Group not found.".into())),
     };
 
     // !swap/!acceptswap only ever write slot_index 0 (see cmd_acceptswap) —
@@ -1674,19 +2087,25 @@ async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     }
 
     let dupe = state.swap_requests.iter().any(|s| {
-        s.group_id == group_id && s.iso_year == year && s.iso_week == week
-            && s.status == SwapStatus::Pending && s.requester == sender_mxid
+        s.group_id == group_id
+            && s.iso_year == year
+            && s.iso_week == week
+            && s.status == SwapStatus::Pending
+            && s.requester == sender_mxid
     });
     if dupe {
-        return Ok(Some(format!("You already have a pending swap for «{}» week {week}.", group.name)));
+        return Ok(Some(format!(
+            "You already have a pending swap for «{}» week {week}.",
+            group.name
+        )));
     }
 
     state.apply_event(DomainEvent::SwapRequested {
-        group_id:       group_id.clone(),
+        group_id: group_id.clone(),
         requester_mxid: sender_mxid.to_owned(),
-        target_mxid:    target_mxid.to_owned(),
-        iso_year:       year,
-        iso_week:       week,
+        target_mxid: target_mxid.to_owned(),
+        iso_year: year,
+        iso_week: week,
     })?;
     // The swap ID was allocated inside apply_event.
     let id = state.swap_requests.last().map(|s| s.id).unwrap_or(0);
@@ -1700,36 +2119,51 @@ async fn cmd_swap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
 // ── !acceptswap <id> ──────────────────────────────────────────────────────────
 
-async fn cmd_acceptswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_acceptswap(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None    => return Ok(Some("Usage: !acceptswap <id>".into())),
+        None => return Ok(Some("Usage: !acceptswap <id>".into())),
     };
     let sender_mxid = sender.as_str();
-    let mut state   = ctx.state.lock().await;
+    let mut state = ctx.state.lock().await;
 
     let req = match state.swap_requests.iter().find(|r| r.id == id) {
         Some(r) => r,
-        None    => return Ok(Some(format!("Swap request #{id} not found."))),
+        None => return Ok(Some(format!("Swap request #{id} not found."))),
     };
-    if req.target != sender_mxid { return Ok(Some("This swap is not addressed to you.".into())); }
-    if req.status != SwapStatus::Pending { return Ok(Some(format!("Request #{id} is already {:?}.", req.status))); }
-    let requester  = req.requester.clone();
-    let group_id   = req.group_id.clone();
-    let iso_year   = req.iso_year;
-    let iso_week   = req.iso_week;
+    if req.target != sender_mxid {
+        return Ok(Some("This swap is not addressed to you.".into()));
+    }
+    if req.status != SwapStatus::Pending {
+        return Ok(Some(format!("Request #{id} is already {:?}.", req.status)));
+    }
+    let requester = req.requester.clone();
+    let group_id = req.group_id.clone();
+    let iso_year = req.iso_year;
+    let iso_week = req.iso_week;
 
     // A swap is only single-slot-group aware today, same as !swap itself.
     if state.is_completed(&group_id, iso_year, iso_week) {
-        let group_name = state.group_by_id(&group_id).map(|g| g.name.clone()).unwrap_or_default();
+        let group_name = state
+            .group_by_id(&group_id)
+            .map(|g| g.name.clone())
+            .unwrap_or_default();
         return Ok(Some(format!(
             "«{group_name}» week {iso_week} is already completed or skipped — swap #{id} can no longer be accepted."
         )));
     }
 
-    let requester_id   = state.person_by_matrix_id(&requester).map(|p| p.id.clone())
+    let requester_id = state
+        .person_by_matrix_id(&requester)
+        .map(|p| p.id.clone())
         .unwrap_or_else(|| requester.clone());
-    let replacement_id = state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone())
+    let replacement_id = state
+        .person_by_matrix_id(sender_mxid)
+        .map(|p| p.id.clone())
         .unwrap_or_else(|| sender_mxid.to_owned());
 
     // The requester may no longer actually hold this week's assignment —
@@ -1740,14 +2174,16 @@ async fn cmd_acceptswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     // instead of blindly overwriting it.
     let interval = ctx.config.schedule.interval_weeks;
     let group = state.group_by_id(&group_id).cloned();
-    let current_holder_id = group.as_ref()
+    let current_holder_id = group
+        .as_ref()
         .and_then(|g| state.responsible_person(g, iso_year, iso_week, interval))
         .map(|p| p.id.clone());
     if current_holder_id.as_deref() != Some(requester_id.as_str()) {
         state.apply_event(DomainEvent::SwapRejected { swap_id: id })?;
         state.save(&ctx.state_path).await?;
         let group_name = group.map(|g| g.name).unwrap_or_default();
-        let holder_label = current_holder_id.as_ref()
+        let holder_label = current_holder_id
+            .as_ref()
             .and_then(|pid| state.person_by_id(pid))
             .map(person_label)
             .unwrap_or_else(|| "nobody".into());
@@ -1758,8 +2194,8 @@ async fn cmd_acceptswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     }
 
     state.apply_event(DomainEvent::SwapApproved {
-        swap_id:        id,
-        group_id:       group_id.clone(),
+        swap_id: id,
+        group_id: group_id.clone(),
         requester_id,
         replacement_id: replacement_id.clone(),
         iso_year,
@@ -1771,37 +2207,50 @@ async fn cmd_acceptswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     // the pinned plan's ✅ reaction, PDF/iCal etc. all agree immediately,
     // even though the week was already materialized before the swap.
     state.apply_event(DomainEvent::SlotAssigned {
-        group_id:   group_id.clone(),
+        group_id: group_id.clone(),
         slot_index: 0,
         iso_year,
         iso_week,
-        person_id:  Some(replacement_id),
-        source:     AssignmentSource::Swap,
-        actor_id:   Some(sender_mxid.to_owned()),
+        person_id: Some(replacement_id),
+        source: AssignmentSource::Swap,
+        actor_id: Some(sender_mxid.to_owned()),
         previous_person_id: current_holder_id,
     })?;
     state.save(&ctx.state_path).await?;
 
-    let group_name = state.group_by_id(&group_id).map(|g| g.name.clone()).unwrap_or_default();
-    Ok(Some(format!("✅ Swap #{id} accepted. {sender_mxid} will clean «{group_name}» instead of {requester}.")))
+    let group_name = state
+        .group_by_id(&group_id)
+        .map(|g| g.name.clone())
+        .unwrap_or_default();
+    Ok(Some(format!(
+        "✅ Swap #{id} accepted. {sender_mxid} will clean «{group_name}» instead of {requester}."
+    )))
 }
 
 // ── !rejectswap <id> ─────────────────────────────────────────────────────────
 
-async fn cmd_rejectswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_rejectswap(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None    => return Ok(Some("Usage: !rejectswap <id>".into())),
+        None => return Ok(Some("Usage: !rejectswap <id>".into())),
     };
     let sender_mxid = sender.as_str();
-    let mut state   = ctx.state.lock().await;
+    let mut state = ctx.state.lock().await;
 
     let req = match state.swap_requests.iter().find(|r| r.id == id) {
         Some(r) => r,
-        None    => return Ok(Some(format!("Swap #{id} not found."))),
+        None => return Ok(Some(format!("Swap #{id} not found."))),
     };
-    if req.target != sender_mxid { return Ok(Some("This swap is not addressed to you.".into())); }
-    if req.status != SwapStatus::Pending { return Ok(Some(format!("Request #{id} is already {:?}.", req.status))); }
+    if req.target != sender_mxid {
+        return Ok(Some("This swap is not addressed to you.".into()));
+    }
+    if req.status != SwapStatus::Pending {
+        return Ok(Some(format!("Request #{id} is already {:?}.", req.status)));
+    }
     let _ = req;
 
     state.apply_event(DomainEvent::SwapRejected { swap_id: id })?;
@@ -1822,54 +2271,78 @@ async fn cmd_rejectswap(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
 // which is why the target person does not need to already be a rotation
 // member.
 
-async fn cmd_assign(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_assign(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let usage = "Usage: !assign <group> [<slot>] <person> [week <1-53>]";
-    let Some(group_name) = args.first() else { return Ok(Some(usage.into())); };
+    let Some(group_name) = args.first() else {
+        return Ok(Some(usage.into()));
+    };
 
     let (rest, (year, week)) = match extract_week_arg(&args[1..]) {
         Some(v) => v,
-        None    => return Ok(Some(usage.into())),
+        None => return Ok(Some(usage.into())),
     };
     let (cur_y, cur_w) = current_iso_week();
     if (year, week) < (cur_y, cur_w) {
-        return Ok(Some(format!("Week {week} ({}) is in the past.", week_dates(year, week))));
+        return Ok(Some(format!(
+            "Week {week} ({}) is in the past.",
+            week_dates(year, week)
+        )));
     }
 
     let mut state = ctx.state.lock().await;
     let (group_id, slot_index, rest) = match resolve_group_and_slot(&state, group_name, rest) {
-        Ok(v)  => v,
+        Ok(v) => v,
         Err(e) => return Ok(Some(e)),
     };
-    let Some(person_query) = rest.first() else { return Ok(Some(usage.into())); };
+    let Some(person_query) = rest.first() else {
+        return Ok(Some(usage.into()));
+    };
     let person = match state.find_person(person_query) {
         Some(p) => p.clone(),
-        None    => return Ok(Some(format!(
+        None => {
+            return Ok(Some(format!(
             "«{person_query}» is not registered. Use !adduser or !addperson to register them first."
-        ))),
+        )))
+        }
     };
 
-    let group = state.group_by_id(&group_id).expect("resolved group must exist").clone();
+    let group = state
+        .group_by_id(&group_id)
+        .expect("resolved group must exist")
+        .clone();
     let interval = ctx.config.schedule.interval_weeks;
     let previous_id = if group.is_multi_slot() {
-        state.slot_assignee(&group, slot_index, year, week, interval).map(|p| p.id.clone())
+        state
+            .slot_assignee(&group, slot_index, year, week, interval)
+            .map(|p| p.id.clone())
     } else {
-        state.responsible_person(&group, year, week, interval).map(|p| p.id.clone())
+        state
+            .responsible_person(&group, year, week, interval)
+            .map(|p| p.id.clone())
     };
 
     state.apply_event(DomainEvent::SlotAssigned {
-        group_id:   group_id.clone(),
+        group_id: group_id.clone(),
         slot_index,
-        iso_year:   year,
-        iso_week:   week,
-        person_id:  Some(person.id.clone()),
-        source:     AssignmentSource::Assign,
-        actor_id:   Some(sender.as_str().to_owned()),
+        iso_year: year,
+        iso_week: week,
+        person_id: Some(person.id.clone()),
+        source: AssignmentSource::Assign,
+        actor_id: Some(sender.as_str().to_owned()),
         previous_person_id: previous_id.clone(),
     })?;
     state.save(&ctx.state_path).await?;
 
-    let slot_suffix = group.slots.get(slot_index).map(|s| format!(" / {}", s.name)).unwrap_or_default();
+    let slot_suffix = group
+        .slots
+        .get(slot_index)
+        .map(|s| format!(" / {}", s.name))
+        .unwrap_or_default();
     let membership_note = if group.member_ids.contains(&person.id) {
         String::new()
     } else {
@@ -1877,7 +2350,10 @@ async fn cmd_assign(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Re
     };
     let changed_note = match previous_id {
         Some(prev_id) if prev_id != person.id => {
-            let prev_label = state.person_by_id(&prev_id).map(person_label).unwrap_or_else(|| "nobody".into());
+            let prev_label = state
+                .person_by_id(&prev_id)
+                .map(person_label)
+                .unwrap_or_else(|| "nobody".into());
             format!(" · was {prev_label}")
         }
         _ => String::new(),
@@ -1885,7 +2361,9 @@ async fn cmd_assign(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Re
 
     Ok(Some(format!(
         "✅ Assigned {} to «{}»{slot_suffix} for week {week} ({}){membership_note}{changed_note}.",
-        person_label(&person), group.name, week_dates(year, week)
+        person_label(&person),
+        group.name,
+        week_dates(year, week)
     )))
 }
 
@@ -1896,49 +2374,70 @@ async fn cmd_assign(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Re
 // !assign or the next materialization pass. Uses the same manual-override
 // mechanism as !assign.
 
-async fn cmd_unassign(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_unassign(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let usage = "Usage: !unassign <group> [<slot>] [week <1-53>]";
-    let Some(group_name) = args.first() else { return Ok(Some(usage.into())); };
+    let Some(group_name) = args.first() else {
+        return Ok(Some(usage.into()));
+    };
 
     let (rest, (year, week)) = match extract_week_arg(&args[1..]) {
         Some(v) => v,
-        None    => return Ok(Some(usage.into())),
+        None => return Ok(Some(usage.into())),
     };
     let (cur_y, cur_w) = current_iso_week();
     if (year, week) < (cur_y, cur_w) {
-        return Ok(Some(format!("Week {week} ({}) is in the past.", week_dates(year, week))));
+        return Ok(Some(format!(
+            "Week {week} ({}) is in the past.",
+            week_dates(year, week)
+        )));
     }
 
     let mut state = ctx.state.lock().await;
     let (group_id, slot_index, _rest) = match resolve_group_and_slot(&state, group_name, rest) {
-        Ok(v)  => v,
+        Ok(v) => v,
         Err(e) => return Ok(Some(e)),
     };
-    let group = state.group_by_id(&group_id).expect("resolved group must exist").clone();
+    let group = state
+        .group_by_id(&group_id)
+        .expect("resolved group must exist")
+        .clone();
     let interval = ctx.config.schedule.interval_weeks;
     let previous_id = if group.is_multi_slot() {
-        state.slot_assignee(&group, slot_index, year, week, interval).map(|p| p.id.clone())
+        state
+            .slot_assignee(&group, slot_index, year, week, interval)
+            .map(|p| p.id.clone())
     } else {
-        state.responsible_person(&group, year, week, interval).map(|p| p.id.clone())
+        state
+            .responsible_person(&group, year, week, interval)
+            .map(|p| p.id.clone())
     };
 
     state.apply_event(DomainEvent::SlotAssigned {
-        group_id:   group_id.clone(),
+        group_id: group_id.clone(),
         slot_index,
-        iso_year:   year,
-        iso_week:   week,
-        person_id:  None,
-        source:     AssignmentSource::Assign,
-        actor_id:   Some(sender.as_str().to_owned()),
+        iso_year: year,
+        iso_week: week,
+        person_id: None,
+        source: AssignmentSource::Assign,
+        actor_id: Some(sender.as_str().to_owned()),
         previous_person_id: previous_id,
     })?;
     state.save(&ctx.state_path).await?;
 
-    let slot_suffix = group.slots.get(slot_index).map(|s| format!(" / {}", s.name)).unwrap_or_default();
+    let slot_suffix = group
+        .slots
+        .get(slot_index)
+        .map(|s| format!(" / {}", s.name))
+        .unwrap_or_default();
     Ok(Some(format!(
         "✅ Cleared «{}»{slot_suffix} for week {week} ({}) — left unassigned.",
-        group.name, week_dates(year, week)
+        group.name,
+        week_dates(year, week)
     )))
 }
 
@@ -1983,25 +2482,36 @@ fn parse_iso_week_token(s: &str) -> Option<(i32, u32)> {
 }
 
 struct PlannedImport {
-    raw:         String,
-    group_id:    GroupId,
-    group_name:  String,
-    slot_index:  usize,
+    raw: String,
+    group_id: GroupId,
+    group_name: String,
+    slot_index: usize,
     slot_suffix: String,
-    year:        i32,
-    week:        u32,
-    person:      Person,
+    year: i32,
+    week: u32,
+    person: Person,
 }
 
-async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_importplan(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let usage = "Usage: !importplan [--replace] <YYYY-Www> <group>[/<slot>] <person> [; <YYYY-Www> <group>[/<slot>] <person> ...]";
     let replace_mode = args.contains(&"--replace");
     let args: Vec<&str> = args.iter().copied().filter(|&a| a != "--replace").collect();
-    if args.is_empty() { return Ok(Some(usage.into())); }
+    if args.is_empty() {
+        return Ok(Some(usage.into()));
+    }
 
-    let entries: Vec<&[&str]> = args.split(|t| *t == ";").filter(|c| !c.is_empty()).collect();
-    if entries.is_empty() { return Ok(Some(usage.into())); }
+    let entries: Vec<&[&str]> = args
+        .split(|t| *t == ";")
+        .filter(|c| !c.is_empty())
+        .collect();
+    if entries.is_empty() {
+        return Ok(Some(usage.into()));
+    }
 
     let (cur_y, cur_w) = current_iso_week();
     let mut state = ctx.state.lock().await;
@@ -2012,38 +2522,64 @@ async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     for chunk in &entries {
         let raw = chunk.join(" ");
         let Some((&week_token, rest)) = chunk.split_first() else {
-            errors.push(format!("«{raw}» — {usage}")); continue;
+            errors.push(format!("«{raw}» — {usage}"));
+            continue;
         };
         let Some((year, week)) = parse_iso_week_token(week_token) else {
-            errors.push(format!("«{raw}»: «{week_token}» is not a valid ISO week (expected YYYY-Www).")); continue;
+            errors.push(format!(
+                "«{raw}»: «{week_token}» is not a valid ISO week (expected YYYY-Www)."
+            ));
+            continue;
         };
         if (year, week) < (cur_y, cur_w) {
-            errors.push(format!("«{raw}»: week {week} ({}) is in the past.", week_dates(year, week)));
+            errors.push(format!(
+                "«{raw}»: week {week} ({}) is in the past.",
+                week_dates(year, week)
+            ));
             continue;
         }
         let Some((&group_name, rest)) = rest.split_first() else {
-            errors.push(format!("«{raw}» — {usage}")); continue;
+            errors.push(format!("«{raw}» — {usage}"));
+            continue;
         };
         let (group_id, slot_index, rest) = match resolve_group_and_slot(&state, group_name, rest) {
-            Ok(v)  => v,
-            Err(e) => { errors.push(format!("«{raw}»: {e}")); continue; }
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("«{raw}»: {e}"));
+                continue;
+            }
         };
-        let group = state.group_by_id(&group_id).expect("resolved group must exist");
+        let group = state
+            .group_by_id(&group_id)
+            .expect("resolved group must exist");
         let Some(&person_query) = rest.first() else {
-            errors.push(format!("«{raw}» — {usage}")); continue;
+            errors.push(format!("«{raw}» — {usage}"));
+            continue;
         };
         if rest.len() > 1 {
             errors.push(format!("«{raw}»: unexpected extra text after the person."));
             continue;
         }
         let Some(person) = state.find_person(person_query) else {
-            errors.push(format!("«{raw}»: «{person_query}» is not registered. Use !adduser or !addperson first."));
+            errors.push(format!(
+                "«{raw}»: «{person_query}» is not registered. Use !adduser or !addperson first."
+            ));
             continue;
         };
-        let slot_suffix = group.slots.get(slot_index).map(|s| format!("/{}", s.name)).unwrap_or_default();
+        let slot_suffix = group
+            .slots
+            .get(slot_index)
+            .map(|s| format!("/{}", s.name))
+            .unwrap_or_default();
         planned.push(PlannedImport {
-            raw, group_id, group_name: group.name.clone(), slot_index, slot_suffix,
-            year, week, person: person.clone(),
+            raw,
+            group_id,
+            group_name: group.name.clone(),
+            slot_index,
+            slot_suffix,
+            year,
+            week,
+            person: person.clone(),
         });
     }
 
@@ -2051,8 +2587,11 @@ async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     for i in 0..planned.len() {
         for j in (i + 1)..planned.len() {
             let (a, b) = (&planned[i], &planned[j]);
-            if a.group_id == b.group_id && a.slot_index == b.slot_index
-                && a.year == b.year && a.week == b.week && a.person.id != b.person.id
+            if a.group_id == b.group_id
+                && a.slot_index == b.slot_index
+                && a.year == b.year
+                && a.week == b.week
+                && a.person.id != b.person.id
             {
                 errors.push(format!(
                     "«{}» and «{}» both claim {}{} week {} — conflicting entries in this import.",
@@ -2073,17 +2612,23 @@ async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     let mut already_imported = 0usize;
     for p in &planned {
         let existing = state.slot_assignments.iter().find(|a| {
-            a.group_id == p.group_id && a.slot_index == p.slot_index
-                && a.iso_year == p.year && a.iso_week == p.week
+            a.group_id == p.group_id
+                && a.slot_index == p.slot_index
+                && a.iso_year == p.year
+                && a.iso_week == p.week
         });
         if existing.is_some_and(|a| a.person_id.as_deref() == Some(p.person.id.as_str())) {
             already_imported += 1;
             continue;
         }
 
-        let group = state.group_by_id(&p.group_id).expect("resolved group must exist");
+        let group = state
+            .group_by_id(&p.group_id)
+            .expect("resolved group must exist");
         let already_done = if group.is_multi_slot() {
-            group.slots.get(p.slot_index)
+            group
+                .slots
+                .get(p.slot_index)
                 .is_some_and(|s| state.is_slot_completed(&p.group_id, &s.id, p.year, p.week))
         } else {
             state.is_completed(&p.group_id, p.year, p.week)
@@ -2099,14 +2644,18 @@ async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
         match existing {
             None => to_add.push(p),
             Some(a) if replace_mode => {
-                let holder = a.person_id.as_ref()
+                let holder = a
+                    .person_id
+                    .as_ref()
                     .and_then(|id| state.person_by_id(id))
                     .map(person_label)
                     .unwrap_or_else(|| "nobody".into());
                 to_replace.push((p, holder));
             }
             Some(a) => {
-                let holder = a.person_id.as_ref()
+                let holder = a
+                    .person_id
+                    .as_ref()
                     .and_then(|id| state.person_by_id(id))
                     .map(person_label)
                     .unwrap_or_else(|| "nobody".into());
@@ -2121,7 +2670,8 @@ async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     if !errors.is_empty() {
         return Ok(Some(format!(
             "❌ Import aborted, no changes made — {} problem(s):\n{}",
-            errors.len(), errors.join("\n")
+            errors.len(),
+            errors.join("\n")
         )));
     }
 
@@ -2133,24 +2683,43 @@ async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
     }
 
     let make_event = |p: &PlannedImport| DomainEvent::SlotAssigned {
-        group_id:   p.group_id.clone(),
+        group_id: p.group_id.clone(),
         slot_index: p.slot_index,
-        iso_year:   p.year,
-        iso_week:   p.week,
-        person_id:  Some(p.person.id.clone()),
-        source:     AssignmentSource::Import,
-        actor_id:   Some(sender.as_str().to_owned()),
+        iso_year: p.year,
+        iso_week: p.week,
+        person_id: Some(p.person.id.clone()),
+        source: AssignmentSource::Import,
+        actor_id: Some(sender.as_str().to_owned()),
         previous_person_id: None,
     };
-    let events: Vec<DomainEvent> = to_add.iter().map(|p| make_event(p))
+    let events: Vec<DomainEvent> = to_add
+        .iter()
+        .map(|p| make_event(p))
         .chain(to_replace.iter().map(|(p, _)| make_event(p)))
         .collect();
-    let mut lines: Vec<String> = to_add.iter().map(|p| format!(
-        "• {}{} week {} ({}) → {} (added)", p.group_name, p.slot_suffix, p.week, week_dates(p.year, p.week), person_label(&p.person)
-    )).collect();
-    lines.extend(to_replace.iter().map(|(p, prev)| format!(
-        "• {}{} week {} ({}) → {} (replaced {prev})", p.group_name, p.slot_suffix, p.week, week_dates(p.year, p.week), person_label(&p.person)
-    )));
+    let mut lines: Vec<String> = to_add
+        .iter()
+        .map(|p| {
+            format!(
+                "• {}{} week {} ({}) → {} (added)",
+                p.group_name,
+                p.slot_suffix,
+                p.week,
+                week_dates(p.year, p.week),
+                person_label(&p.person)
+            )
+        })
+        .collect();
+    lines.extend(to_replace.iter().map(|(p, prev)| {
+        format!(
+            "• {}{} week {} ({}) → {} (replaced {prev})",
+            p.group_name,
+            p.slot_suffix,
+            p.week,
+            week_dates(p.year, p.week),
+            person_label(&p.person)
+        )
+    }));
     let (added_count, replaced_count) = (to_add.len(), to_replace.len());
 
     for event in events {
@@ -2185,15 +2754,22 @@ async fn cmd_importplan(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -
 // checked via `is_completed`/`is_slot_completed`), so a finished task can't
 // be silently reassigned out from under its record.
 
-async fn cmd_takeover(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_takeover(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     let usage = "Usage: !takeover [<group>] [<slot>] [week <1-53>]";
     let (rest, (year, week)) = match extract_week_arg(args) {
         Some(v) => v,
-        None    => return Ok(Some(usage.into())),
+        None => return Ok(Some(usage.into())),
     };
     let (cur_y, cur_w) = current_iso_week();
     if (year, week) < (cur_y, cur_w) {
-        return Ok(Some(format!("Week {week} ({}) is in the past.", week_dates(year, week))));
+        return Ok(Some(format!(
+            "Week {week} ({}) is in the past.",
+            week_dates(year, week)
+        )));
     }
 
     let sender_mxid = sender.as_str();
@@ -2202,23 +2778,33 @@ async fn cmd_takeover(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> 
     // PersonCreated is idempotent — same self-registration as !done.
     let new_person_id = Uuid::new_v4().to_string();
     state.apply_event(DomainEvent::PersonCreated {
-        person_id: new_person_id, display_name: sender_mxid.to_owned(), matrix_id: Some(sender_mxid.to_owned()),
+        person_id: new_person_id,
+        display_name: sender_mxid.to_owned(),
+        matrix_id: Some(sender_mxid.to_owned()),
     })?;
     let sender_person_id = state.person_by_matrix_id(sender_mxid).unwrap().id.clone();
     let interval = ctx.config.schedule.interval_weeks;
 
-    let (group_id, slot_index) = match resolve_takeover_target(&state, &sender_person_id, rest, year, week, interval) {
-        Ok(v)  => v,
-        Err(e) => return Ok(Some(e)),
-    };
-    let group = state.group_by_id(&group_id).expect("resolved group must exist").clone();
+    let (group_id, slot_index) =
+        match resolve_takeover_target(&state, &sender_person_id, rest, year, week, interval) {
+            Ok(v) => v,
+            Err(e) => return Ok(Some(e)),
+        };
+    let group = state
+        .group_by_id(&group_id)
+        .expect("resolved group must exist")
+        .clone();
 
     let already_done = match group.slots.get(slot_index) {
         Some(slot) => state.is_slot_completed(&group_id, &slot.id, year, week),
-        None       => state.is_completed(&group_id, year, week),
+        None => state.is_completed(&group_id, year, week),
     };
     if already_done {
-        let slot_suffix = group.slots.get(slot_index).map(|s| format!(" / {}", s.name)).unwrap_or_default();
+        let slot_suffix = group
+            .slots
+            .get(slot_index)
+            .map(|s| format!(" / {}", s.name))
+            .unwrap_or_default();
         return Ok(Some(format!(
             "«{}»{slot_suffix} for week {week} ({}) is already completed or skipped — nothing to take over.",
             group.name, week_dates(year, week)
@@ -2226,27 +2812,38 @@ async fn cmd_takeover(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> 
     }
 
     let previous_id = if group.is_multi_slot() {
-        state.slot_assignee(&group, slot_index, year, week, interval).map(|p| p.id.clone())
+        state
+            .slot_assignee(&group, slot_index, year, week, interval)
+            .map(|p| p.id.clone())
     } else {
-        state.responsible_person(&group, year, week, interval).map(|p| p.id.clone())
+        state
+            .responsible_person(&group, year, week, interval)
+            .map(|p| p.id.clone())
     };
     if previous_id.as_deref() == Some(sender_person_id.as_str()) {
-        return Ok(Some(format!("You are already responsible for «{}» this week.", group.name)));
+        return Ok(Some(format!(
+            "You are already responsible for «{}» this week.",
+            group.name
+        )));
     }
 
     state.apply_event(DomainEvent::SlotAssigned {
-        group_id:   group_id.clone(),
+        group_id: group_id.clone(),
         slot_index,
-        iso_year:   year,
-        iso_week:   week,
-        person_id:  Some(sender_person_id.clone()),
-        source:     AssignmentSource::Takeover,
-        actor_id:   Some(sender_mxid.to_owned()),
+        iso_year: year,
+        iso_week: week,
+        person_id: Some(sender_person_id.clone()),
+        source: AssignmentSource::Takeover,
+        actor_id: Some(sender_mxid.to_owned()),
         previous_person_id: previous_id.clone(),
     })?;
     state.save(&ctx.state_path).await?;
 
-    let slot_suffix = group.slots.get(slot_index).map(|s| format!(" / {}", s.name)).unwrap_or_default();
+    let slot_suffix = group
+        .slots
+        .get(slot_index)
+        .map(|s| format!(" / {}", s.name))
+        .unwrap_or_default();
     let membership_note = if group.member_ids.contains(&sender_person_id) {
         String::new()
     } else {
@@ -2254,14 +2851,18 @@ async fn cmd_takeover(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> 
     };
     let from_note = match previous_id {
         Some(prev_id) => {
-            let prev_label = state.person_by_id(&prev_id).map(person_label).unwrap_or_else(|| "nobody".into());
+            let prev_label = state
+                .person_by_id(&prev_id)
+                .map(person_label)
+                .unwrap_or_else(|| "nobody".into());
             format!(" from {prev_label}")
         }
         None => String::new(),
     };
     Ok(Some(format!(
         "✅ You took over «{}»{slot_suffix} for week {week} ({}){from_note}{membership_note}.",
-        group.name, week_dates(year, week)
+        group.name,
+        week_dates(year, week)
     )))
 }
 
@@ -2269,21 +2870,25 @@ async fn cmd_takeover(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> 
 
 async fn cmd_undo(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     let (year, week) = current_iso_week();
-    let sender_mxid  = sender.as_str();
-    let is_admin     = ctx.admin_users.contains(sender);
-    let mut state    = ctx.state.lock().await;
+    let sender_mxid = sender.as_str();
+    let is_admin = ctx.admin_users.contains(sender);
+    let mut state = ctx.state.lock().await;
 
     let sender_pid = state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone());
 
     let target_group_ids: Vec<String> = if let Some(name) = args.first() {
         match state.group_by_name(name) {
             Some(g) => vec![g.id.clone()],
-            None    => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
         match &sender_pid {
-            Some(pid) => state.groups_for_person(pid).iter().map(|g| g.id.clone()).collect(),
-            None      => return Ok(Some("You are not assigned to any group.".into())),
+            Some(pid) => state
+                .groups_for_person(pid)
+                .iter()
+                .map(|g| g.id.clone())
+                .collect(),
+            None => return Ok(Some("You are not assigned to any group.".into())),
         }
     };
 
@@ -2291,28 +2896,41 @@ async fn cmd_undo(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
         return Ok(Some("You are not assigned to any group.".into()));
     }
 
-    let mut undone   = vec![];
+    let mut undone = vec![];
     let mut not_done = vec![];
-    let mut no_perm  = vec![];
+    let mut no_perm = vec![];
 
     for group_id in &target_group_ids {
-        let is_member = sender_pid.as_ref().map(|pid| {
-            state.cleaning_groups.iter()
-                .find(|g| &g.id == group_id)
-                .map(|g| g.member_ids.contains(pid))
-                .unwrap_or(false)
-        }).unwrap_or(false);
+        let is_member = sender_pid
+            .as_ref()
+            .map(|pid| {
+                state
+                    .cleaning_groups
+                    .iter()
+                    .find(|g| &g.id == group_id)
+                    .map(|g| g.member_ids.contains(pid))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
 
         if !is_member && !is_admin {
-            let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
+            let name = state
+                .group_by_id(group_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_default();
             no_perm.push(name);
             continue;
         }
 
-        let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
+        let name = state
+            .group_by_id(group_id)
+            .map(|g| g.name.clone())
+            .unwrap_or_default();
         let had_completion = state.is_completed(group_id, year, week);
         state.apply_event(DomainEvent::CleaningUndone {
-            group_id: group_id.clone(), iso_year: year, iso_week: week,
+            group_id: group_id.clone(),
+            iso_year: year,
+            iso_week: week,
         })?;
         if had_completion {
             // Infrastructure cleanup: remove matching reaction_done trackers.
@@ -2327,40 +2945,53 @@ async fn cmd_undo(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
     state.save(&ctx.state_path).await?;
     let mut lines = vec![];
-    if !undone.is_empty()   { lines.push(format!("↩️ Undone: {}", undone.join(", "))); }
-    if !not_done.is_empty() { lines.push(format!("Not done this week: {}", not_done.join(", "))); }
-    if !no_perm.is_empty()  { lines.push(format!("❌ Not your group: {}", no_perm.join(", "))); }
+    if !undone.is_empty() {
+        lines.push(format!("↩️ Undone: {}", undone.join(", ")));
+    }
+    if !not_done.is_empty() {
+        lines.push(format!("Not done this week: {}", not_done.join(", ")));
+    }
+    if !no_perm.is_empty() {
+        lines.push(format!("❌ Not your group: {}", no_perm.join(", ")));
+    }
     Ok(Some(lines.join("\n")))
 }
 
 // ── !next [@user] ─────────────────────────────────────────────────────────────
 
 async fn cmd_next(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
     let (cur_y, cur_w) = current_iso_week();
 
     let query = args.first().copied().unwrap_or_else(|| sender.as_str());
     let person = match state.find_person(query) {
         Some(p) => p.clone(),
-        None    => return Ok(Some(format!("{query} is not registered."))),
+        None => return Ok(Some(format!("{query} is not registered."))),
     };
     let groups = state.groups_for_person(&person.id);
     if groups.is_empty() {
-        return Ok(Some(format!("{} is not in any cleaning group.", person.display_name)));
+        return Ok(Some(format!(
+            "{} is not in any cleaning group.",
+            person.display_name
+        )));
     }
 
     let (dy, dw) = crate::state::first_due_week(&state, interval);
     let away = weeks_between((cur_y, cur_w), (dy, dw));
-    let when = match away { 0 => "this week ⚠️".into(), 1 => "next week".into(), n => format!("in {n} weeks") };
+    let when = match away {
+        0 => "this week ⚠️".into(),
+        1 => "next week".into(),
+        n => format!("in {n} weeks"),
+    };
     let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
     let done = groups.iter().any(|g| state.is_cleaned(&g.id, dy, dw));
     let suffix = if done { "  ✅ already done!" } else { "" };
 
     Ok(Some(format!(
         "📅 Next due for {name}: **Week {dw} ({dates})** ({when}) · {groups}{suffix}",
-        name   = person.display_name,
-        dates  = week_dates(dy, dw),
+        name = person.display_name,
+        dates = week_dates(dy, dw),
         groups = group_names.join(", "),
     )))
 }
@@ -2370,16 +3001,18 @@ async fn cmd_next(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 async fn cmd_skip(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (year, week) = current_iso_week();
-    let interval     = ctx.config.schedule.interval_weeks;
-    let mut state    = ctx.state.lock().await;
+    let interval = ctx.config.schedule.interval_weeks;
+    let mut state = ctx.state.lock().await;
 
     let target_ids: Vec<String> = if let Some(name) = args.first() {
         match state.group_by_name(name) {
             Some(g) => vec![g.id.clone()],
-            None    => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
-        state.cleaning_groups.iter()
+        state
+            .cleaning_groups
+            .iter()
             .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval))
             .map(|g| g.id.clone())
             .collect()
@@ -2388,28 +3021,37 @@ async fn cmd_skip(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     let mut skipped = vec![];
     let mut already = vec![];
     let sender_mxid = sender.as_str();
-    let sender_pid  = state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone())
+    let sender_pid = state
+        .person_by_matrix_id(sender_mxid)
+        .map(|p| p.id.clone())
         .unwrap_or_else(|| sender_mxid.to_owned());
 
     for group_id in &target_ids {
-        let name = state.group_by_id(group_id).map(|g| g.name.clone()).unwrap_or_default();
+        let name = state
+            .group_by_id(group_id)
+            .map(|g| g.name.clone())
+            .unwrap_or_default();
         if state.is_completed(group_id, year, week) {
             already.push(name);
             continue;
         }
         state.apply_event(DomainEvent::CleaningSkipped {
-            group_id:  group_id.clone(),
+            group_id: group_id.clone(),
             skipper_id: sender_pid.clone(),
-            iso_year:  year,
-            iso_week:  week,
+            iso_year: year,
+            iso_week: week,
         })?;
         skipped.push(name);
     }
 
     state.save(&ctx.state_path).await?;
     let mut lines = vec![];
-    if !skipped.is_empty() { lines.push(format!("⏭️ Skipped: {}", skipped.join(", "))); }
-    if !already.is_empty() { lines.push(format!("Already done: {}", already.join(", "))); }
+    if !skipped.is_empty() {
+        lines.push(format!("⏭️ Skipped: {}", skipped.join(", ")));
+    }
+    if !already.is_empty() {
+        lines.push(format!("Already done: {}", already.join(", ")));
+    }
     Ok(Some(lines.join("\n")))
 }
 
@@ -2424,46 +3066,75 @@ async fn cmd_remind(
     require_admin(ctx, sender)?;
 
     let (year, week) = current_iso_week();
-    let interval     = ctx.config.schedule.interval_weeks;
+    let interval = ctx.config.schedule.interval_weeks;
 
-    let (reminder_data, reply_to_plan): (Vec<(String, String, Option<String>, Vec<String>)>, Option<String>) = {
+    let (reminder_data, reply_to_plan): (
+        Vec<(String, String, Option<String>, Vec<String>)>,
+        Option<String>,
+    ) = {
         let state = ctx.state.lock().await;
         let groups = if let Some(name) = args.first() {
-            state.cleaning_groups.iter()
+            state
+                .cleaning_groups
+                .iter()
                 .filter(|g| g.is_active && g.name.eq_ignore_ascii_case(name))
-                .cloned().collect::<Vec<_>>()
+                .cloned()
+                .collect::<Vec<_>>()
         } else {
-            state.cleaning_groups.iter()
-                .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
-                .cloned().collect()
+            state
+                .cleaning_groups
+                .iter()
+                .filter(|g| {
+                    g.is_active
+                        && state.is_due(&g.id, year, week, interval)
+                        && !state.is_completed(&g.id, year, week)
+                })
+                .cloned()
+                .collect()
         };
 
         let week_key = format!("{year}-W{week:02}");
         let reply_to_plan = state.weekly_plan_canonical.get(&week_key).cloned();
-        let reminder_data = groups.iter().map(|g| {
-            let resp = state.responsible_person(g, year, week, interval);
-            let mxids = resp.and_then(|p| p.matrix_id.as_ref().map(|m| vec![m.clone()])).unwrap_or_default();
-            let _text = resp.map(|p| person_key(p).to_owned()).unwrap_or_else(|| "(nobody assigned)".into());
-            (g.id.clone(), g.name.clone(), g.rooms_text(), mxids)
-        }).collect();
+        let reminder_data = groups
+            .iter()
+            .map(|g| {
+                let resp = state.responsible_person(g, year, week, interval);
+                let mxids = resp
+                    .and_then(|p| p.matrix_id.as_ref().map(|m| vec![m.clone()]))
+                    .unwrap_or_default();
+                let _text = resp
+                    .map(|p| person_key(p).to_owned())
+                    .unwrap_or_else(|| "(nobody assigned)".into());
+                (g.id.clone(), g.name.clone(), g.rooms_text(), mxids)
+            })
+            .collect();
         (reminder_data, reply_to_plan)
     };
 
     if reminder_data.is_empty() {
-        return Ok(Some(format::mentionify("✅ Nothing due and uncleaned right now.")));
+        return Ok(Some(format::mentionify(
+            "✅ Nothing due and uncleaned right now.",
+        )));
     }
 
     let mut sent = vec![];
     for (_group_id, group_name, rooms_text, mxids) in &reminder_data {
-        let users_text = if mxids.is_empty() { "(nobody assigned)".into() } else { mxids.join(", ") };
-        let rooms_line = rooms_text.as_ref().map(|r| format!(" · {}", r.replace('\n', " · "))).unwrap_or_default();
-        let msg = format!(
-            "⏰ **Reminder · Week {week}**\n**{group_name}** · {users_text}{rooms_line}"
-        );
+        let users_text = if mxids.is_empty() {
+            "(nobody assigned)".into()
+        } else {
+            mxids.join(", ")
+        };
+        let rooms_line = rooms_text
+            .as_ref()
+            .map(|r| format!(" · {}", r.replace('\n', " · ")))
+            .unwrap_or_default();
+        let msg =
+            format!("⏰ **Reminder · Week {week}**\n**{group_name}** · {users_text}{rooms_line}");
 
         let uid_refs: Vec<&str> = mxids.iter().map(String::as_str).collect();
-        let names   = format::fetch_names(room, &uid_refs).await;
-        let parsed: Vec<matrix_sdk::ruma::OwnedUserId> = mxids.iter().filter_map(|s| s.parse().ok()).collect();
+        let names = format::fetch_names(room, &uid_refs).await;
+        let parsed: Vec<matrix_sdk::ruma::OwnedUserId> =
+            mxids.iter().filter_map(|s| s.parse().ok()).collect();
         let mut content = format::mentionify_with_names(&msg, &names)
             .add_mentions(matrix_sdk::ruma::events::Mentions::with_user_ids(parsed));
         if let Some(plan_eid) = &reply_to_plan {
@@ -2480,13 +3151,16 @@ async fn cmd_remind(
         }
     }
 
-    Ok(Some(format::mentionify(&format!("✅ Reminder sent for: {}", sent.join(", ")))))
+    Ok(Some(format::mentionify(&format!(
+        "✅ Reminder sent for: {}",
+        sent.join(", ")
+    ))))
 }
 
 // ── !leaderboard ─────────────────────────────────────────────────────────────
 
 async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
 
     let board = analytics::global_leaderboard(&state, interval);
@@ -2496,12 +3170,27 @@ async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
 
     let mut lines = vec!["🏆 Cleaning Leaderboard".to_owned(), String::new()];
     for (i, ps) in board.iter().enumerate() {
-        let medal   = match i { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => "  " };
-        let streak  = if ps.streak >= 2 { format!("  🔥{}", ps.streak) } else { String::new() };
-        let skips   = if ps.skipped > 0 { format!("  ⏭️{}", ps.skipped) } else { String::new() };
-        let pct     = (ps.completion_rate * 100.0).round() as u32;
-        lines.push(format!("{medal} {}  {}/{} ({}%){streak}{skips}",
-            ps.display_name, ps.completed, ps.due_weeks, pct));
+        let medal = match i {
+            0 => "🥇",
+            1 => "🥈",
+            2 => "🥉",
+            _ => "  ",
+        };
+        let streak = if ps.streak >= 2 {
+            format!("  🔥{}", ps.streak)
+        } else {
+            String::new()
+        };
+        let skips = if ps.skipped > 0 {
+            format!("  ⏭️{}", ps.skipped)
+        } else {
+            String::new()
+        };
+        let pct = (ps.completion_rate * 100.0).round() as u32;
+        lines.push(format!(
+            "{medal} {}  {}/{} ({}%){streak}{skips}",
+            ps.display_name, ps.completed, ps.due_weeks, pct
+        ));
     }
     Ok(Some(lines.join("\n")))
 }
@@ -2509,17 +3198,22 @@ async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> {
 // ── !fairness [group] ─────────────────────────────────────────────────────────
 
 async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
     let (_, start_w) = state.tracking_start();
 
     let groups: Vec<crate::domain::GroupId> = if let Some(name) = args.first() {
         match state.group_by_name(name) {
             Some(g) => vec![g.id.clone()],
-            None    => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(format!("Group «{name}» not found."))),
         }
     } else {
-        state.cleaning_groups.iter().filter(|g| g.is_active).map(|g| g.id.clone()).collect()
+        state
+            .cleaning_groups
+            .iter()
+            .filter(|g| g.is_active)
+            .map(|g| g.id.clone())
+            .collect()
     };
 
     if groups.is_empty() {
@@ -2528,8 +3222,12 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
 
     let mut out = Vec::new();
     for (i, group_id) in groups.iter().enumerate() {
-        let Some(report) = analytics::fairness_report(&state, group_id, interval) else { continue };
-        if i > 0 { out.push(String::new()); }
+        let Some(report) = analytics::fairness_report(&state, group_id, interval) else {
+            continue;
+        };
+        if i > 0 {
+            out.push(String::new());
+        }
         out.push(format!(
             "⚖️ **{}** · {} wks · since W{start_w}",
             report.group_name, report.due_weeks,
@@ -2546,7 +3244,9 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
     }
 
     if out.is_empty() {
-        return Ok(Some("No history yet — run some cleaning cycles first.".into()));
+        return Ok(Some(
+            "No history yet — run some cleaning cycles first.".into(),
+        ));
     }
     Ok(Some(out.join("\n")))
 }
@@ -2554,9 +3254,9 @@ async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Option<String>>
 // ── !workload ─────────────────────────────────────────────────────────────────
 
 async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
-    let report   = analytics::workload_report(&state, interval);
+    let report = analytics::workload_report(&state, interval);
 
     if report.entries.is_empty() {
         return Ok(Some("No members assigned to any group yet.".into()));
@@ -2567,7 +3267,10 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     let header = if has_history {
         format!("🏋️ **Load** · {} wks · {:.2} yr", report.due_weeks, yrs)
     } else {
-        format!("🏋️ **Expected load** (structural · {} wks tracked)", report.due_weeks)
+        format!(
+            "🏋️ **Expected load** (structural · {} wks tracked)",
+            report.due_weeks
+        )
     };
     let mut out = vec![header];
 
@@ -2575,7 +3278,11 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     let avg_expected = {
         let sum: f64 = report.entries.iter().map(|e| e.expected_cli_per_year).sum();
         let n = report.entries.len() as f64;
-        if n > 0.0 && sum > 0.0 { sum / n } else { 1.0 }
+        if n > 0.0 && sum > 0.0 {
+            sum / n
+        } else {
+            1.0
+        }
     };
 
     for e in &report.entries {
@@ -2587,13 +3294,16 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
             let icon = load_icon(e.actual_cli_per_year, e.expected_cli_per_year);
             format!(
                 "{icon} **{}**  {} · {} · {}",
-                e.display_name, pct, ratio_str,
+                e.display_name,
+                pct,
+                ratio_str,
                 e.group_names.join(", "),
             )
         } else {
             format!(
                 "**{}**  {} · {}",
-                e.display_name, ratio_str,
+                e.display_name,
+                ratio_str,
                 e.group_names.join(", "),
             )
         };
@@ -2601,8 +3311,16 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     }
 
     if has_history {
-        let most = report.most_loaded.first().map(String::as_str).unwrap_or("-");
-        let least = report.least_loaded.first().map(String::as_str).unwrap_or("-");
+        let most = report
+            .most_loaded
+            .first()
+            .map(String::as_str)
+            .unwrap_or("-");
+        let least = report
+            .least_loaded
+            .first()
+            .map(String::as_str)
+            .unwrap_or("-");
         if most != least {
             out.push(format!("⬆ {most} · ⬇ {least}"));
         }
@@ -2614,22 +3332,31 @@ async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
 // ── !groupstats ───────────────────────────────────────────────────────────────
 
 async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
 
-    let active: Vec<_> = state.cleaning_groups.iter().filter(|g| g.is_active).collect();
+    let active: Vec<_> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active)
+        .collect();
     if active.is_empty() {
         return Ok(Some("No active cleaning groups configured.".into()));
     }
 
-    let models: Vec<_> = active.iter()
+    let models: Vec<_> = active
+        .iter()
         .map(|g| analytics::group_load_model(g, interval))
         .collect();
 
     let avg_cli = {
         let sum: f64 = models.iter().map(|m| m.cli_per_year).sum();
         let n = models.len() as f64;
-        if n > 0.0 && sum > 0.0 { sum / n } else { 1.0 }
+        if n > 0.0 && sum > 0.0 {
+            sum / n
+        } else {
+            1.0
+        }
     };
 
     let mut out = vec!["📊 **Groups**  (1.0× = avg load/person/yr)".to_owned()];
@@ -2643,17 +3370,26 @@ async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
         };
         out.push(format!(
             "**{}**  {:.2}× · {}p/{}wks · {:.0}r{}",
-            group.name, ratio, m.member_count, m.rotation_interval,
-            m.rooms_per_assignment, weight,
+            group.name, ratio, m.member_count, m.rotation_interval, m.rooms_per_assignment, weight,
         ));
         for slot in &group.slots {
             let sr = analytics::effective_rooms_pub(&slot.room_names, &slot.room_weights);
-            let sw = if (slot.weight - 1.0).abs() > 0.01 { format!(" ×{:.1}", slot.weight) } else { String::new() };
+            let sw = if (slot.weight - 1.0).abs() > 0.01 {
+                format!(" ×{:.1}", slot.weight)
+            } else {
+                String::new()
+            };
             out.push(format!("  └ {}  {:.0}r{}", slot.name, sr, sw));
         }
         let mut room_weights: Vec<String> = if group.slots.is_empty() {
-            group.room_weights.iter().map(|(r, w)| format!("{r} ×{w:.1}")).collect()
-        } else { vec![] };
+            group
+                .room_weights
+                .iter()
+                .map(|(r, w)| format!("{r} ×{w:.1}"))
+                .collect()
+        } else {
+            vec![]
+        };
         room_weights.sort();
         if !room_weights.is_empty() {
             out.push(format!("  weights: {}", room_weights.join(", ")));
@@ -2665,26 +3401,50 @@ async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
 
 // ── Admin: !setroomweight <group> <room> <weight> ────────────────────────────
 
-async fn cmd_setroomweight(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_setroomweight(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (group_name, room_name, weight_str) = match (args.first(), args.get(1), args.get(2)) {
         (Some(g), Some(r), Some(w)) => (*g, *r, *w),
-        _ => return Ok(Some("Usage: !setroomweight <group> <room> <weight>  (e.g. 2.0 for twice the load)".into())),
+        _ => {
+            return Ok(Some(
+                "Usage: !setroomweight <group> <room> <weight>  (e.g. 2.0 for twice the load)"
+                    .into(),
+            ))
+        }
     };
     let weight: f64 = match weight_str.parse() {
         Ok(w) if w > 0.0 => w,
-        _ => return Ok(Some("Weight must be a positive number (e.g. 1.5 or 0.5).".into())),
+        _ => {
+            return Ok(Some(
+                "Weight must be a positive number (e.g. 1.5 or 0.5).".into(),
+            ))
+        }
     };
     let mut state = ctx.state.lock().await;
     let (group_id, slot_id) = match state.group_by_name(group_name) {
         Some(g) => {
             // Check if the room exists in a slot or at group level.
-            let in_group = g.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name));
-            let slot = g.slots.iter().find(|s| s.room_names.iter().any(|r| r.eq_ignore_ascii_case(room_name)));
+            let in_group = g
+                .room_names
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(room_name));
+            let slot = g.slots.iter().find(|s| {
+                s.room_names
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(room_name))
+            });
             match (in_group, slot) {
-                (true, _)       => (g.id.clone(), None),
-                (_, Some(s))    => (g.id.clone(), Some(s.id.clone())),
-                _               => return Ok(Some(format!("Room «{room_name}» not found in «{group_name}»."))),
+                (true, _) => (g.id.clone(), None),
+                (_, Some(s)) => (g.id.clone(), Some(s.id.clone())),
+                _ => {
+                    return Ok(Some(format!(
+                        "Room «{room_name}» not found in «{group_name}»."
+                    )))
+                }
             }
         }
         None => return Ok(Some(format!("Group «{group_name}» not found."))),
@@ -2693,36 +3453,68 @@ async fn cmd_setroomweight(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]
     let canonical = {
         let g = state.group_by_name(group_name).unwrap();
         match &slot_id {
-            None    => g.room_names.iter().find(|r| r.eq_ignore_ascii_case(room_name)).unwrap().clone(),
-            Some(s) => g.slot_by_id(s).unwrap().room_names.iter()
-                .find(|r| r.eq_ignore_ascii_case(room_name)).unwrap().clone(),
+            None => g
+                .room_names
+                .iter()
+                .find(|r| r.eq_ignore_ascii_case(room_name))
+                .unwrap()
+                .clone(),
+            Some(s) => g
+                .slot_by_id(s)
+                .unwrap()
+                .room_names
+                .iter()
+                .find(|r| r.eq_ignore_ascii_case(room_name))
+                .unwrap()
+                .clone(),
         }
     };
-    state.apply_event(DomainEvent::RoomWeightSet { group_id, slot_id, room_name: canonical.clone(), weight })?;
+    state.apply_event(DomainEvent::RoomWeightSet {
+        group_id,
+        slot_id,
+        room_name: canonical.clone(),
+        weight,
+    })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Room «{canonical}» in «{group_name}» weight set to {weight:.2}×.")))
+    Ok(Some(format!(
+        "✅ Room «{canonical}» in «{group_name}» weight set to {weight:.2}×."
+    )))
 }
 
 // ── Admin: !setgroupweight <group> <weight> ───────────────────────────────────
 
-async fn cmd_setgroupweight(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_setgroupweight(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let (group_name, weight_str) = match (args.first(), args.get(1)) {
         (Some(g), Some(w)) => (*g, *w),
-        _ => return Ok(Some("Usage: !setgroupweight <group> <weight>  (e.g. 2.0 for twice the load)".into())),
+        _ => {
+            return Ok(Some(
+                "Usage: !setgroupweight <group> <weight>  (e.g. 2.0 for twice the load)".into(),
+            ))
+        }
     };
     let weight: f64 = match weight_str.parse() {
         Ok(w) if w > 0.0 => w,
-        _ => return Ok(Some("Weight must be a positive number (e.g. 1.5 or 0.5).".into())),
+        _ => {
+            return Ok(Some(
+                "Weight must be a positive number (e.g. 1.5 or 0.5).".into(),
+            ))
+        }
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(group_name) {
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
     state.apply_event(DomainEvent::GroupWeightSet { group_id, weight })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ «{group_name}» workload weight set to {weight:.2}×.")))
+    Ok(Some(format!(
+        "✅ «{group_name}» workload weight set to {weight:.2}×."
+    )))
 }
 
 // ── Admin: !absent <person> [group] [weeks] ───────────────────────────────────
@@ -2739,34 +3531,45 @@ async fn cmd_setgroupweight(ctx: &BotContext, sender: &OwnedUserId, args: &[&str
 // assigned for the current week when this is called, that assignment
 // stands; get someone else onto it with !takeover, !swap, or !assign.
 
-async fn cmd_absent(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_absent(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let person_query = match args.first() {
         Some(u) => u.to_string(),
-        None    => return Ok(Some("Usage: !absent <person> [weeks]  (default 4)".into())),
+        None => return Ok(Some("Usage: !absent <person> [weeks]  (default 4)".into())),
     };
 
     let mut state = ctx.state.lock().await;
     let person = match state.find_person(&person_query).cloned() {
         Some(p) => p,
-        None    => return Ok(Some(format!("{person_query} not found."))),
+        None => return Ok(Some(format!("{person_query} not found."))),
     };
 
     // Parse optional weeks (last numeric arg).
     let weeks: u32 = args.iter().rev().find_map(|s| s.parse().ok()).unwrap_or(4);
 
-    let groups = state.groups_for_person(&person.id).iter().map(|g| g.id.clone()).collect::<Vec<_>>();
+    let groups = state
+        .groups_for_person(&person.id)
+        .iter()
+        .map(|g| g.id.clone())
+        .collect::<Vec<_>>();
     if groups.is_empty() {
-        return Ok(Some(format!("{} is not in any group.", person.display_name)));
+        return Ok(Some(format!(
+            "{} is not in any group.",
+            person.display_name
+        )));
     }
 
     let (from_y, from_w) = current_iso_week();
     for group_id in &groups {
         state.apply_event(DomainEvent::AbsenceRecorded {
-            person_id:      person.id.clone(),
-            group_id:       group_id.clone(),
-            from_year:      from_y,
-            from_week:      from_w,
+            person_id: person.id.clone(),
+            group_id: group_id.clone(),
+            from_year: from_y,
+            from_week: from_w,
             duration_weeks: weeks,
         })?;
     }
@@ -2777,7 +3580,8 @@ async fn cmd_absent(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Re
         "🌴 {} away for {weeks} week{} · back week {} ({})",
         person.display_name,
         if weeks == 1 { "" } else { "s" },
-        end.1, week_dates(end.0, end.1)
+        end.1,
+        week_dates(end.0, end.1)
     )))
 }
 
@@ -2787,12 +3591,12 @@ async fn cmd_back(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
     require_admin(ctx, sender)?;
     let query = match args.first() {
         Some(u) => u.to_string(),
-        None    => return Ok(Some("Usage: !back <person>".into())),
+        None => return Ok(Some("Usage: !back <person>".into())),
     };
     let mut state = ctx.state.lock().await;
     let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
         Some(id) => id,
-        None     => return Ok(Some(format!("{query} not found."))),
+        None => return Ok(Some(format!("{query} not found."))),
     };
     if !state.absences.iter().any(|a| a.person_id == person_id) {
         return Ok(Some(format!("{query} has no active absence.")));
@@ -2806,11 +3610,11 @@ async fn cmd_back(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Resu
 
 async fn cmd_blame(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
     let (cur_y, cur_w) = current_iso_week();
-    let state    = ctx.state.lock().await;
+    let state = ctx.state.lock().await;
     let interval = ctx.config.schedule.interval_weeks;
 
     Ok(Some(match args.first() {
-        None      => blame_all(&state, cur_y, cur_w, interval),
+        None => blame_all(&state, cur_y, cur_w, interval),
         Some(arg) => {
             if let Some(group) = state.group_by_name(arg) {
                 blame_group(&state, &group.clone(), cur_y, cur_w, interval)
@@ -2824,16 +3628,30 @@ async fn cmd_blame(ctx: &BotContext, args: &[&str]) -> Result<Option<String>> {
 }
 
 fn blame_all(state: &crate::state::State, year: i32, week: u32, interval: u32) -> String {
-    let uncleaned: Vec<_> = state.cleaning_groups.iter()
-        .filter(|g| g.is_active && state.is_due(&g.id, year, week, interval) && !state.is_completed(&g.id, year, week))
+    let uncleaned: Vec<_> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| {
+            g.is_active
+                && state.is_due(&g.id, year, week, interval)
+                && !state.is_completed(&g.id, year, week)
+        })
         .collect();
     if uncleaned.is_empty() {
         return "✅ All due groups are cleaned this week!".into();
     }
-    let mut lines = vec![format!("😤 **Blame** · week {week} ({})", week_dates(year, week))];
+    let mut lines = vec![format!(
+        "😤 **Blame** · week {week} ({})",
+        week_dates(year, week)
+    )];
     for g in uncleaned {
-        let members_text = state.members_of(g).iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>().join(", ");
-        let n_due    = state.all_due_weeks(interval, (year, week)).len();
+        let members_text = state
+            .members_of(g)
+            .iter()
+            .map(|p| p.display_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n_due = state.all_due_weeks(interval, (year, week)).len();
         let n_missed = state.missed_weeks_for(&g.id, interval).len();
         lines.push(String::new());
         lines.push(format!("❌ {}", g.name));
@@ -2843,27 +3661,66 @@ fn blame_all(state: &crate::state::State, year: i32, week: u32, interval: u32) -
     lines.join("\n")
 }
 
-fn blame_group(state: &crate::state::State, group: &CleaningGroup, year: i32, week: u32, interval: u32) -> String {
-    let due    = state.all_due_weeks(interval, (year, week));
-    let closed: Vec<_> = due.iter().filter(|&&(y,w)| (y,w) != (year,week)).collect();
-    let n_due  = closed.len();
-    let n_done = closed.iter().filter(|(y,w)| state.is_completed(&group.id, *y, *w)).count();
-    let pct    = if n_due > 0 { 100 * n_done / n_due } else { 100 };
+fn blame_group(
+    state: &crate::state::State,
+    group: &CleaningGroup,
+    year: i32,
+    week: u32,
+    interval: u32,
+) -> String {
+    let due = state.all_due_weeks(interval, (year, week));
+    let closed: Vec<_> = due
+        .iter()
+        .filter(|&&(y, w)| (y, w) != (year, week))
+        .collect();
+    let n_due = closed.len();
+    let n_done = closed
+        .iter()
+        .filter(|(y, w)| state.is_completed(&group.id, *y, *w))
+        .count();
+    let pct = if n_due > 0 { 100 * n_done / n_due } else { 100 };
     let streak = state.streak_for(&group.id, interval);
-    let this   = state.is_completed(&group.id, year, week);
-    let members_text = state.members_of(group).iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>().join(", ");
+    let this = state.is_completed(&group.id, year, week);
+    let members_text = state
+        .members_of(group)
+        .iter()
+        .map(|p| p.display_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let mut lines = vec![format!("😤 **Blame** · {}", group.name), String::new()];
     lines.push(format!("Members: {members_text}"));
-    lines.push(format!("Completed: {n_done}/{n_due} ({pct}%) · Streak: {streak} · This week: {}", if this { "✅" } else { "❌" }));
+    lines.push(format!(
+        "Completed: {n_done}/{n_due} ({pct}%) · Streak: {streak} · This week: {}",
+        if this { "✅" } else { "❌" }
+    ));
     if let Some(last) = state.last_completion(&group.id) {
-        let by = state.person_by_id(&last.completed_by_id).map(|p| p.display_name.as_str()).unwrap_or("?");
-        lines.push(format!("Last: week {} ({}) by {by}", last.iso_week, week_dates(last.iso_year, last.iso_week)));
+        let by = state
+            .person_by_id(&last.completed_by_id)
+            .map(|p| p.display_name.as_str())
+            .unwrap_or("?");
+        lines.push(format!(
+            "Last: week {} ({}) by {by}",
+            last.iso_week,
+            week_dates(last.iso_year, last.iso_week)
+        ));
     }
     let missed = state.missed_weeks_for(&group.id, interval);
     if !missed.is_empty() {
-        let shown: Vec<_> = missed.iter().take(5).map(|(y,w)| format!("w{w} ({})", week_dates(*y,*w))).collect();
-        lines.push(format!("Missed: {}{}", shown.join(", "), if missed.len() > 5 { format!(" (+{})", missed.len()-5) } else { String::new() }));
+        let shown: Vec<_> = missed
+            .iter()
+            .take(5)
+            .map(|(y, w)| format!("w{w} ({})", week_dates(*y, *w)))
+            .collect();
+        lines.push(format!(
+            "Missed: {}{}",
+            shown.join(", "),
+            if missed.len() > 5 {
+                format!(" (+{})", missed.len() - 5)
+            } else {
+                String::new()
+            }
+        ));
     }
     lines.join("\n")
 }
@@ -2871,23 +3728,52 @@ fn blame_group(state: &crate::state::State, group: &CleaningGroup, year: i32, we
 fn blame_person(state: &crate::state::State, person: &Person, interval: u32) -> String {
     let (cur_y, cur_w) = current_iso_week();
     let groups = state.groups_for_person(&person.id);
-    let group_name = groups.first().map(|g| g.name.as_str()).unwrap_or("(unassigned)");
+    let group_name = groups
+        .first()
+        .map(|g| g.name.as_str())
+        .unwrap_or("(unassigned)");
 
-    let due    = state.all_due_weeks(interval, (cur_y, cur_w));
-    let closed: Vec<_> = due.iter().filter(|&&(y,w)| (y,w) != (cur_y,cur_w)).collect();
-    let n_due  = closed.len();
-    let n_done_by_person = state.completions.iter().filter(|c| c.completed_by_id == person.id).count().min(n_due);
-    let pct    = if n_due > 0 { 100 * n_done_by_person / n_due } else { 100 };
-    let streak = groups.first().map(|g| state.streak_for(&g.id, interval)).unwrap_or(0);
+    let due = state.all_due_weeks(interval, (cur_y, cur_w));
+    let closed: Vec<_> = due
+        .iter()
+        .filter(|&&(y, w)| (y, w) != (cur_y, cur_w))
+        .collect();
+    let n_due = closed.len();
+    let n_done_by_person = state
+        .completions
+        .iter()
+        .filter(|c| c.completed_by_id == person.id)
+        .count()
+        .min(n_due);
+    let pct = if n_due > 0 {
+        100 * n_done_by_person / n_due
+    } else {
+        100
+    };
+    let streak = groups
+        .first()
+        .map(|g| state.streak_for(&g.id, interval))
+        .unwrap_or(0);
 
-    let mut lines = vec![format!("😤 **Blame** · {}", person.display_name), String::new()];
+    let mut lines = vec![
+        format!("😤 **Blame** · {}", person.display_name),
+        String::new(),
+    ];
     lines.push(format!("Group: {group_name}"));
-    lines.push(format!("Personally cleaned: {n_done_by_person}/{n_due} ({pct}%) · Streak: {streak}"));
-    if let Some(last) = state.completions.iter()
+    lines.push(format!(
+        "Personally cleaned: {n_done_by_person}/{n_due} ({pct}%) · Streak: {streak}"
+    ));
+    if let Some(last) = state
+        .completions
+        .iter()
         .filter(|c| c.completed_by_id == person.id)
         .max_by_key(|c| c.completed_at)
     {
-        lines.push(format!("Last: week {} ({})", last.iso_week, week_dates(last.iso_year, last.iso_week)));
+        lines.push(format!(
+            "Last: week {} ({})",
+            last.iso_week,
+            week_dates(last.iso_year, last.iso_week)
+        ));
     }
     lines.join("\n")
 }
@@ -2900,17 +3786,23 @@ async fn cmd_cleanplan(
     room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
-    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(6).clamp(1, 20);
+    let n: usize = args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(6)
+        .clamp(1, 20);
 
     let (snapshot, is_empty) = {
-        let state    = ctx.state.lock().await;
+        let state = ctx.state.lock().await;
         let interval = ctx.config.schedule.interval_weeks;
-        let empty    = state.cleaning_groups.is_empty();
+        let empty = state.cleaning_groups.is_empty();
         (build_schedule(&state, interval, n), empty)
     };
 
     if is_empty {
-        return Ok(Some(format::mentionify("No cleaning groups configured yet.")));
+        return Ok(Some(format::mentionify(
+            "No cleaning groups configured yet.",
+        )));
     }
 
     // Pre-fetch Matrix display names for all assignees and completers.
@@ -2918,14 +3810,20 @@ async fn cmd_cleanplan(
         let mut ids = Vec::new();
         for a in &snapshot.assignments {
             if let Some(mxid) = a.assignee_mxid() {
-                if !ids.contains(&mxid.to_owned()) { ids.push(mxid.to_owned()); }
+                if !ids.contains(&mxid.to_owned()) {
+                    ids.push(mxid.to_owned());
+                }
             }
             if let Some(by) = &a.completed_by {
                 // completed_by is a display_name, look it up
                 if !ids.contains(by) {
                     let state = ctx.state.lock().await;
                     if let Some(p) = state.find_person(by) {
-                        if let Some(m) = &p.matrix_id { if !ids.contains(m) { ids.push(m.clone()); } }
+                        if let Some(m) = &p.matrix_id {
+                            if !ids.contains(m) {
+                                ids.push(m.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -2940,19 +3838,29 @@ async fn cmd_cleanplan(
 
     let mut lines = vec![format!(
         "📅 **Cleaning plan** · next {n} week{} · every {interval} week{}",
-        if n == 1 { "" } else { "s" }, if interval == 1 { "" } else { "s" }
+        if n == 1 { "" } else { "s" },
+        if interval == 1 { "" } else { "s" }
     )];
 
     for (dy, dw) in snapshot.weeks() {
         let is_cur = (dy, dw) == (cur_y, cur_w);
         lines.push(String::new());
         if is_cur {
-            lines.push(format!("📆 **Week {dw} ({})** ← this week", week_dates(dy, dw)));
+            lines.push(format!(
+                "📆 **Week {dw} ({})** ← this week",
+                week_dates(dy, dw)
+            ));
         } else {
             lines.push(format!("📆 Week {dw} ({})", week_dates(dy, dw)));
         }
         for a in snapshot.for_group_in_week(dy, dw) {
-            let icon   = if a.is_completed { "✅" } else if is_cur { "🔲" } else { "🗓" };
+            let icon = if a.is_completed {
+                "✅"
+            } else if is_cur {
+                "🔲"
+            } else {
+                "🗓"
+            };
             let detail = if a.is_completed {
                 if a.is_skipped {
                     "skipped ⏭️".into()
@@ -2962,13 +3870,17 @@ async fn cmd_cleanplan(
                 }
             } else {
                 match &a.assignee {
-                    None    => "nobody assigned yet".into(),
+                    None => "nobody assigned yet".into(),
                     Some(p) => {
                         let key = p.mxid.as_deref().unwrap_or(&p.name);
                         let state = ctx.state.lock().await;
                         let away = state.is_absent(&p.id, &a.group_id, dy, dw);
                         drop(state);
-                        if away { format!("{key} (away)") } else { key.to_owned() }
+                        if away {
+                            format!("{key} (away)")
+                        } else {
+                            key.to_owned()
+                        }
                     }
                 }
             };
@@ -2976,7 +3888,10 @@ async fn cmd_cleanplan(
         }
     }
 
-    Ok(Some(format::mentionify_with_names(&lines.join("\n"), &names)))
+    Ok(Some(format::mentionify_with_names(
+        &lines.join("\n"),
+        &names,
+    )))
 }
 
 // ── Admin: !pdf [N] ───────────────────────────────────────────────────────────
@@ -2995,10 +3910,18 @@ async fn cmd_pdf(
     let (n, group_filter) = {
         let weeks = args.first().and_then(|s| s.parse::<usize>().ok());
         if let Some(w) = weeks {
-            let name = if args.len() > 1 { Some(args[1..].join(" ")) } else { None };
+            let name = if args.len() > 1 {
+                Some(args[1..].join(" "))
+            } else {
+                None
+            };
             (w.clamp(1, 52), name)
         } else {
-            let name = if !args.is_empty() { Some(args.join(" ")) } else { None };
+            let name = if !args.is_empty() {
+                Some(args.join(" "))
+            } else {
+                None
+            };
             (8, name)
         }
     };
@@ -3007,7 +3930,7 @@ async fn cmd_pdf(
     refresh_display_names(ctx, room).await;
 
     let (tex, file_name) = {
-        let state    = ctx.state.lock().await;
+        let state = ctx.state.lock().await;
         let interval = ctx.config.schedule.interval_weeks;
         let mut snapshot = build_schedule(&state, interval, n);
         if let Some(ref name) = group_filter {
@@ -3016,27 +3939,33 @@ async fn cmd_pdf(
                     let gid = g.id.clone();
                     snapshot.assignments.retain(|a| a.group_id == gid);
                 }
-                None => return Ok(Some(
-                    RoomMessageEventContent::text_plain(format!("Group «{name}» not found."))
-                )),
+                None => {
+                    return Ok(Some(RoomMessageEventContent::text_plain(format!(
+                        "Group «{name}» not found."
+                    ))))
+                }
             }
         }
         let tex = crate::pdf::render_tex(&snapshot);
         // Build filename: cleaning-plan-KW{first}-KW{last}.pdf
         let weeks_range = {
             let first = snapshot.assignments.first();
-            let last  = snapshot.assignments.last();
+            let last = snapshot.assignments.last();
             match (first, last) {
-                (Some(f), Some(l)) if (f.iso_year, f.iso_week) != (l.iso_year, l.iso_week) =>
-                    format!("KW{}-KW{}", f.iso_week, l.iso_week),
-                (Some(f), _) =>
-                    format!("KW{}", f.iso_week),
+                (Some(f), Some(l)) if (f.iso_year, f.iso_week) != (l.iso_year, l.iso_week) => {
+                    format!("KW{}-KW{}", f.iso_week, l.iso_week)
+                }
+                (Some(f), _) => format!("KW{}", f.iso_week),
                 _ => format!("{n}w"),
             }
         };
         let file_name = match &group_filter {
-            Some(name) => format!("cleaning-plan-{}_{}.pdf", name.to_lowercase().replace(' ', "_"), weeks_range),
-            None       => format!("cleaning-plan-{weeks_range}.pdf"),
+            Some(name) => format!(
+                "cleaning-plan-{}_{}.pdf",
+                name.to_lowercase().replace(' ', "_"),
+                weeks_range
+            ),
+            None => format!("cleaning-plan-{weeks_range}.pdf"),
         };
         (tex, file_name)
     };
@@ -3046,7 +3975,9 @@ async fn cmd_pdf(
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("tectonic render failed: {e}");
-            return Ok(Some(format::mentionify(&format!("❌ PDF render failed: {e}"))));
+            return Ok(Some(format::mentionify(&format!(
+                "❌ PDF render failed: {e}"
+            ))));
         }
     };
 
@@ -3056,13 +3987,14 @@ async fn cmd_pdf(
         Ok(upload) => {
             let mut file_info = FileInfo::new();
             file_info.mimetype = Some("application/pdf".to_owned());
-            file_info.size     = UInt::new(pdf_size as u64);
+            file_info.size = UInt::new(pdf_size as u64);
             let mut fc = FileMessageEventContent::plain(file_name, upload.content_uri);
             fc.info = Some(Box::new(file_info));
             let mut file_content = RoomMessageEventContent::new(MessageType::File(fc));
-            file_content.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
-                Thread::reply(thread_root.clone(), event_id.clone())
-            ));
+            file_content.relates_to =
+                Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
+                    Thread::reply(thread_root.clone(), event_id.clone()),
+                ));
             room.send(file_content).await.ok();
             Ok(Some(format::mentionify("📄 Schedule generated.")))
         }
@@ -3082,39 +4014,52 @@ async fn cmd_ical(
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
     let sender_mxid = sender.as_str();
-    let is_admin    = ctx.admin_users.contains(sender);
+    let is_admin = ctx.admin_users.contains(sender);
 
     // Parse target person and week count.
     let (person_id, weeks): (String, usize) = {
         let state = ctx.state.lock().await;
         match args.first() {
             None => {
-                let pid = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
-                    Some(id) => id,
-                    None     => return Ok(Some(format::mentionify(
-                        &format!("You ({sender_mxid}) are not registered. Ask an admin to use !adduser.")
-                    ))),
-                };
+                let pid =
+                    match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+                        Some(id) => id,
+                        None => return Ok(Some(format::mentionify(&format!(
+                            "You ({sender_mxid}) are not registered. Ask an admin to use !adduser."
+                        )))),
+                    };
                 (pid, 26)
             }
             Some(first) => {
                 if let Ok(n) = first.parse::<usize>() {
                     let pid = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
                         Some(id) => id,
-                        None     => return Ok(Some(format::mentionify(
-                            &format!("You ({sender_mxid}) are not registered.")
-                        ))),
+                        None => {
+                            return Ok(Some(format::mentionify(&format!(
+                                "You ({sender_mxid}) are not registered."
+                            ))))
+                        }
                     };
                     (pid, n.clamp(1, 104))
                 } else {
                     if !is_admin {
-                        return Ok(Some(format::mentionify("❌ Admin permission required to generate iCal for others.")));
+                        return Ok(Some(format::mentionify(
+                            "❌ Admin permission required to generate iCal for others.",
+                        )));
                     }
                     let person = match state.find_person(first).cloned() {
                         Some(p) => p,
-                        None    => return Ok(Some(format::mentionify(&format!("Person «{first}» not found.")))),
+                        None => {
+                            return Ok(Some(format::mentionify(&format!(
+                                "Person «{first}» not found."
+                            ))))
+                        }
                     };
-                    let n = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(26usize).clamp(1, 104);
+                    let n = args
+                        .get(1)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(26usize)
+                        .clamp(1, 104);
                     (person.id.clone(), n)
                 }
             }
@@ -3126,23 +4071,25 @@ async fn cmd_ical(
         let mut state = ctx.state.lock().await;
 
         // Check if a non-revoked token already exists for this person.
-        let has_token = state.calendar_tokens.iter()
+        let has_token = state
+            .calendar_tokens
+            .iter()
             .any(|ct| !ct.revoked && ct.person_id == person_id);
 
         if has_token {
             return Ok(Some(format::mentionify(
                 "📅 You already have an active calendar feed.\n\
-                 Use !icalreset to get a new URL (this invalidates the old subscription)."
+                 Use !icalreset to get a new URL (this invalidates the old subscription).",
             )));
         }
 
         let (raw_token, hash) = new_calendar_token();
         state.calendar_tokens.push(CalendarToken {
-            id:         Uuid::new_v4().to_string(),
+            id: Uuid::new_v4().to_string(),
             token_hash: hash,
-            person_id:  person_id.clone(),
+            person_id: person_id.clone(),
             created_at: Utc::now(),
-            revoked:    false,
+            revoked: false,
         });
         state.save(&ctx.state_path).await?;
         drop(state);
@@ -3157,23 +4104,41 @@ async fn cmd_ical(
 
     // Fallback: generate and upload as a Matrix file attachment.
     let ical_data = {
-        let state    = ctx.state.lock().await;
+        let state = ctx.state.lock().await;
         let interval = ctx.config.schedule.interval_weeks;
         let snapshot = build_schedule(&state, interval, weeks);
         crate::ical::render_ics(&snapshot, &person_id)
     };
 
-    let safe_name = person_id.trim_start_matches('@')
-        .split(':').next().unwrap_or("user")
-        .chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect::<String>();
+    let safe_name = person_id
+        .trim_start_matches('@')
+        .split(':')
+        .next()
+        .unwrap_or("user")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
 
     let mime: mime::Mime = "text/calendar".parse().expect("valid mime");
-    match room.client().media().upload(&mime, ical_data.into_bytes(), None).await {
+    match room
+        .client()
+        .media()
+        .upload(&mime, ical_data.into_bytes(), None)
+        .await
+    {
         Ok(upload) => {
             use matrix_sdk::ruma::events::room::message::{FileMessageEventContent, MessageType};
-            let content = RoomMessageEventContent::new(MessageType::File(
-                FileMessageEventContent::plain(format!("putzplan_{safe_name}.ics"), upload.content_uri)
-            ));
+            let content =
+                RoomMessageEventContent::new(MessageType::File(FileMessageEventContent::plain(
+                    format!("putzplan_{safe_name}.ics"),
+                    upload.content_uri,
+                )));
             room.send(content).await.ok();
             Ok(Some(format::mentionify(&format!(
                 "📅 iCal · {weeks} Wochen · Import .ics into your calendar app.\n\
@@ -3196,32 +4161,36 @@ async fn cmd_icalreset(
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
     let sender_mxid = sender.as_str();
-    let is_admin    = ctx.admin_users.contains(sender);
+    let is_admin = ctx.admin_users.contains(sender);
 
     let Some(ical_cfg) = &ctx.config.ical_server else {
         return Ok(Some(format::mentionify(
-            "iCal HTTP server is not configured. Add [ical_server] to config.toml."
+            "iCal HTTP server is not configured. Add [ical_server] to config.toml.",
         )));
     };
 
     let person_id: String = {
         let state = ctx.state.lock().await;
         match args.first() {
-            None => {
-                match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
-                    Some(id) => id,
-                    None     => return Ok(Some(format::mentionify(&format!(
+            None => match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
+                Some(id) => id,
+                None => {
+                    return Ok(Some(format::mentionify(&format!(
                         "{sender_mxid} is not registered."
-                    )))),
+                    ))))
                 }
-            }
+            },
             Some(query) => {
                 if !is_admin {
                     return Ok(Some(format::mentionify("❌ Admin permission required.")));
                 }
                 match state.find_person(query).map(|p| p.id.clone()) {
                     Some(id) => id,
-                    None     => return Ok(Some(format::mentionify(&format!("Person «{query}» not found.")))),
+                    None => {
+                        return Ok(Some(format::mentionify(&format!(
+                            "Person «{query}» not found."
+                        ))))
+                    }
                 }
             }
         }
@@ -3229,18 +4198,22 @@ async fn cmd_icalreset(
 
     let mut state = ctx.state.lock().await;
     // Revoke all existing tokens for this person.
-    for ct in state.calendar_tokens.iter_mut().filter(|ct| ct.person_id == person_id) {
+    for ct in state
+        .calendar_tokens
+        .iter_mut()
+        .filter(|ct| ct.person_id == person_id)
+    {
         ct.revoked = true;
     }
 
     // Issue new token.
     let (raw_token, hash) = new_calendar_token();
     state.calendar_tokens.push(CalendarToken {
-        id:         Uuid::new_v4().to_string(),
+        id: Uuid::new_v4().to_string(),
         token_hash: hash,
-        person_id:  person_id.clone(),
+        person_id: person_id.clone(),
         created_at: Utc::now(),
-        revoked:    false,
+        revoked: false,
     });
     state.save(&ctx.state_path).await?;
     drop(state);
@@ -3268,45 +4241,59 @@ async fn cmd_testnotify(room: &Room) -> Result<Option<RoomMessageEventContent>> 
         msg = msg.add_mentions(mentions);
         room.send(msg).await.ok();
     });
-    Ok(Some(RoomMessageEventContent::text_plain("⏱ @room notification in 5 minutes.")))
+    Ok(Some(RoomMessageEventContent::text_plain(
+        "⏱ @room notification in 5 minutes.",
+    )))
 }
 
 // ── Admin: !disablegroup <group> ─────────────────────────────────────────────
 
-async fn cmd_disablegroup(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_disablegroup(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !disablegroup <group>".into())),
+        None => return Ok(Some("Usage: !disablegroup <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
         Some(g) if !g.is_active => return Ok(Some(format!("«{name}» is already disabled."))),
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{name}» not found."))),
+        None => return Ok(Some(format!("Group «{name}» not found."))),
     };
     state.apply_event(DomainEvent::GroupDisabled { group_id })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("🚫 «{name}» disabled — excluded from scheduling and statistics.")))
+    Ok(Some(format!(
+        "🚫 «{name}» disabled — excluded from scheduling and statistics."
+    )))
 }
 
 // ── Admin: !enablegroup <group> ──────────────────────────────────────────────
 
-async fn cmd_enablegroup(ctx: &BotContext, sender: &OwnedUserId, args: &[&str]) -> Result<Option<String>> {
+async fn cmd_enablegroup(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None    => return Ok(Some("Usage: !enablegroup <group>".into())),
+        None => return Ok(Some("Usage: !enablegroup <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
         Some(g) if g.is_active => return Ok(Some(format!("«{name}» is already enabled."))),
         Some(g) => g.id.clone(),
-        None    => return Ok(Some(format!("Group «{name}» not found."))),
+        None => return Ok(Some(format!("Group «{name}» not found."))),
     };
     state.apply_event(DomainEvent::GroupEnabled { group_id })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ «{name}» enabled — now included in scheduling and statistics.")))
+    Ok(Some(format!(
+        "✅ «{name}» enabled — now included in scheduling and statistics."
+    )))
 }
 
 // ── !listgroups ───────────────────────────────────────────────────────────────
@@ -3316,9 +4303,11 @@ async fn cmd_listgroups(ctx: &BotContext) -> Result<Option<String>> {
     if state.cleaning_groups.is_empty() {
         return Ok(Some("No cleaning groups configured.".into()));
     }
-    let active_count   = state.cleaning_groups.iter().filter(|g| g.is_active).count();
+    let active_count = state.cleaning_groups.iter().filter(|g| g.is_active).count();
     let disabled_count = state.cleaning_groups.len() - active_count;
-    let mut lines = vec![format!("🏢 Groups ({active_count} active, {disabled_count} disabled):")];
+    let mut lines = vec![format!(
+        "🏢 Groups ({active_count} active, {disabled_count} disabled):"
+    )];
     for group in &state.cleaning_groups {
         let n = group.member_ids.len();
         if group.is_active {
@@ -3344,11 +4333,17 @@ async fn cmd_announceweek(
     require_admin(ctx, sender)?;
     let (year, week) = current_iso_week();
     match crate::scheduler::announce_weekly_plan(ctx, room, year, week).await {
-        Ok(Some(_)) => Ok(Some(format::mentionify("📋 Weekly plan announced and pinned."))),
-        Ok(None)    => Ok(Some(format::mentionify("Nothing is due this week — no plan to announce."))),
-        Err(e)      => {
+        Ok(Some(_)) => Ok(Some(format::mentionify(
+            "📋 Weekly plan announced and pinned.",
+        ))),
+        Ok(None) => Ok(Some(format::mentionify(
+            "Nothing is due this week — no plan to announce.",
+        ))),
+        Err(e) => {
             tracing::error!("!announceweek failed: {e}");
-            Ok(Some(format::mentionify(&format!("❌ Failed to announce weekly plan: {e}"))))
+            Ok(Some(format::mentionify(&format!(
+                "❌ Failed to announce weekly plan: {e}"
+            ))))
         }
     }
 }
@@ -3515,28 +4510,42 @@ mod tests {
             vec!["2nd Floor"]
         );
 
-        state.apply_event(DomainEvent::CleaningCompleted {
-            group_id: group_id.clone(),
-            slot_id: None,
-            person_id: first_id.clone(),
-            responsible_person_ids: vec![first_id.clone()],
-            iso_year: year,
-            iso_week: week,
-        }).unwrap();
+        state
+            .apply_event(DomainEvent::CleaningCompleted {
+                group_id: group_id.clone(),
+                slot_id: None,
+                person_id: first_id.clone(),
+                responsible_person_ids: vec![first_id.clone()],
+                iso_year: year,
+                iso_week: week,
+            })
+            .unwrap();
 
         assert!(current_open_assignments(&state, &group_id, &first_id, 1).is_empty());
-        assert_eq!(state.completions.len(), 1, "completed history must remain stored");
+        assert_eq!(
+            state.completions.len(),
+            1,
+            "completed history must remain stored"
+        );
     }
 
     #[test]
     fn empty_rotation_has_an_explicit_next_status() {
         let (mut state, group_id, _, _) = rotation_state();
-        state.group_by_name_mut("2nd Floor").unwrap().member_ids.clear();
-        assert_eq!(next_assignment_summary(&state, &group_id), "Next: rotation is empty.");
+        state
+            .group_by_name_mut("2nd Floor")
+            .unwrap()
+            .member_ids
+            .clear();
+        assert_eq!(
+            next_assignment_summary(&state, &group_id),
+            "Next: rotation is empty."
+        );
     }
 
     fn test_context(state: State) -> (BotContext, PathBuf, OwnedUserId) {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [matrix]
             homeserver = "https://matrix.example.org"
             user_id = "@cleaningbot:example.org"
@@ -3550,7 +4559,9 @@ mod tests {
             room_id = "!room:example.org"
             interval_weeks = 1
             materialize_weeks = 4
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let admin = OwnedUserId::try_from("@admin:example.org").unwrap();
         let path = std::env::temp_dir().join(format!("cleaning-bot-test-{}.json", Uuid::new_v4()));
         let ctx = BotContext {
@@ -3566,7 +4577,10 @@ mod tests {
     /// Same as `test_context` but with a configurable materialize horizon,
     /// for tests that need to pre-seed several already-frozen weeks and then
     /// still have room for a join/leave to reach a genuinely new week.
-    fn test_context_with_horizon(state: State, materialize_weeks: u32) -> (BotContext, PathBuf, OwnedUserId) {
+    fn test_context_with_horizon(
+        state: State,
+        materialize_weeks: u32,
+    ) -> (BotContext, PathBuf, OwnedUserId) {
         let config: Config = toml::from_str(&format!(
             r#"
             [matrix]
@@ -3583,7 +4597,8 @@ mod tests {
             interval_weeks = 1
             materialize_weeks = {materialize_weeks}
         "#
-        )).unwrap();
+        ))
+        .unwrap();
         let admin = OwnedUserId::try_from("@admin:example.org").unwrap();
         let path = std::env::temp_dir().join(format!("cleaning-bot-test-{}.json", Uuid::new_v4()));
         let ctx = BotContext {
@@ -3598,8 +4613,8 @@ mod tests {
 
     /// Three-member single-slot group, ready for `resolver::materialize`.
     fn three_person_state() -> (State, GroupId, PersonId, PersonId, PersonId) {
-        let anna  = Person::new_named("Anna");
-        let bob   = Person::new_named("Bob");
+        let anna = Person::new_named("Anna");
+        let bob = Person::new_named("Bob");
         let carla = Person::new_named("Carla");
         let (aid, bid, cid) = (anna.id.clone(), bob.id.clone(), carla.id.clone());
         let mut group = CleaningGroup::new("Floor");
@@ -3622,7 +4637,9 @@ mod tests {
     }
 
     fn assignee_for(state: &State, group_id: &GroupId, year: i32, week: u32) -> Option<PersonId> {
-        state.slot_assignments.iter()
+        state
+            .slot_assignments
+            .iter()
             .find(|a| a.group_id == *group_id && a.iso_year == year && a.iso_week == week)
             .and_then(|a| a.person_id.clone())
     }
@@ -3631,9 +4648,16 @@ mod tests {
     /// horizon via the preview fallback — used to check that the *eventual*
     /// rotation still cycles correctly even where join/leave deliberately
     /// didn't extend the frozen horizon that far.
-    fn preview_assignee_for(state: &State, group_id: &GroupId, year: i32, week: u32) -> Option<PersonId> {
+    fn preview_assignee_for(
+        state: &State,
+        group_id: &GroupId,
+        year: i32,
+        week: u32,
+    ) -> Option<PersonId> {
         let group = state.group_by_id(group_id).unwrap();
-        state.responsible_person(group, year, week, 1).map(|p| p.id.clone())
+        state
+            .responsible_person(group, year, week, 1)
+            .map(|p| p.id.clone())
     }
 
     #[tokio::test]
@@ -3642,53 +4666,74 @@ mod tests {
         state.cleaning_groups.push(CleaningGroup::new("2nd Floor"));
         let (ctx, path, admin) = test_context(state);
 
-        let added = add_matrix_participant(
-            &ctx,
-            &admin,
-            &["@new:example.org", "2nd Floor"],
-        ).await.unwrap().unwrap();
+        let added = add_matrix_participant(&ctx, &admin, &["@new:example.org", "2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(added.contains("Added @new:example.org"));
 
         {
             let state = ctx.state.lock().await;
             let group = state.group_by_name("2nd Floor").unwrap();
             assert_eq!(group.member_ids.len(), 1);
-            let new_id = state.person_by_matrix_id("@new:example.org").unwrap().id.as_str();
+            let new_id = state
+                .person_by_matrix_id("@new:example.org")
+                .unwrap()
+                .id
+                .as_str();
             let (year, week) = current_iso_week();
-            assert!(!state.slot_assignments.iter().any(|assignment| {
-                assignment.group_id == group.id
-                    && assignment.iso_year == year
-                    && assignment.iso_week == week
-                    && assignment.person_id.as_deref() == Some(new_id)
-            }), "the first member must not inherit the active week");
+            assert!(
+                !state.slot_assignments.iter().any(|assignment| {
+                    assignment.group_id == group.id
+                        && assignment.iso_year == year
+                        && assignment.iso_week == week
+                        && assignment.person_id.as_deref() == Some(new_id)
+                }),
+                "the first member must not inherit the active week"
+            );
         }
         let persisted = State::load(&path).await.unwrap();
-        assert_eq!(persisted.group_by_name("2nd Floor").unwrap().member_ids.len(), 1);
+        assert_eq!(
+            persisted
+                .group_by_name("2nd Floor")
+                .unwrap()
+                .member_ids
+                .len(),
+            1
+        );
 
-        let duplicate = add_matrix_participant(
-            &ctx,
-            &admin,
-            &["@new:example.org", "2nd Floor"],
-        ).await.unwrap().unwrap();
+        let duplicate = add_matrix_participant(&ctx, &admin, &["@new:example.org", "2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(duplicate.contains("already in"));
 
-        let removed = remove_matrix_participant(
-            &ctx,
-            &admin,
-            &["@new:example.org", "2nd Floor"],
-        ).await.unwrap().unwrap();
+        let removed = remove_matrix_participant(&ctx, &admin, &["@new:example.org", "2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(removed.contains("Removed @new:example.org"));
-        assert!(ctx.state.lock().await.group_by_name("2nd Floor").unwrap().member_ids.is_empty());
+        assert!(ctx
+            .state
+            .lock()
+            .await
+            .group_by_name("2nd Floor")
+            .unwrap()
+            .member_ids
+            .is_empty());
 
-        let missing = remove_matrix_participant(
-            &ctx,
-            &admin,
-            &["@new:example.org", "2nd Floor"],
-        ).await.unwrap().unwrap();
+        let missing = remove_matrix_participant(&ctx, &admin, &["@new:example.org", "2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(missing.contains("is not in"));
 
         let persisted = State::load(&path).await.unwrap();
-        assert!(persisted.group_by_name("2nd Floor").unwrap().member_ids.is_empty());
+        assert!(persisted
+            .group_by_name("2nd Floor")
+            .unwrap()
+            .member_ids
+            .is_empty());
         let _ = tokio::fs::remove_file(path).await;
     }
 
@@ -3707,36 +4752,41 @@ mod tests {
         let (ctx, path, admin) = test_context(state);
         let outsider = OwnedUserId::try_from("@outsider:example.org").unwrap();
 
-        let error = add_matrix_participant(
-            &ctx,
-            &outsider,
-            &["@charlie:example.org", "2nd Floor"],
-        ).await.unwrap_err();
+        let error = add_matrix_participant(&ctx, &outsider, &["@charlie:example.org", "2nd Floor"])
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "__not_admin__");
 
-        let malformed = add_matrix_participant(
-            &ctx,
-            &admin,
-            &["charlie", "2nd Floor"],
-        ).await.unwrap().unwrap();
+        let malformed = add_matrix_participant(&ctx, &admin, &["charlie", "2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(malformed.contains("not a valid Matrix user ID"));
 
-        add_matrix_participant(
-            &ctx,
-            &admin,
-            &["@charlie:example.org", "2nd Floor"],
-        ).await.unwrap();
+        add_matrix_participant(&ctx, &admin, &["@charlie:example.org", "2nd Floor"])
+            .await
+            .unwrap();
 
         let state = ctx.state.lock().await;
         let group = state.group_by_id(&group_id).unwrap();
-        let charlie_id = &state.person_by_matrix_id("@charlie:example.org").unwrap().id;
-        assert_eq!(group.member_ids.last(), Some(charlie_id), "new members append to the rotation");
-        assert!(state.slot_assignments.iter().any(|assignment| {
-            assignment.group_id == group_id
-                && assignment.iso_year == year
-                && assignment.iso_week == week
-                && assignment.person_id.as_deref() == Some(first_id.as_str())
-        }), "the active assignment must remain frozen");
+        let charlie_id = &state
+            .person_by_matrix_id("@charlie:example.org")
+            .unwrap()
+            .id;
+        assert_eq!(
+            group.member_ids.last(),
+            Some(charlie_id),
+            "new members append to the rotation"
+        );
+        assert!(
+            state.slot_assignments.iter().any(|assignment| {
+                assignment.group_id == group_id
+                    && assignment.iso_year == year
+                    && assignment.iso_week == week
+                    && assignment.person_id.as_deref() == Some(first_id.as_str())
+            }),
+            "the active assignment must remain frozen"
+        );
         drop(state);
 
         let _ = tokio::fs::remove_file(path).await;
@@ -3748,14 +4798,18 @@ mod tests {
         let (ctx, path, admin) = test_context(state);
 
         let reply = cmd_assign(&ctx, &admin, &["2nd Floor", "@bob:example.org"])
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Assigned"), "{reply}");
         assert!(reply.contains("2nd Floor"), "{reply}");
 
         let (year, week) = current_iso_week();
         {
             let state = ctx.state.lock().await;
-            let assignment = state.slot_assignments.iter()
+            let assignment = state
+                .slot_assignments
+                .iter()
                 .find(|a| a.group_id == group_id && a.iso_year == year && a.iso_week == week)
                 .expect("manual assignment must be stored");
             assert_eq!(assignment.person_id.as_deref(), Some(second_id.as_str()));
@@ -3763,10 +4817,15 @@ mod tests {
         }
 
         let persisted = State::load(&path).await.unwrap();
-        assert!(persisted.slot_assignments.iter().any(|a| {
-            a.group_id == group_id && a.iso_year == year && a.iso_week == week
-                && a.person_id.as_deref() == Some(second_id.as_str())
-        }), "manual assignment must survive a reload");
+        assert!(
+            persisted.slot_assignments.iter().any(|a| {
+                a.group_id == group_id
+                    && a.iso_year == year
+                    && a.iso_week == week
+                    && a.person_id.as_deref() == Some(second_id.as_str())
+            }),
+            "manual assignment must survive a reload"
+        );
 
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -3778,7 +4837,8 @@ mod tests {
         let outsider = OwnedUserId::try_from("@outsider:example.org").unwrap();
 
         let error = cmd_assign(&ctx, &outsider, &["2nd Floor", "@bob:example.org"])
-            .await.unwrap_err();
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "__not_admin__");
 
         let _ = tokio::fs::remove_file(path).await;
@@ -3790,11 +4850,15 @@ mod tests {
         let (ctx, path, admin) = test_context(state);
 
         let no_group = cmd_assign(&ctx, &admin, &["Basement", "@bob:example.org"])
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(no_group.contains("not found"), "{no_group}");
 
         let no_person = cmd_assign(&ctx, &admin, &["2nd Floor", "@charlie:example.org"])
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(no_person.contains("not registered"), "{no_person}");
 
         let _ = tokio::fs::remove_file(path).await;
@@ -3806,7 +4870,10 @@ mod tests {
         state.persons.push(Person::new_named("Guest"));
         let (ctx, path, admin) = test_context(state);
 
-        let reply = cmd_assign(&ctx, &admin, &["2nd Floor", "Guest"]).await.unwrap().unwrap();
+        let reply = cmd_assign(&ctx, &admin, &["2nd Floor", "Guest"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("one-off assignment"), "{reply}");
 
         let _ = tokio::fs::remove_file(path).await;
@@ -3822,21 +4889,31 @@ mod tests {
         let mut group = CleaningGroup::new("Floor");
         let group_id = group.id.clone();
         group.member_ids = vec![alice_id, bob_id.clone()];
-        let mut scharni = CleaningSlot::new("Scharni"); scharni.id = "s0".into();
-        let mut colbe = CleaningSlot::new("Colbe"); colbe.id = "s1".into();
+        let mut scharni = CleaningSlot::new("Scharni");
+        scharni.id = "s0".into();
+        let mut colbe = CleaningSlot::new("Colbe");
+        colbe.id = "s1".into();
         group.slots = vec![scharni, colbe];
         state.cleaning_groups.push(group);
         let (ctx, path, admin) = test_context(state);
 
-        let missing_slot = cmd_assign(&ctx, &admin, &["Floor", "Bob"]).await.unwrap().unwrap();
+        let missing_slot = cmd_assign(&ctx, &admin, &["Floor", "Bob"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(missing_slot.contains("has slots"), "{missing_slot}");
 
-        let ok = cmd_assign(&ctx, &admin, &["Floor", "Colbe", "Bob"]).await.unwrap().unwrap();
+        let ok = cmd_assign(&ctx, &admin, &["Floor", "Colbe", "Bob"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(ok.contains("Colbe"), "{ok}");
 
         let (year, week) = current_iso_week();
         let state = ctx.state.lock().await;
-        let assignment = state.slot_assignments.iter()
+        let assignment = state
+            .slot_assignments
+            .iter()
             .find(|a| a.group_id == group_id && a.iso_year == year && a.iso_week == week)
             .expect("manual assignment must be stored");
         assert_eq!(assignment.slot_index, 1, "Colbe is the second slot");
@@ -3851,13 +4928,20 @@ mod tests {
         let (state, group_id, _first_id, _second_id) = rotation_state();
         let (ctx, path, admin) = test_context(state);
 
-        cmd_assign(&ctx, &admin, &["2nd Floor", "@bob:example.org"]).await.unwrap();
-        let reply = cmd_unassign(&ctx, &admin, &["2nd Floor"]).await.unwrap().unwrap();
+        cmd_assign(&ctx, &admin, &["2nd Floor", "@bob:example.org"])
+            .await
+            .unwrap();
+        let reply = cmd_unassign(&ctx, &admin, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Cleared"), "{reply}");
 
         let (year, week) = current_iso_week();
         let state = ctx.state.lock().await;
-        let assignment = state.slot_assignments.iter()
+        let assignment = state
+            .slot_assignments
+            .iter()
             .find(|a| a.group_id == group_id && a.iso_year == year && a.iso_week == week)
             .expect("assignment record must still exist");
         assert!(assignment.person_id.is_none());
@@ -3879,13 +4963,20 @@ mod tests {
         let (cy, cw) = current_iso_week();
         let (ny, nw) = add_weeks(cy, cw, 1);
 
-        let reply = cmd_importplan(&ctx, &admin, &[
-            &iso_week_token(ny, nw), "2nd Floor", "@bob:example.org",
-        ]).await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[&iso_week_token(ny, nw), "2nd Floor", "@bob:example.org"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("1 added"), "{reply}");
 
         let state = ctx.state.lock().await;
-        let a = state.slot_assignments.iter()
+        let a = state
+            .slot_assignments
+            .iter()
             .find(|a| a.group_id == group_id && a.iso_year == ny && a.iso_week == nw)
             .expect("imported assignment must be stored");
         assert_eq!(a.person_id.as_deref(), Some(second_id.as_str()));
@@ -3893,10 +4984,15 @@ mod tests {
         drop(state);
 
         let persisted = State::load(&path).await.unwrap();
-        assert!(persisted.slot_assignments.iter().any(|a| {
-            a.group_id == group_id && a.iso_year == ny && a.iso_week == nw
-                && a.person_id.as_deref() == Some(second_id.as_str())
-        }), "imported assignment must survive a reload");
+        assert!(
+            persisted.slot_assignments.iter().any(|a| {
+                a.group_id == group_id
+                    && a.iso_year == ny
+                    && a.iso_week == nw
+                    && a.person_id.as_deref() == Some(second_id.as_str())
+            }),
+            "imported assignment must survive a reload"
+        );
 
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -3909,9 +5005,13 @@ mod tests {
         let (cy, cw) = current_iso_week();
         let (ny, nw) = add_weeks(cy, cw, 1);
 
-        let error = cmd_importplan(&ctx, &outsider, &[
-            &iso_week_token(ny, nw), "2nd Floor", "@bob:example.org",
-        ]).await.unwrap_err();
+        let error = cmd_importplan(
+            &ctx,
+            &outsider,
+            &[&iso_week_token(ny, nw), "2nd Floor", "@bob:example.org"],
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.to_string(), "__not_admin__");
 
         let _ = tokio::fs::remove_file(path).await;
@@ -3924,14 +5024,22 @@ mod tests {
         let (cy, cw) = current_iso_week();
         let (py, pw) = add_weeks(cy, cw, -1);
 
-        let reply = cmd_importplan(&ctx, &admin, &[
-            &iso_week_token(py, pw), "2nd Floor", "@bob:example.org",
-        ]).await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[&iso_week_token(py, pw), "2nd Floor", "@bob:example.org"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("aborted"), "{reply}");
         assert!(reply.contains("past"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert!(state.slot_assignments.is_empty(), "a rejected import must not write anything");
+        assert!(
+            state.slot_assignments.is_empty(),
+            "a rejected import must not write anything"
+        );
         drop(state);
 
         let _ = tokio::fs::remove_file(path).await;
@@ -3944,14 +5052,24 @@ mod tests {
         let (cy, cw) = current_iso_week();
         let (ny, nw) = add_weeks(cy, cw, 1);
 
-        let no_group = cmd_importplan(&ctx, &admin, &[
-            &iso_week_token(ny, nw), "Basement", "@bob:example.org",
-        ]).await.unwrap().unwrap();
+        let no_group = cmd_importplan(
+            &ctx,
+            &admin,
+            &[&iso_week_token(ny, nw), "Basement", "@bob:example.org"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(no_group.contains("not found"), "{no_group}");
 
-        let no_person = cmd_importplan(&ctx, &admin, &[
-            &iso_week_token(ny, nw), "2nd Floor", "@charlie:example.org",
-        ]).await.unwrap().unwrap();
+        let no_person = cmd_importplan(
+            &ctx,
+            &admin,
+            &[&iso_week_token(ny, nw), "2nd Floor", "@charlie:example.org"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(no_person.contains("not registered"), "{no_person}");
 
         let state = ctx.state.lock().await;
@@ -3969,17 +5087,33 @@ mod tests {
         let (ny, nw) = add_weeks(cy, cw, 1);
         let week_tok = iso_week_token(ny, nw);
 
-        let reply = cmd_importplan(&ctx, &admin, &[
-            &week_tok, "2nd Floor", "@alice:example.org", ";",
-            &week_tok, "2nd Floor", "@bob:example.org",
-        ]).await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[
+                &week_tok,
+                "2nd Floor",
+                "@alice:example.org",
+                ";",
+                &week_tok,
+                "2nd Floor",
+                "@bob:example.org",
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("aborted"), "{reply}");
         assert!(reply.contains("conflicting entries"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert!(state.slot_assignments.iter()
-            .all(|a| !(a.group_id == group_id && a.iso_year == ny && a.iso_week == nw)),
-            "neither conflicting entry may be written");
+        assert!(
+            state
+                .slot_assignments
+                .iter()
+                .all(|a| !(a.group_id == group_id && a.iso_year == ny && a.iso_week == nw)),
+            "neither conflicting entry may be written"
+        );
         drop(state);
         let _ = (first_id, second_id);
 
@@ -3994,20 +5128,36 @@ mod tests {
         let (ny, nw) = add_weeks(cy, cw, 1);
 
         // Alice is already frozen in via a normal admin !assign.
-        cmd_assign(&ctx, &admin, &["2nd Floor", "@alice:example.org", "week", &nw.to_string()])
-            .await.unwrap();
+        cmd_assign(
+            &ctx,
+            &admin,
+            &["2nd Floor", "@alice:example.org", "week", &nw.to_string()],
+        )
+        .await
+        .unwrap();
 
-        let reply = cmd_importplan(&ctx, &admin, &[
-            &iso_week_token(ny, nw), "2nd Floor", "@bob:example.org",
-        ]).await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[&iso_week_token(ny, nw), "2nd Floor", "@bob:example.org"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("aborted"), "{reply}");
         assert!(reply.contains("already assigned"), "{reply}");
 
         let state = ctx.state.lock().await;
-        let a = state.slot_assignments.iter()
+        let a = state
+            .slot_assignments
+            .iter()
             .find(|a| a.group_id == group_id && a.iso_year == ny && a.iso_week == nw)
             .unwrap();
-        assert_eq!(a.person_id.as_deref(), Some(first_id.as_str()), "existing assignment must survive untouched");
+        assert_eq!(
+            a.person_id.as_deref(),
+            Some(first_id.as_str()),
+            "existing assignment must survive untouched"
+        );
         drop(state);
 
         let _ = tokio::fs::remove_file(path).await;
@@ -4019,21 +5169,37 @@ mod tests {
         let (ctx, path, admin) = test_context(state);
         let (cy, cw) = current_iso_week();
         let (ny, nw) = add_weeks(cy, cw, 1);
-        let args = [iso_week_token(ny, nw), "2nd Floor".to_owned(), "@bob:example.org".to_owned()];
+        let args = [
+            iso_week_token(ny, nw),
+            "2nd Floor".to_owned(),
+            "@bob:example.org".to_owned(),
+        ];
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        let first = cmd_importplan(&ctx, &admin, &arg_refs).await.unwrap().unwrap();
+        let first = cmd_importplan(&ctx, &admin, &arg_refs)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(first.contains("1 added"), "{first}");
 
-        let second = cmd_importplan(&ctx, &admin, &arg_refs).await.unwrap().unwrap();
+        let second = cmd_importplan(&ctx, &admin, &arg_refs)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(second.contains("Nothing to do"), "{second}");
         assert!(second.contains("already imported"), "{second}");
 
         let state = ctx.state.lock().await;
-        let matches: Vec<_> = state.slot_assignments.iter()
+        let matches: Vec<_> = state
+            .slot_assignments
+            .iter()
             .filter(|a| a.group_id == group_id && a.iso_year == ny && a.iso_week == nw)
             .collect();
-        assert_eq!(matches.len(), 1, "repeated import must not duplicate the assignment");
+        assert_eq!(
+            matches.len(),
+            1,
+            "repeated import must not duplicate the assignment"
+        );
         assert_eq!(matches[0].person_id.as_deref(), Some(second_id.as_str()));
         drop(state);
 
@@ -4048,21 +5214,37 @@ mod tests {
         let (w1y, w1w) = add_weeks(cy, cw, 1);
         let (w2y, w2w) = add_weeks(cy, cw, 2);
 
-        let reply = cmd_importplan(&ctx, &admin, &[
-            &iso_week_token(w1y, w1w), "2nd Floor", "@alice:example.org", ";",
-            &iso_week_token(w2y, w2w), "2nd Floor", "@bob:example.org",
-        ]).await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[
+                &iso_week_token(w1y, w1w),
+                "2nd Floor",
+                "@alice:example.org",
+                ";",
+                &iso_week_token(w2y, w2w),
+                "2nd Floor",
+                "@bob:example.org",
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("2 added"), "{reply}");
 
         let state = ctx.state.lock().await;
         assert_eq!(
-            state.slot_assignments.iter()
+            state
+                .slot_assignments
+                .iter()
                 .find(|a| a.group_id == group_id && a.iso_year == w1y && a.iso_week == w1w)
                 .and_then(|a| a.person_id.as_deref()),
             Some(first_id.as_str()),
         );
         assert_eq!(
-            state.slot_assignments.iter()
+            state
+                .slot_assignments
+                .iter()
                 .find(|a| a.group_id == group_id && a.iso_year == w2y && a.iso_week == w2w)
                 .and_then(|a| a.person_id.as_deref()),
             Some(second_id.as_str()),
@@ -4081,7 +5263,11 @@ mod tests {
         // actually about.
         let (mut raw_state, group_id, anna_id, bob_id, carla_id) = three_person_state();
         {
-            let group = raw_state.cleaning_groups.iter_mut().find(|g| g.id == group_id).unwrap();
+            let group = raw_state
+                .cleaning_groups
+                .iter_mut()
+                .find(|g| g.id == group_id)
+                .unwrap();
             group.rotation_queue = vec![anna_id.clone(), bob_id.clone(), carla_id.clone()];
         }
         let (ctx, path, admin) = test_context(raw_state);
@@ -4094,14 +5280,19 @@ mod tests {
         // Paper plan says Carla covers the very next due week — out of the
         // natural Anna → Bob → Carla order the queue would produce.
         let reply = cmd_importplan(&ctx, &admin, &[&iso_week_token(fy, fw), "Floor", "Carla"])
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("1 added"), "{reply}");
 
         {
             let state = ctx.state.lock().await;
             let queue = &state.group_by_id(&group_id).unwrap().rotation_queue;
-            assert_eq!(queue, &vec![anna_id.clone(), bob_id.clone(), carla_id.clone()],
-                "importing must not pop or reorder the rotation queue");
+            assert_eq!(
+                queue,
+                &vec![anna_id.clone(), bob_id.clone(), carla_id.clone()],
+                "importing must not pop or reorder the rotation queue"
+            );
         }
 
         // Fill this and the next two due weeks the normal way.
@@ -4111,19 +5302,31 @@ mod tests {
         };
         {
             let mut state = ctx.state.lock().await;
-            for e in events { state.apply_event(e).unwrap(); }
+            for e in events {
+                state.apply_event(e).unwrap();
+            }
         }
 
         let state = ctx.state.lock().await;
-        let at = |y: i32, w: u32| state.slot_assignments.iter()
-            .find(|a| a.group_id == group_id && a.iso_year == y && a.iso_week == w)
-            .cloned();
+        let at = |y: i32, w: u32| {
+            state
+                .slot_assignments
+                .iter()
+                .find(|a| a.group_id == group_id && a.iso_year == y && a.iso_week == w)
+                .cloned()
+        };
 
         let imported = at(fy, fw).expect("imported week must still be recorded");
-        assert_eq!(imported.person_id.as_deref(), Some(carla_id.as_str()),
-            "materialize must not re-decide an already-imported week");
-        assert_eq!(imported.source, AssignmentSource::Import,
-            "materialize must not overwrite the import's audit source");
+        assert_eq!(
+            imported.person_id.as_deref(),
+            Some(carla_id.as_str()),
+            "materialize must not re-decide an already-imported week"
+        );
+        assert_eq!(
+            imported.source,
+            AssignmentSource::Import,
+            "materialize must not overwrite the import's audit source"
+        );
 
         let (y1, w1) = add_weeks(fy, fw, 1);
         let (y2, w2) = add_weeks(fy, fw, 2);
@@ -4133,7 +5336,11 @@ mod tests {
         // The queue never advanced during import, so round-robin resumes
         // exactly where it would have started — Anna first, then Bob —
         // deterministically, not from wherever Carla's import "left off".
-        assert_eq!(next.person_id.as_deref(), Some(anna_id.as_str()), "rotation must resume at the front of the untouched queue");
+        assert_eq!(
+            next.person_id.as_deref(),
+            Some(anna_id.as_str()),
+            "rotation must resume at the front of the untouched queue"
+        );
         assert_eq!(next2.person_id.as_deref(), Some(bob_id.as_str()));
         assert_eq!(next.source, AssignmentSource::RoundRobin);
         assert_eq!(next2.source, AssignmentSource::RoundRobin);
@@ -4155,11 +5362,26 @@ mod tests {
 
     #[test]
     fn command_may_change_current_plan_includes_importplan() {
-        for cmd in ["!done", "!skip", "!undo", "!assign", "!unassign", "!takeover", "!acceptswap", "!importplan"] {
-            assert!(command_may_change_current_plan(cmd), "{cmd} must trigger a pinned-plan refresh");
+        for cmd in [
+            "!done",
+            "!skip",
+            "!undo",
+            "!assign",
+            "!unassign",
+            "!takeover",
+            "!acceptswap",
+            "!importplan",
+        ] {
+            assert!(
+                command_may_change_current_plan(cmd),
+                "{cmd} must trigger a pinned-plan refresh"
+            );
         }
         for cmd in ["!status", "!help", "!stats", "!cleanplan", "!groups", ""] {
-            assert!(!command_may_change_current_plan(cmd), "{cmd} must not trigger a pinned-plan refresh");
+            assert!(
+                !command_may_change_current_plan(cmd),
+                "{cmd} must not trigger a pinned-plan refresh"
+            );
         }
     }
 
@@ -4174,18 +5396,30 @@ mod tests {
             scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups).0
         };
 
-        let args = [iso_week_token(cy, cw), "2nd Floor".to_owned(), "@bob:example.org".to_owned()];
+        let args = [
+            iso_week_token(cy, cw),
+            "2nd Floor".to_owned(),
+            "@bob:example.org".to_owned(),
+        ];
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let reply = cmd_importplan(&ctx, &admin, &arg_refs).await.unwrap().unwrap();
+        let reply = cmd_importplan(&ctx, &admin, &arg_refs)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("1 added"), "{reply}");
 
         let after = {
             let state = ctx.state.lock().await;
             scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups).0
         };
-        assert_ne!(before, after, "the render for the current week must change immediately after import");
-        assert!(after.contains(second_id.as_str()) || after.contains("@bob:example.org"),
-            "the newly imported assignee must show up in the current week's render: {after}");
+        assert_ne!(
+            before, after,
+            "the render for the current week must change immediately after import"
+        );
+        assert!(
+            after.contains(second_id.as_str()) || after.contains("@bob:example.org"),
+            "the newly imported assignee must show up in the current week's render: {after}"
+        );
 
         // Re-running the identical import is a no-op against state (already
         // covered by `import_is_idempotent_across_repeated_identical_runs`);
@@ -4193,13 +5427,19 @@ mod tests {
         // about — the re-render must come out byte-identical, which is
         // exactly what makes its `weekly_plan_rendered` cache check skip
         // sending a redundant edit instead of duplicating it.
-        let second = cmd_importplan(&ctx, &admin, &arg_refs).await.unwrap().unwrap();
+        let second = cmd_importplan(&ctx, &admin, &arg_refs)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(second.contains("Nothing to do"), "{second}");
         let after_repeat = {
             let state = ctx.state.lock().await;
             scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups).0
         };
-        assert_eq!(after, after_repeat, "repeating the same import must not change the render again");
+        assert_eq!(
+            after, after_repeat,
+            "repeating the same import must not change the render again"
+        );
         let _ = group_id;
 
         let _ = tokio::fs::remove_file(path).await;
@@ -4214,10 +5454,22 @@ mod tests {
         let (ny, nw) = add_weeks(cy, cw, 1);
 
         // Bob (Matrix) covers this week; Flo3 (no Matrix account) covers next week.
-        let reply = cmd_importplan(&ctx, &admin, &[
-            &iso_week_token(cy, cw), "2nd Floor", "@bob:example.org", ";",
-            &iso_week_token(ny, nw), "2nd Floor", "Flo3",
-        ]).await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[
+                &iso_week_token(cy, cw),
+                "2nd Floor",
+                "@bob:example.org",
+                ";",
+                &iso_week_token(ny, nw),
+                "2nd Floor",
+                "Flo3",
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("2 added"), "{reply}");
 
         let state = ctx.state.lock().await;
@@ -4228,17 +5480,32 @@ mod tests {
         let mut names = std::collections::HashMap::new();
         names.insert("@bob:example.org".to_string(), "Bob".to_string());
         let content = format::mentionify_with_names(&raw, &names);
-        let mentions = content.mentions.expect("Bob has a Matrix ID and must produce a real mention");
-        assert!(mentions.user_ids.iter().any(|u| u.as_str() == "@bob:example.org"), "{mentions:?}");
+        let mentions = content
+            .mentions
+            .expect("Bob has a Matrix ID and must produce a real mention");
+        assert!(
+            mentions
+                .user_ids
+                .iter()
+                .any(|u| u.as_str() == "@bob:example.org"),
+            "{mentions:?}"
+        );
 
         let state = ctx.state.lock().await;
-        let (raw_next, _mxids) = scheduler::build_weekly_plan(&state, ny, nw, 1, &state.cleaning_groups);
+        let (raw_next, _mxids) =
+            scheduler::build_weekly_plan(&state, ny, nw, 1, &state.cleaning_groups);
         drop(state);
         assert!(raw_next.contains("Flo3"), "{raw_next}");
-        assert!(!raw_next.contains('@'), "a person without a Matrix ID must never leave an @mxid token in the text: {raw_next}");
+        assert!(
+            !raw_next.contains('@'),
+            "a person without a Matrix ID must never leave an @mxid token in the text: {raw_next}"
+        );
         // Must not panic and must not fabricate a mention for a plain name.
-        let plain_content = format::mentionify_with_names(&raw_next, &std::collections::HashMap::new());
-        assert!(plain_content.mentions.is_none() || plain_content.mentions.unwrap().user_ids.is_empty());
+        let plain_content =
+            format::mentionify_with_names(&raw_next, &std::collections::HashMap::new());
+        assert!(
+            plain_content.mentions.is_none() || plain_content.mentions.unwrap().user_ids.is_empty()
+        );
 
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -4251,8 +5518,14 @@ mod tests {
 
         // Import freezes Bob in for this week (as `refresh_pinned_plan` would
         // send right after the command, per `command_may_change_current_plan`).
-        cmd_importplan(&ctx, &admin, &[&iso_week_token(cy, cw), "2nd Floor", "@bob:example.org"])
-            .await.unwrap().unwrap();
+        cmd_importplan(
+            &ctx,
+            &admin,
+            &[&iso_week_token(cy, cw), "2nd Floor", "@bob:example.org"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         // Bob then marks his imported task done — a second, independent state
         // change that also triggers a pinned-plan refresh (`!done` is in
@@ -4261,27 +5534,40 @@ mod tests {
         // plain text.
         {
             let mut state = ctx.state.lock().await;
-            state.apply_event(DomainEvent::CleaningCompleted {
-                group_id: group_id.clone(),
-                slot_id: None,
-                person_id: second_id.clone(),
-                responsible_person_ids: vec![second_id.clone()],
-                iso_year: cy,
-                iso_week: cw,
-            }).unwrap();
+            state
+                .apply_event(DomainEvent::CleaningCompleted {
+                    group_id: group_id.clone(),
+                    slot_id: None,
+                    person_id: second_id.clone(),
+                    responsible_person_ids: vec![second_id.clone()],
+                    iso_year: cy,
+                    iso_week: cw,
+                })
+                .unwrap();
         }
 
         let state = ctx.state.lock().await;
         let (raw, _mxids) = scheduler::build_weekly_plan(&state, cy, cw, 1, &state.cleaning_groups);
         drop(state);
         assert!(raw.contains("✅"), "{raw}");
-        assert!(raw.contains("@bob:example.org"), "the done line must still carry Bob's mxid, not just his display name: {raw}");
+        assert!(
+            raw.contains("@bob:example.org"),
+            "the done line must still carry Bob's mxid, not just his display name: {raw}"
+        );
 
         let mut names = std::collections::HashMap::new();
         names.insert("@bob:example.org".to_string(), "Bob".to_string());
         let content = format::mentionify_with_names(&raw, &names);
-        let mentions = content.mentions.expect("the edited/done render must still produce a real mention");
-        assert!(mentions.user_ids.iter().any(|u| u.as_str() == "@bob:example.org"), "{mentions:?}");
+        let mentions = content
+            .mentions
+            .expect("the edited/done render must still produce a real mention");
+        assert!(
+            mentions
+                .user_ids
+                .iter()
+                .any(|u| u.as_str() == "@bob:example.org"),
+            "{mentions:?}"
+        );
 
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -4296,33 +5582,76 @@ mod tests {
 
         // The normal scheduler already froze Alice in for the current week
         // (a fresh 2-member queue's first-ever draw goes to member_ids[0]).
-        let events = { let state = ctx.state.lock().await; resolver::materialize(&state, 1, 1) };
-        { let mut state = ctx.state.lock().await; for e in events { state.apply_event(e).unwrap(); } }
+        let events = {
+            let state = ctx.state.lock().await;
+            resolver::materialize(&state, 1, 1)
+        };
+        {
+            let mut state = ctx.state.lock().await;
+            for e in events {
+                state.apply_event(e).unwrap();
+            }
+        }
         {
             let state = ctx.state.lock().await;
-            let a = state.slot_assignments.iter()
-                .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw).unwrap();
-            assert_eq!(a.person_id.as_deref(), Some(first_id.as_str()), "sanity: round-robin picked Alice");
+            let a = state
+                .slot_assignments
+                .iter()
+                .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw)
+                .unwrap();
+            assert_eq!(
+                a.person_id.as_deref(),
+                Some(first_id.as_str()),
+                "sanity: round-robin picked Alice"
+            );
             assert_eq!(a.source, AssignmentSource::RoundRobin);
         }
 
         // Without --replace, the paper plan (Bob) conflicts and is rejected.
-        let blocked = cmd_importplan(&ctx, &admin, &[&iso_week_token(cy, cw), "2nd Floor", "@bob:example.org"])
-            .await.unwrap().unwrap();
+        let blocked = cmd_importplan(
+            &ctx,
+            &admin,
+            &[&iso_week_token(cy, cw), "2nd Floor", "@bob:example.org"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(blocked.contains("aborted"), "{blocked}");
         assert!(blocked.contains("--replace"), "{blocked}");
 
         // With --replace, it overrides the round-robin pick.
-        let reply = cmd_importplan(&ctx, &admin, &["--replace", &iso_week_token(cy, cw), "2nd Floor", "@bob:example.org"])
-            .await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[
+                "--replace",
+                &iso_week_token(cy, cw),
+                "2nd Floor",
+                "@bob:example.org",
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("1 replaced"), "{reply}");
         assert!(reply.contains("0 added"), "{reply}");
 
         let state = ctx.state.lock().await;
-        let a = state.slot_assignments.iter()
-            .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw).unwrap();
-        assert_eq!(a.person_id.as_deref(), Some(second_id.as_str()), "Bob must now hold the slot");
-        assert_eq!(a.source, AssignmentSource::Import, "the replacement must be tagged as an import, not left as round-robin");
+        let a = state
+            .slot_assignments
+            .iter()
+            .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw)
+            .unwrap();
+        assert_eq!(
+            a.person_id.as_deref(),
+            Some(second_id.as_str()),
+            "Bob must now hold the slot"
+        );
+        assert_eq!(
+            a.source,
+            AssignmentSource::Import,
+            "the replacement must be tagged as an import, not left as round-robin"
+        );
         drop(state);
 
         let _ = tokio::fs::remove_file(path).await;
@@ -4332,15 +5661,30 @@ mod tests {
     async fn import_replace_does_not_touch_the_rotation_queue() {
         let (mut raw_state, group_id, anna_id, bob_id, carla_id) = three_person_state();
         {
-            let group = raw_state.cleaning_groups.iter_mut().find(|g| g.id == group_id).unwrap();
+            let group = raw_state
+                .cleaning_groups
+                .iter_mut()
+                .find(|g| g.id == group_id)
+                .unwrap();
             group.rotation_queue = vec![anna_id.clone(), bob_id.clone(), carla_id.clone()];
         }
         let (ctx, path, admin) = test_context(raw_state);
-        let (fy, fw) = { let state = ctx.state.lock().await; crate::state::first_due_week(&state, 1) };
+        let (fy, fw) = {
+            let state = ctx.state.lock().await;
+            crate::state::first_due_week(&state, 1)
+        };
 
         // Materialize freezes Anna in via round-robin for the first due week.
-        let events = { let state = ctx.state.lock().await; resolver::materialize(&state, 1, 1) };
-        { let mut state = ctx.state.lock().await; for e in events { state.apply_event(e).unwrap(); } }
+        let events = {
+            let state = ctx.state.lock().await;
+            resolver::materialize(&state, 1, 1)
+        };
+        {
+            let mut state = ctx.state.lock().await;
+            for e in events {
+                state.apply_event(e).unwrap();
+            }
+        }
 
         let queue_before = {
             let state = ctx.state.lock().await;
@@ -4348,15 +5692,27 @@ mod tests {
         };
 
         // Paper plan actually says Carla covers that week — replace Anna's pick.
-        let reply = cmd_importplan(&ctx, &admin, &["--replace", &iso_week_token(fy, fw), "Floor", "Carla"])
-            .await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &["--replace", &iso_week_token(fy, fw), "Floor", "Carla"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("1 replaced"), "{reply}");
 
         let state = ctx.state.lock().await;
         let queue_after = &state.group_by_id(&group_id).unwrap().rotation_queue;
-        assert_eq!(&queue_before, queue_after, "replacing a materialized pick must not touch rotation_queue");
-        let a = state.slot_assignments.iter()
-            .find(|a| a.group_id == group_id && a.iso_year == fy && a.iso_week == fw).unwrap();
+        assert_eq!(
+            &queue_before, queue_after,
+            "replacing a materialized pick must not touch rotation_queue"
+        );
+        let a = state
+            .slot_assignments
+            .iter()
+            .find(|a| a.group_id == group_id && a.iso_year == fy && a.iso_week == fw)
+            .unwrap();
         assert_eq!(a.person_id.as_deref(), Some(carla_id.as_str()));
         drop(state);
 
@@ -4369,23 +5725,50 @@ mod tests {
         let (ctx, path, admin) = test_context(state);
         let (cy, cw) = current_iso_week();
 
-        let events = { let state = ctx.state.lock().await; resolver::materialize(&state, 1, 1) };
-        { let mut state = ctx.state.lock().await; for e in events { state.apply_event(e).unwrap(); } }
+        let events = {
+            let state = ctx.state.lock().await;
+            resolver::materialize(&state, 1, 1)
+        };
+        {
+            let mut state = ctx.state.lock().await;
+            for e in events {
+                state.apply_event(e).unwrap();
+            }
+        }
 
         // One valid replacement plus one entry naming an unregistered person —
         // the whole batch (including the otherwise-valid replacement) must be
         // rejected, and nothing may be written.
-        let reply = cmd_importplan(&ctx, &admin, &[
-            "--replace",
-            &iso_week_token(cy, cw), "2nd Floor", "@bob:example.org", ";",
-            &iso_week_token(cy, cw), "2nd Floor", "@nobody:example.org",
-        ]).await.unwrap().unwrap();
+        let reply = cmd_importplan(
+            &ctx,
+            &admin,
+            &[
+                "--replace",
+                &iso_week_token(cy, cw),
+                "2nd Floor",
+                "@bob:example.org",
+                ";",
+                &iso_week_token(cy, cw),
+                "2nd Floor",
+                "@nobody:example.org",
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("aborted"), "{reply}");
 
         let state = ctx.state.lock().await;
-        let a = state.slot_assignments.iter()
-            .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw).unwrap();
-        assert_eq!(a.person_id.as_deref(), Some(first_id.as_str()), "the pre-existing pick must survive an aborted --replace batch");
+        let a = state
+            .slot_assignments
+            .iter()
+            .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw)
+            .unwrap();
+        assert_eq!(
+            a.person_id.as_deref(),
+            Some(first_id.as_str()),
+            "the pre-existing pick must survive an aborted --replace batch"
+        );
         assert_eq!(a.source, AssignmentSource::RoundRobin);
         drop(state);
 
@@ -4401,33 +5784,75 @@ mod tests {
         // Alice is already responsible for (and completes) the current week.
         {
             let mut state = ctx.state.lock().await;
-            state.apply_event(DomainEvent::SlotAssigned {
-                group_id: group_id.clone(), slot_index: 0, iso_year: cy, iso_week: cw,
-                person_id: Some(first_id.clone()), source: AssignmentSource::RoundRobin,
-                actor_id: None, previous_person_id: None,
-            }).unwrap();
-            state.apply_event(DomainEvent::CleaningCompleted {
-                group_id: group_id.clone(), slot_id: None, person_id: first_id.clone(),
-                responsible_person_ids: vec![first_id.clone()], iso_year: cy, iso_week: cw,
-            }).unwrap();
+            state
+                .apply_event(DomainEvent::SlotAssigned {
+                    group_id: group_id.clone(),
+                    slot_index: 0,
+                    iso_year: cy,
+                    iso_week: cw,
+                    person_id: Some(first_id.clone()),
+                    source: AssignmentSource::RoundRobin,
+                    actor_id: None,
+                    previous_person_id: None,
+                })
+                .unwrap();
+            state
+                .apply_event(DomainEvent::CleaningCompleted {
+                    group_id: group_id.clone(),
+                    slot_id: None,
+                    person_id: first_id.clone(),
+                    responsible_person_ids: vec![first_id.clone()],
+                    iso_year: cy,
+                    iso_week: cw,
+                })
+                .unwrap();
         }
 
         // Even with --replace, an already-completed week cannot be overridden.
-        let blocked = cmd_importplan(&ctx, &admin, &["--replace", &iso_week_token(cy, cw), "2nd Floor", "@bob:example.org"])
-            .await.unwrap().unwrap();
+        let blocked = cmd_importplan(
+            &ctx,
+            &admin,
+            &[
+                "--replace",
+                &iso_week_token(cy, cw),
+                "2nd Floor",
+                "@bob:example.org",
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(blocked.contains("aborted"), "{blocked}");
         assert!(blocked.contains("already completed"), "{blocked}");
 
         // Re-importing the identical (already-completed) assignment is still
         // a harmless no-op, in either mode.
-        let noop = cmd_importplan(&ctx, &admin, &["--replace", &iso_week_token(cy, cw), "2nd Floor", "@alice:example.org"])
-            .await.unwrap().unwrap();
+        let noop = cmd_importplan(
+            &ctx,
+            &admin,
+            &[
+                "--replace",
+                &iso_week_token(cy, cw),
+                "2nd Floor",
+                "@alice:example.org",
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(noop.contains("Nothing to do"), "{noop}");
 
         let state = ctx.state.lock().await;
-        let a = state.slot_assignments.iter()
-            .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw).unwrap();
-        assert_eq!(a.person_id.as_deref(), Some(first_id.as_str()), "a completed week's assignment must be untouched");
+        let a = state
+            .slot_assignments
+            .iter()
+            .find(|a| a.group_id == group_id && a.iso_year == cy && a.iso_week == cw)
+            .unwrap();
+        assert_eq!(
+            a.person_id.as_deref(),
+            Some(first_id.as_str()),
+            "a completed week's assignment must be untouched"
+        );
         drop(state);
         let _ = second_id;
 
@@ -4440,7 +5865,9 @@ mod tests {
         let (ctx, path, _admin) = test_context(state);
         let outsider = OwnedUserId::try_from("@outsider:example.org").unwrap();
 
-        let error = cmd_unassign(&ctx, &outsider, &["2nd Floor"]).await.unwrap_err();
+        let error = cmd_unassign(&ctx, &outsider, &["2nd Floor"])
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "__not_admin__");
 
         let _ = tokio::fs::remove_file(path).await;
@@ -4453,20 +5880,33 @@ mod tests {
     // actually theirs.
 
     #[tokio::test]
-    async fn join_after_five_materialized_weeks_leaves_them_untouched_and_seats_the_newcomer_next() {
+    async fn join_after_five_materialized_weeks_leaves_them_untouched_and_seats_the_newcomer_next()
+    {
         let (mut state, group_id, aid, bid, cid) = three_person_state();
         seed_materialized_weeks(&mut state, 5);
         let (y, w) = current_iso_week();
         let weeks: Vec<(i32, u32)> = (0..5).map(|i| add_weeks(y, w, i)).collect();
-        let before: Vec<Option<PersonId>> = weeks.iter()
-            .map(|&(y, w)| assignee_for(&state, &group_id, y, w)).collect();
-        assert_eq!(before, vec![
-            Some(aid.clone()), Some(bid.clone()), Some(cid.clone()),
-            Some(aid.clone()), Some(bid.clone()),
-        ], "sanity check on the pre-seeded plan");
+        let before: Vec<Option<PersonId>> = weeks
+            .iter()
+            .map(|&(y, w)| assignee_for(&state, &group_id, y, w))
+            .collect();
+        assert_eq!(
+            before,
+            vec![
+                Some(aid.clone()),
+                Some(bid.clone()),
+                Some(cid.clone()),
+                Some(aid.clone()),
+                Some(bid.clone()),
+            ],
+            "sanity check on the pre-seeded plan"
+        );
 
         let (ctx, path, admin) = test_context_with_horizon(state, 8);
-        let reply = cmd_addperson(&ctx, &admin, &["David", "Floor"]).await.unwrap().unwrap();
+        let reply = cmd_addperson(&ctx, &admin, &["David", "Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Added David"), "{reply}");
 
         let state = ctx.state.lock().await;
@@ -4474,7 +5914,11 @@ mod tests {
 
         // The 5 already-planned weeks are byte-for-byte unchanged.
         for (i, &(y, w)) in weeks.iter().enumerate() {
-            assert_eq!(assignee_for(&state, &group_id, y, w), before[i], "week index {i} must not change");
+            assert_eq!(
+                assignee_for(&state, &group_id, y, w),
+                before[i],
+                "week index {i} must not change"
+            );
         }
         // David's first real turn is the very next open week — ahead of
         // Carla's would-be second lap, not after a full extra lap. The join
@@ -4487,10 +5931,18 @@ mod tests {
         // Weeks 6 and 7 aren't frozen yet, but the *eventual* rotation still
         // continues the same queue correctly, previewed on demand.
         let (y6, w6) = add_weeks(y, w, 6);
-        assert_eq!(assignee_for(&state, &group_id, y6, w6), None, "not yet frozen");
+        assert_eq!(
+            assignee_for(&state, &group_id, y6, w6),
+            None,
+            "not yet frozen"
+        );
         assert_eq!(preview_assignee_for(&state, &group_id, y6, w6), Some(cid));
         let (y7, w7) = add_weeks(y, w, 7);
-        assert_eq!(assignee_for(&state, &group_id, y7, w7), None, "not yet frozen");
+        assert_eq!(
+            assignee_for(&state, &group_id, y7, w7),
+            None,
+            "not yet frozen"
+        );
         assert_eq!(preview_assignee_for(&state, &group_id, y7, w7), Some(aid));
 
         drop(state);
@@ -4506,21 +5958,33 @@ mod tests {
         state.cleaning_groups.push(group);
         let (ctx, path, admin) = test_context_with_horizon(state, 8);
 
-        cmd_addperson(&ctx, &admin, &["Anna", "Floor"]).await.unwrap();
-        cmd_addperson(&ctx, &admin, &["Bob", "Floor"]).await.unwrap();
+        cmd_addperson(&ctx, &admin, &["Anna", "Floor"])
+            .await
+            .unwrap();
+        cmd_addperson(&ctx, &admin, &["Bob", "Floor"])
+            .await
+            .unwrap();
 
         let state = ctx.state.lock().await;
         let anna_id = state.find_person("Anna").unwrap().id.clone();
-        let bob_id  = state.find_person("Bob").unwrap().id.clone();
+        let bob_id = state.find_person("Bob").unwrap().id.clone();
         let (y, w) = current_iso_week();
 
         // Anna joined an empty group: the current week stays unassigned
         // rather than handing her a task mid-week.
         assert_eq!(assignee_for(&state, &gid, y, w), None);
         let (y1, w1) = add_weeks(y, w, 1);
-        assert_eq!(assignee_for(&state, &gid, y1, w1), Some(anna_id), "Anna joined first, goes first");
+        assert_eq!(
+            assignee_for(&state, &gid, y1, w1),
+            Some(anna_id),
+            "Anna joined first, goes first"
+        );
         let (y2, w2) = add_weeks(y, w, 2);
-        assert_eq!(assignee_for(&state, &gid, y2, w2), Some(bob_id), "Bob joined second, follows Anna");
+        assert_eq!(
+            assignee_for(&state, &gid, y2, w2),
+            Some(bob_id),
+            "Bob joined second, follows Anna"
+        );
 
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
@@ -4534,9 +5998,18 @@ mod tests {
         let (mut state, group_id, aid, ..) = three_person_state();
         seed_materialized_weeks(&mut state, 1);
         let (ctx, path, admin) = test_context_with_horizon(state, 8);
-        let bob_id = ctx.state.lock().await.find_person("Bob").unwrap().id.clone();
+        let bob_id = ctx
+            .state
+            .lock()
+            .await
+            .find_person("Bob")
+            .unwrap()
+            .id
+            .clone();
 
-        cmd_addperson(&ctx, &admin, &["David", "Floor"]).await.unwrap();
+        cmd_addperson(&ctx, &admin, &["David", "Floor"])
+            .await
+            .unwrap();
 
         let state = ctx.state.lock().await;
         let david_id = state.find_person("David").unwrap().id.clone();
@@ -4546,20 +6019,33 @@ mod tests {
         // one due-cycle) goes to Bob, not to the newcomer.
         let (y, w) = current_iso_week();
         let (y1, w1) = add_weeks(y, w, 1);
-        assert_eq!(assignee_for(&state, &group_id, y1, w1), Some(bob_id), "must not skip Bob's first turn");
+        assert_eq!(
+            assignee_for(&state, &group_id, y1, w1),
+            Some(bob_id),
+            "must not skip Bob's first turn"
+        );
 
         // Beyond that, Carla (also still waiting for her first turn) goes
         // next, and only then David — never before either of them, even
         // though the join inserted him ahead of Anna, who already had hers.
         let (y2, w2) = add_weeks(y, w, 2);
-        assert_eq!(preview_assignee_for(&state, &group_id, y2, w2), Some(carla_id),
-            "Carla is also still waiting for her first turn");
+        assert_eq!(
+            preview_assignee_for(&state, &group_id, y2, w2),
+            Some(carla_id),
+            "Carla is also still waiting for her first turn"
+        );
         let (y3, w3) = add_weeks(y, w, 3);
-        assert_eq!(preview_assignee_for(&state, &group_id, y3, w3), Some(david_id),
-            "David gets his first turn only after Bob and Carla have had theirs");
+        assert_eq!(
+            preview_assignee_for(&state, &group_id, y3, w3),
+            Some(david_id),
+            "David gets his first turn only after Bob and Carla have had theirs"
+        );
         let (y4, w4) = add_weeks(y, w, 4);
-        assert_eq!(preview_assignee_for(&state, &group_id, y4, w4), Some(aid),
-            "Anna, who already had a turn, repeats after David");
+        assert_eq!(
+            preview_assignee_for(&state, &group_id, y4, w4),
+            Some(aid),
+            "Anna, who already had a turn, repeats after David"
+        );
 
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
@@ -4575,17 +6061,37 @@ mod tests {
         let mut state = State::default();
         state.created_at = Some(Utc::now());
         let group_id = Uuid::new_v4().to_string();
-        state.apply_event(DomainEvent::GroupCreated { group_id: group_id.clone(), name: "Floor".into() }).unwrap();
+        state
+            .apply_event(DomainEvent::GroupCreated {
+                group_id: group_id.clone(),
+                name: "Floor".into(),
+            })
+            .unwrap();
         for name in ["Anna", "Bob", "Carla"] {
             let pid = Uuid::new_v4().to_string();
-            state.apply_event(DomainEvent::PersonCreated { person_id: pid.clone(), display_name: name.into(), matrix_id: None }).unwrap();
-            state.apply_event(DomainEvent::PersonJoinedGroup { person_id: pid, group_id: group_id.clone() }).unwrap();
+            state
+                .apply_event(DomainEvent::PersonCreated {
+                    person_id: pid.clone(),
+                    display_name: name.into(),
+                    matrix_id: None,
+                })
+                .unwrap();
+            state
+                .apply_event(DomainEvent::PersonJoinedGroup {
+                    person_id: pid,
+                    group_id: group_id.clone(),
+                })
+                .unwrap();
         }
         seed_materialized_weeks(&mut state, 3);
 
         let (ctx, path, admin) = test_context_with_horizon(state, 6);
-        cmd_addperson(&ctx, &admin, &["David", "Floor"]).await.unwrap();
-        cmd_removeperson(&ctx, &admin, &["Bob", "Floor"]).await.unwrap();
+        cmd_addperson(&ctx, &admin, &["David", "Floor"])
+            .await
+            .unwrap();
+        cmd_removeperson(&ctx, &admin, &["Bob", "Floor"])
+            .await
+            .unwrap();
 
         let before = ctx.state.lock().await.clone();
         assert!(!before.event_log.is_empty());
@@ -4623,13 +6129,24 @@ mod tests {
         seed_materialized_weeks(&mut state, 1);
         let (ctx, path, admin) = test_context(state);
 
-        let reply = cmd_removeperson(&ctx, &admin, &["Carla", "Floor"]).await.unwrap().unwrap();
+        let reply = cmd_removeperson(&ctx, &admin, &["Carla", "Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Removed Carla"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert!(!state.group_by_id(&group_id).unwrap().member_ids.contains(&cid));
+        assert!(!state
+            .group_by_id(&group_id)
+            .unwrap()
+            .member_ids
+            .contains(&cid));
         let (y, w) = current_iso_week();
-        assert_eq!(assignee_for(&state, &group_id, y, w), Some(aid), "untouched — not Carla's week");
+        assert_eq!(
+            assignee_for(&state, &group_id, y, w),
+            Some(aid),
+            "untouched — not Carla's week"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -4639,17 +6156,31 @@ mod tests {
         let (mut state, group_id, first_id, _second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id.clone()),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
 
-        let reply = cmd_leavefloor(&ctx, &alice, &["2nd Floor"]).await.unwrap().unwrap();
+        let reply = cmd_leavefloor(&ctx, &alice, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("cannot leave"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert!(state.group_by_id(&group_id).unwrap().member_ids.contains(&first_id), "must not have left");
+        assert!(
+            state
+                .group_by_id(&group_id)
+                .unwrap()
+                .member_ids
+                .contains(&first_id),
+            "must not have left"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -4660,7 +6191,10 @@ mod tests {
         seed_materialized_weeks(&mut state, 5);
         let (ctx, path, admin) = test_context_with_horizon(state, 8);
 
-        let reply = cmd_removeperson(&ctx, &admin, &["Carla", "Floor"]).await.unwrap().unwrap();
+        let reply = cmd_removeperson(&ctx, &admin, &["Carla", "Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Removed Carla"), "{reply}");
 
         let state = ctx.state.lock().await;
@@ -4670,14 +6204,29 @@ mod tests {
         let (y1, w1) = add_weeks(y, w, 1);
         assert_eq!(assignee_for(&state, &group_id, y1, w1), Some(bid.clone()));
         let (y3, w3) = add_weeks(y, w, 3);
-        assert_eq!(assignee_for(&state, &group_id, y3, w3), Some(aid), "week 3 was already Anna's, unrelated to Carla");
+        assert_eq!(
+            assignee_for(&state, &group_id, y3, w3),
+            Some(aid),
+            "week 3 was already Anna's, unrelated to Carla"
+        );
         let (y4, w4) = add_weeks(y, w, 4);
-        assert_eq!(assignee_for(&state, &group_id, y4, w4), Some(bid), "week 4 was already Bob's, unrelated to Carla");
+        assert_eq!(
+            assignee_for(&state, &group_id, y4, w4),
+            Some(bid),
+            "week 4 was already Bob's, unrelated to Carla"
+        );
         // Carla's own vacated week (index 2) was refilled from the queue,
         // not left empty and not reassigned to whoever Carla displaced.
         let (y2, w2) = add_weeks(y, w, 2);
-        assert!(assignee_for(&state, &group_id, y2, w2).is_some(), "Carla's gap must be refilled");
-        assert_ne!(assignee_for(&state, &group_id, y2, w2), Some(cid), "not Carla — she left");
+        assert!(
+            assignee_for(&state, &group_id, y2, w2).is_some(),
+            "Carla's gap must be refilled"
+        );
+        assert_ne!(
+            assignee_for(&state, &group_id, y2, w2),
+            Some(cid),
+            "not Carla — she left"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -4688,16 +6237,32 @@ mod tests {
         seed_materialized_weeks(&mut state, 2);
         let (ctx, path, admin) = test_context_with_horizon(state, 8);
 
-        cmd_addperson(&ctx, &admin, &["David", "Floor"]).await.unwrap();
-        let david_id = ctx.state.lock().await.find_person("David").unwrap().id.clone();
-        cmd_removeperson(&ctx, &admin, &["David", "Floor"]).await.unwrap();
+        cmd_addperson(&ctx, &admin, &["David", "Floor"])
+            .await
+            .unwrap();
+        let david_id = ctx
+            .state
+            .lock()
+            .await
+            .find_person("David")
+            .unwrap()
+            .id
+            .clone();
+        cmd_removeperson(&ctx, &admin, &["David", "Floor"])
+            .await
+            .unwrap();
 
         let state = ctx.state.lock().await;
         let group = state.group_by_id(&group_id).unwrap();
         assert!(!group.member_ids.contains(&david_id));
         assert!(!group.rotation_queue.contains(&david_id));
-        assert!(!state.slot_assignments.iter().any(|a| a.person_id.as_deref() == Some(david_id.as_str())),
-            "no assignment should still reference David");
+        assert!(
+            !state
+                .slot_assignments
+                .iter()
+                .any(|a| a.person_id.as_deref() == Some(david_id.as_str())),
+            "no assignment should still reference David"
+        );
 
         let (y, w) = current_iso_week();
         assert_eq!(assignee_for(&state, &group_id, y, w), Some(aid));
@@ -4738,18 +6303,34 @@ mod tests {
         let (year, week) = current_iso_week();
         let (fy, fw) = add_weeks(year, week, 1);
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: fy, iso_week: fw,
-            person_id: Some(real_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: fy,
+            iso_week: fw,
+            person_id: Some(real_id.clone()),
+            source: Default::default(),
         });
         state.completions.push(crate::state::Completion {
-            group_id: group_id.clone(), slot_id: None, completed_by_id: real_id.clone(),
-            responsible_person_ids: vec![real_id.clone()], iso_year: year, iso_week: week,
-            completed_at: chrono::Utc::now(), skipped: false,
+            group_id: group_id.clone(),
+            slot_id: None,
+            completed_by_id: real_id.clone(),
+            responsible_person_ids: vec![real_id.clone()],
+            iso_year: year,
+            iso_week: week,
+            completed_at: chrono::Utc::now(),
+            skipped: false,
         });
         let (ctx, path, _admin) = test_context(state);
 
-        let reply = apply_linkmatrix(&ctx, "papageientaucher", "@papageientaucher:matrix.org", Some("Bela"))
-            .await.unwrap().unwrap();
+        let reply = apply_linkmatrix(
+            &ctx,
+            "papageientaucher",
+            "@papageientaucher:matrix.org",
+            Some("Bela"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(reply.contains("repaired"), "{reply}");
 
         let state = ctx.state.lock().await;
@@ -4757,24 +6338,52 @@ mod tests {
         // The real participant's identity, membership, history and queue
         // position are all untouched — only matrix_id (and, since we passed
         // one, display_name) changed.
-        let real_now = state.person_by_id(&real_id).expect("real participant's PersonId must survive");
-        assert_eq!(real_now.matrix_id.as_deref(), Some("@papageientaucher:matrix.org"));
+        let real_now = state
+            .person_by_id(&real_id)
+            .expect("real participant's PersonId must survive");
+        assert_eq!(
+            real_now.matrix_id.as_deref(),
+            Some("@papageientaucher:matrix.org")
+        );
         assert_eq!(real_now.display_name, "Bela");
 
         let group_now = state.group_by_id(&group_id).unwrap();
-        assert_eq!(group_now.member_ids, vec![real_id.clone()], "group membership must be unchanged");
-        assert_eq!(group_now.rotation_queue, vec![real_id.clone()], "rotation position must be unchanged");
+        assert_eq!(
+            group_now.member_ids,
+            vec![real_id.clone()],
+            "group membership must be unchanged"
+        );
+        assert_eq!(
+            group_now.rotation_queue,
+            vec![real_id.clone()],
+            "rotation position must be unchanged"
+        );
 
-        assert!(state.slot_assignments.iter()
-            .any(|a| a.group_id == group_id && a.iso_year == fy && a.iso_week == fw
+        assert!(
+            state.slot_assignments.iter().any(|a| a.group_id == group_id
+                && a.iso_year == fy
+                && a.iso_week == fw
                 && a.person_id.as_deref() == Some(real_id.as_str())),
-            "the existing assignment must still reference the same PersonId");
-        assert!(state.completions.iter().any(|c| c.completed_by_id == real_id),
-            "completion history must still reference the same PersonId");
+            "the existing assignment must still reference the same PersonId"
+        );
+        assert!(
+            state
+                .completions
+                .iter()
+                .any(|c| c.completed_by_id == real_id),
+            "completion history must still reference the same PersonId"
+        );
 
         // The unused stub was merged away — no duplicate participant remains.
-        assert!(state.person_by_id(&stub_id).is_none(), "the unused stub must be removed, not kept alongside");
-        assert_eq!(state.persons.len(), 1, "exactly one papageientaucher record must remain");
+        assert!(
+            state.person_by_id(&stub_id).is_none(),
+            "the unused stub must be removed, not kept alongside"
+        );
+        assert_eq!(
+            state.persons.len(),
+            1,
+            "exactly one papageientaucher record must remain"
+        );
         drop(state);
 
         let _ = tokio::fs::remove_file(path).await;
@@ -4783,11 +6392,19 @@ mod tests {
     #[tokio::test]
     async fn linkmatrix_refuses_to_overwrite_an_already_valid_matrix_id() {
         let mut state = State::default();
-        state.persons.push(Person::new_matrix("@already:example.org"));
+        state
+            .persons
+            .push(Person::new_matrix("@already:example.org"));
 
         let (ctx, path, _admin) = test_context(state);
-        let reply = apply_linkmatrix(&ctx, "already", "@new:example.org", None).await.unwrap().unwrap();
-        assert!(reply.contains("already has a Matrix account linked"), "{reply}");
+        let reply = apply_linkmatrix(&ctx, "already", "@new:example.org", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            reply.contains("already has a Matrix account linked"),
+            "{reply}"
+        );
 
         let state = ctx.state.lock().await;
         assert_eq!(
@@ -4820,15 +6437,26 @@ mod tests {
         state.cleaning_groups.push(group);
         let (year, week) = current_iso_week();
         state.completions.push(crate::state::Completion {
-            group_id: group_id.clone(), slot_id: None, completed_by_id: dup_b_id.clone(),
-            responsible_person_ids: vec![dup_b_id.clone()], iso_year: year, iso_week: week,
-            completed_at: chrono::Utc::now(), skipped: false,
+            group_id: group_id.clone(),
+            slot_id: None,
+            completed_by_id: dup_b_id.clone(),
+            responsible_person_ids: vec![dup_b_id.clone()],
+            iso_year: year,
+            iso_week: week,
+            completed_at: chrono::Utc::now(),
+            skipped: false,
         });
         let (ctx, path, _admin) = test_context(state);
 
-        let reply = apply_linkmatrix(&ctx, "Dup", "@new:example.org", None).await.unwrap().unwrap();
+        let reply = apply_linkmatrix(&ctx, "Dup", "@new:example.org", None)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("refusing to guess"), "{reply}");
-        assert!(reply.contains(&dup_a_id) && reply.contains(&dup_b_id), "{reply}");
+        assert!(
+            reply.contains(&dup_a_id) && reply.contains(&dup_b_id),
+            "{reply}"
+        );
 
         let state = ctx.state.lock().await;
         assert!(state.person_by_id(&dup_a_id).unwrap().matrix_id.is_none());
@@ -4850,14 +6478,23 @@ mod tests {
         assert!(reply.contains("Skipped"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert_eq!(state.group_by_id(&group_id).unwrap().rotation_queue, queue_before);
+        assert_eq!(
+            state.group_by_id(&group_id).unwrap().rotation_queue,
+            queue_before
+        );
         assert_eq!(state.slot_assignments.len(), assignments_before.len());
         for a in &assignments_before {
-            assert!(state.slot_assignments.iter().any(|b| {
-                b.group_id == a.group_id && b.slot_index == a.slot_index
-                    && b.iso_year == a.iso_year && b.iso_week == a.iso_week
-                    && b.person_id == a.person_id
-            }), "assignment for week {} preserved", a.iso_week);
+            assert!(
+                state.slot_assignments.iter().any(|b| {
+                    b.group_id == a.group_id
+                        && b.slot_index == a.slot_index
+                        && b.iso_year == a.iso_year
+                        && b.iso_week == a.iso_week
+                        && b.person_id == a.person_id
+                }),
+                "assignment for week {} preserved",
+                a.iso_week
+            );
         }
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
@@ -4869,20 +6506,32 @@ mod tests {
         seed_materialized_weeks(&mut state, 3);
         let queue_before = state.group_by_id(&group_id).unwrap().rotation_queue.clone();
         let (cur_y, cur_w) = current_iso_week();
-        let future_before: Vec<_> = state.slot_assignments.iter()
+        let future_before: Vec<_> = state
+            .slot_assignments
+            .iter()
             .filter(|a| a.iso_year > cur_y || (a.iso_year == cur_y && a.iso_week > cur_w))
-            .cloned().collect();
+            .cloned()
+            .collect();
 
         let (ctx, path, _admin) = test_context(state);
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
-        let reply = cmd_done(&ctx, &alice, &["2nd Floor"]).await.unwrap().unwrap();
+        let reply = cmd_done(&ctx, &alice, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Cleaned"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert_eq!(state.group_by_id(&group_id).unwrap().rotation_queue, queue_before);
-        let future_after: Vec<_> = state.slot_assignments.iter()
+        assert_eq!(
+            state.group_by_id(&group_id).unwrap().rotation_queue,
+            queue_before
+        );
+        let future_after: Vec<_> = state
+            .slot_assignments
+            .iter()
             .filter(|a| a.iso_year > cur_y || (a.iso_year == cur_y && a.iso_week > cur_w))
-            .cloned().collect();
+            .cloned()
+            .collect();
         assert_eq!(future_after.len(), future_before.len());
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
@@ -4898,14 +6547,20 @@ mod tests {
         cmd_assign(&ctx, &admin, &["Floor", "Carla"]).await.unwrap();
         {
             let state = ctx.state.lock().await;
-            assert_eq!(state.group_by_id(&group_id).unwrap().rotation_queue, queue_before);
+            assert_eq!(
+                state.group_by_id(&group_id).unwrap().rotation_queue,
+                queue_before
+            );
             let (y, w) = current_iso_week();
             assert_eq!(assignee_for(&state, &group_id, y, w), Some(cid.clone()));
         }
 
         cmd_unassign(&ctx, &admin, &["Floor"]).await.unwrap();
         let state = ctx.state.lock().await;
-        assert_eq!(state.group_by_id(&group_id).unwrap().rotation_queue, queue_before);
+        assert_eq!(
+            state.group_by_id(&group_id).unwrap().rotation_queue,
+            queue_before
+        );
         let (y, w) = current_iso_week();
         assert_eq!(assignee_for(&state, &group_id, y, w), None);
         drop(state);
@@ -4917,7 +6572,9 @@ mod tests {
         let (mut state, group_id, ..) = three_person_state();
         seed_materialized_weeks(&mut state, 2);
         let (ctx, path, admin) = test_context_with_horizon(state, 8);
-        cmd_addperson(&ctx, &admin, &["David", "Floor"]).await.unwrap();
+        cmd_addperson(&ctx, &admin, &["David", "Floor"])
+            .await
+            .unwrap();
 
         let before = ctx.state.lock().await.clone();
         // Simulate a restart: reload straight from the saved JSON.
@@ -4937,10 +6594,13 @@ mod tests {
         // how far it's already frozen, must be a no-op — no logic may depend
         // on events only ever having existed in RAM.
         let interval = ctx.config.schedule.interval_weeks;
-        let horizon  = group_horizon_weeks_ahead(&after, &group_id, interval);
+        let horizon = group_horizon_weeks_ahead(&after, &group_id, interval);
         assert!(horizon > 0, "the join must have frozen at least one week");
         let replay_events = resolver::materialize(&after, interval, horizon);
-        assert!(replay_events.is_empty(), "materialize must be a no-op on an already-materialized, reloaded state");
+        assert!(
+            replay_events.is_empty(),
+            "materialize must be a no-op on an already-materialized, reloaded state"
+        );
 
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -4952,21 +6612,37 @@ mod tests {
         let (mut state, group_id, first_id, second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id.clone()),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
-        let reply = cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
+        let reply = cmd_takeover(&ctx, &bob, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("took over"), "{reply}");
-        assert!(reply.contains("Alice") || reply.contains("alice"), "should note who it came from: {reply}");
+        assert!(
+            reply.contains("Alice") || reply.contains("alice"),
+            "should note who it came from: {reply}"
+        );
 
         let state = ctx.state.lock().await;
-        assert_eq!(assignee_for(&state, &group_id, year, week), Some(second_id.clone()),
-            "Bob is now the sole responsible person");
-        assert_ne!(assignee_for(&state, &group_id, year, week), Some(first_id),
-            "Alice must no longer be responsible");
+        assert_eq!(
+            assignee_for(&state, &group_id, year, week),
+            Some(second_id.clone()),
+            "Bob is now the sole responsible person"
+        );
+        assert_ne!(
+            assignee_for(&state, &group_id, year, week),
+            Some(first_id),
+            "Alice must no longer be responsible"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -4977,23 +6653,35 @@ mod tests {
         seed_materialized_weeks(&mut state, 4);
         let queue_before = state.group_by_id(&group_id).unwrap().rotation_queue.clone();
         let (y, w) = current_iso_week();
-        let future_before: Vec<_> = (1..4).map(|i| {
-            let (fy, fw) = add_weeks(y, w, i);
-            (fy, fw, assignee_for(&state, &group_id, fy, fw))
-        }).collect();
+        let future_before: Vec<_> = (1..4)
+            .map(|i| {
+                let (fy, fw) = add_weeks(y, w, i);
+                (fy, fw, assignee_for(&state, &group_id, fy, fw))
+            })
+            .collect();
 
         let (ctx, path, _admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
         cmd_takeover(&ctx, &bob, &["Floor"]).await.unwrap().unwrap();
 
         let state = ctx.state.lock().await;
-        assert_eq!(state.group_by_id(&group_id).unwrap().rotation_queue, queue_before,
-            "a takeover must never pop or reorder the rotation queue");
+        assert_eq!(
+            state.group_by_id(&group_id).unwrap().rotation_queue,
+            queue_before,
+            "a takeover must never pop or reorder the rotation queue"
+        );
         for (fy, fw, before) in future_before {
-            assert_eq!(assignee_for(&state, &group_id, fy, fw), before, "future week {fw} must be untouched");
+            assert_eq!(
+                assignee_for(&state, &group_id, fy, fw),
+                before,
+                "future week {fw} must be untouched"
+            );
         }
         // Only the current week actually changed.
-        assert_eq!(assignee_for(&state, &group_id, y, w), Some(state.find_person("Bob").unwrap().id.clone()));
+        assert_eq!(
+            assignee_for(&state, &group_id, y, w),
+            Some(state.find_person("Bob").unwrap().id.clone())
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
         let _ = first_id;
@@ -5004,8 +6692,12 @@ mod tests {
         let (mut state, group_id, first_id, second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
@@ -5017,11 +6709,17 @@ mod tests {
         {
             let state = ctx.state.lock().await;
             assert!(state.is_completed(&group_id, year, week));
-            let completion = state.completions.iter()
-                .find(|c| c.group_id == group_id && c.iso_year == year && c.iso_week == week).unwrap();
+            let completion = state
+                .completions
+                .iter()
+                .find(|c| c.group_id == group_id && c.iso_year == year && c.iso_week == week)
+                .unwrap();
             assert_eq!(completion.completed_by_id, second_id);
-            assert_eq!(completion.responsible_person_ids, vec![second_id.clone()],
-                "credit must go to Bob, the current assignee, not the original round-robin pick");
+            assert_eq!(
+                completion.responsible_person_ids,
+                vec![second_id.clone()],
+                "credit must go to Bob, the current assignee, not the original round-robin pick"
+            );
         }
 
         // Restart: reload from disk, state must agree exactly.
@@ -5044,21 +6742,35 @@ mod tests {
         let (mut state, group_id, first_id, second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id.clone()),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
-        let bob   = OwnedUserId::try_from("@bob:example.org").unwrap();
+        let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
 
         cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap();
-        let reply = cmd_done(&ctx, &alice, &["2nd Floor"]).await.unwrap().unwrap();
+        let reply = cmd_done(&ctx, &alice, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Cleaned"), "{reply}");
 
         let state = ctx.state.lock().await;
-        let completion = state.completions.iter()
-            .find(|c| c.group_id == group_id && c.iso_year == year && c.iso_week == week).unwrap();
-        assert_eq!(completion.responsible_person_ids, vec![second_id], "credit belongs to Bob, not Alice");
+        let completion = state
+            .completions
+            .iter()
+            .find(|c| c.group_id == group_id && c.iso_year == year && c.iso_week == week)
+            .unwrap();
+        assert_eq!(
+            completion.responsible_person_ids,
+            vec![second_id],
+            "credit belongs to Bob, not Alice"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
         let _ = first_id;
@@ -5076,14 +6788,20 @@ mod tests {
         let state = ctx.state.lock().await;
         let (y, w) = current_iso_week();
         let carla_id = state.find_person("Carla").unwrap().id.clone();
-        let bob_id   = state.find_person("Bob").unwrap().id.clone();
-        assert_eq!(assignee_for(&state, &group_id, y, w), Some(carla_id), "only Carla is responsible");
+        let bob_id = state.find_person("Bob").unwrap().id.clone();
+        assert_eq!(
+            assignee_for(&state, &group_id, y, w),
+            Some(carla_id),
+            "only Carla is responsible"
+        );
         assert_ne!(assignee_for(&state, &group_id, y, w), Some(bob_id));
         assert_ne!(assignee_for(&state, &group_id, y, w), Some(aid));
         // Exactly one SlotAssignment record exists for this (group, week) —
         // never two "responsible" people at once.
         assert_eq!(
-            state.slot_assignments.iter()
+            state
+                .slot_assignments
+                .iter()
                 .filter(|a| a.group_id == group_id && a.iso_year == y && a.iso_week == w)
                 .count(),
             1
@@ -5097,20 +6815,30 @@ mod tests {
         let (mut state, group_id, first_id, _second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id.clone()),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
-        let bob   = OwnedUserId::try_from("@bob:example.org").unwrap();
+        let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
         cmd_done(&ctx, &alice, &["2nd Floor"]).await.unwrap();
-        let reply = cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
+        let reply = cmd_takeover(&ctx, &bob, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("already completed"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert_eq!(assignee_for(&state, &group_id, year, week), Some(first_id),
-            "a completed assignment must not be silently reassigned");
+        assert_eq!(
+            assignee_for(&state, &group_id, year, week),
+            Some(first_id),
+            "a completed assignment must not be silently reassigned"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -5120,18 +6848,28 @@ mod tests {
         let (mut state, group_id, first_id, _second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id),
+            source: Default::default(),
         });
         let (ctx, path, admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
         cmd_skip(&ctx, &admin, &["2nd Floor"]).await.unwrap();
-        let reply = cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
+        let reply = cmd_takeover(&ctx, &bob, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("already completed"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert!(state.is_completed(&group_id, year, week), "must remain skipped, not reopened");
+        assert!(
+            state.is_completed(&group_id, year, week),
+            "must remain skipped, not reopened"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -5141,8 +6879,12 @@ mod tests {
         let (mut state, group_id, first_id, _second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
@@ -5153,8 +6895,11 @@ mod tests {
         assert!(second_reply.contains("Already done"), "{second_reply}");
 
         let state = ctx.state.lock().await;
-        let count = state.completions.iter()
-            .filter(|c| c.group_id == group_id && c.iso_year == year && c.iso_week == week).count();
+        let count = state
+            .completions
+            .iter()
+            .filter(|c| c.group_id == group_id && c.iso_year == year && c.iso_week == week)
+            .count();
         assert_eq!(count, 1, "no duplicate completion record");
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
@@ -5165,11 +6910,27 @@ mod tests {
         let mut state = State::default();
         state.created_at = Some(Utc::now());
         let group_id = Uuid::new_v4().to_string();
-        state.apply_event(DomainEvent::GroupCreated { group_id: group_id.clone(), name: "2nd Floor".into() }).unwrap();
+        state
+            .apply_event(DomainEvent::GroupCreated {
+                group_id: group_id.clone(),
+                name: "2nd Floor".into(),
+            })
+            .unwrap();
         for mxid in ["@alice:example.org", "@bob:example.org"] {
             let pid = Uuid::new_v4().to_string();
-            state.apply_event(DomainEvent::PersonCreated { person_id: pid.clone(), display_name: mxid.into(), matrix_id: Some(mxid.into()) }).unwrap();
-            state.apply_event(DomainEvent::PersonJoinedGroup { person_id: pid, group_id: group_id.clone() }).unwrap();
+            state
+                .apply_event(DomainEvent::PersonCreated {
+                    person_id: pid.clone(),
+                    display_name: mxid.into(),
+                    matrix_id: Some(mxid.into()),
+                })
+                .unwrap();
+            state
+                .apply_event(DomainEvent::PersonJoinedGroup {
+                    person_id: pid,
+                    group_id: group_id.clone(),
+                })
+                .unwrap();
         }
         seed_materialized_weeks(&mut state, 1);
 
@@ -5195,9 +6956,21 @@ mod tests {
         // not something a full replay-from-log ever does in production: the
         // real restart path is `State::load`, a direct deserialize of the
         // already-persisted timestamp, exercised by the reload assertions above).
-        let strip_ts = |completions: &[crate::state::Completion]| completions.iter()
-            .map(|c| (c.group_id.clone(), c.completed_by_id.clone(), c.responsible_person_ids.clone(), c.iso_year, c.iso_week, c.skipped))
-            .collect::<Vec<_>>();
+        let strip_ts = |completions: &[crate::state::Completion]| {
+            completions
+                .iter()
+                .map(|c| {
+                    (
+                        c.group_id.clone(),
+                        c.completed_by_id.clone(),
+                        c.responsible_person_ids.clone(),
+                        c.iso_year,
+                        c.iso_week,
+                        c.skipped,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             strip_ts(&before.completions),
             strip_ts(&replayed.completions),
@@ -5217,20 +6990,40 @@ mod tests {
         let (mut state, group_id, first_id, second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
-        let bob   = OwnedUserId::try_from("@bob:example.org").unwrap();
+        let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
-        let swap_reply = cmd_swap(&ctx, &alice, &["@bob:example.org", "2nd Floor"]).await.unwrap().unwrap();
-        let id: u64 = swap_reply.split('#').nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
-        cmd_acceptswap(&ctx, &bob, &[&id.to_string()]).await.unwrap();
+        let swap_reply = cmd_swap(&ctx, &alice, &["@bob:example.org", "2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
+        let id: u64 = swap_reply
+            .split('#')
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        cmd_acceptswap(&ctx, &bob, &[&id.to_string()])
+            .await
+            .unwrap();
 
         let state = ctx.state.lock().await;
-        assert_eq!(assignee_for(&state, &group_id, year, week), Some(second_id),
-            "the frozen current week must reflect the accepted swap, not just swap_requests status");
+        assert_eq!(
+            assignee_for(&state, &group_id, year, week),
+            Some(second_id),
+            "the frozen current week must reflect the accepted swap, not just swap_requests status"
+        );
         // And !done now works for Bob without any special-cased swap lookup.
         drop(state);
         let done_reply = cmd_done(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
@@ -5242,7 +7035,7 @@ mod tests {
     /// that resolve the sender via their Matrix ID, like !takeover).
     fn three_person_state_matrix() -> (State, GroupId, PersonId, PersonId) {
         let alice = Person::new_matrix("@alice:example.org");
-        let bob   = Person::new_matrix("@bob:example.org");
+        let bob = Person::new_matrix("@bob:example.org");
         let carla = Person::new_matrix("@carla:example.org");
         let (aid, bid) = (alice.id.clone(), bob.id.clone());
         let mut group = CleaningGroup::new("Floor");
@@ -5259,13 +7052,15 @@ mod tests {
     /// with two named slots ("Kitchen", "Bath"), for !takeover ergonomics tests.
     fn multi_slot_group_matrix() -> (State, GroupId, PersonId, PersonId, String, String) {
         let alice = Person::new_matrix("@alice:example.org");
-        let bob   = Person::new_matrix("@bob:example.org");
+        let bob = Person::new_matrix("@bob:example.org");
         let (aid, bid) = (alice.id.clone(), bob.id.clone());
         let mut group = CleaningGroup::new("Floor");
         let gid = group.id.clone();
         group.member_ids = vec![aid.clone(), bid.clone()];
-        let mut kitchen = CleaningSlot::new("Kitchen"); kitchen.id = "kitchen".into();
-        let mut bath = CleaningSlot::new("Bath"); bath.id = "bath".into();
+        let mut kitchen = CleaningSlot::new("Kitchen");
+        kitchen.id = "kitchen".into();
+        let mut bath = CleaningSlot::new("Bath");
+        bath.id = "bath".into();
         let (kitchen_id, bath_id) = (kitchen.id.clone(), bath.id.clone());
         group.slots = vec![kitchen, bath];
         let mut state = State::default();
@@ -5282,8 +7077,12 @@ mod tests {
         let (mut state, group_id, first_id, second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
@@ -5301,20 +7100,34 @@ mod tests {
     async fn takeover_slot_only_uses_the_senders_own_group() {
         let (mut state, group_id, aid, bid, kitchen_id, _bath_id) = multi_slot_group_matrix();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: current_iso_week().0, iso_week: current_iso_week().1,
-            person_id: Some(aid), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: current_iso_week().0,
+            iso_week: current_iso_week().1,
+            person_id: Some(aid),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
-        let reply = cmd_takeover(&ctx, &bob, &["Kitchen"]).await.unwrap().unwrap();
+        let reply = cmd_takeover(&ctx, &bob, &["Kitchen"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("took over"), "{reply}");
         assert!(reply.contains("Kitchen"), "{reply}");
 
         let state = ctx.state.lock().await;
         let (year, week) = current_iso_week();
-        let assignment = state.slot_assignments.iter()
-            .find(|a| a.group_id == group_id && a.iso_year == year && a.iso_week == week && a.slot_index == 0)
+        let assignment = state
+            .slot_assignments
+            .iter()
+            .find(|a| {
+                a.group_id == group_id
+                    && a.iso_year == year
+                    && a.iso_week == week
+                    && a.slot_index == 0
+            })
             .unwrap();
         assert_eq!(assignment.person_id.as_deref(), Some(bid.as_str()));
         let _ = kitchen_id;
@@ -5329,12 +7142,20 @@ mod tests {
         let (mut state, group_id, aid, _bid, ..) = multi_slot_group_matrix();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(aid.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(aid.clone()),
+            source: Default::default(),
         });
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 1, iso_year: year, iso_week: week,
-            person_id: Some(aid.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 1,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(aid.clone()),
+            source: Default::default(),
         });
         let before = state.slot_assignments.clone();
         let (ctx, path, _admin) = test_context(state);
@@ -5346,7 +7167,10 @@ mod tests {
         assert!(reply.contains("!takeover Floor"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert_eq!(state.slot_assignments, before, "nothing may change while the choice is ambiguous");
+        assert_eq!(
+            state.slot_assignments, before,
+            "nothing may change while the choice is ambiguous"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -5368,7 +7192,10 @@ mod tests {
         assert!(reply.contains("Kitchen Crew"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert_eq!(state.slot_assignments, before, "nothing may change while the group is ambiguous");
+        assert_eq!(
+            state.slot_assignments, before,
+            "nothing may change while the group is ambiguous"
+        );
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
         let _ = (floor_id, kitchen_group_id);
@@ -5381,8 +7208,12 @@ mod tests {
         let (year, week) = current_iso_week();
         for slot_index in [0, 1] {
             state.slot_assignments.push(SlotAssignment {
-                group_id: group_id.clone(), slot_index, iso_year: year, iso_week: week,
-                person_id: Some(bid.clone()), source: Default::default(),
+                group_id: group_id.clone(),
+                slot_index,
+                iso_year: year,
+                iso_week: week,
+                person_id: Some(bid.clone()),
+                source: Default::default(),
             });
         }
         let before = state.slot_assignments.clone();
@@ -5393,7 +7224,10 @@ mod tests {
         assert!(reply.contains("Nothing to take over"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert_eq!(state.slot_assignments, before, "both slots were already Bob's — nothing should change");
+        assert_eq!(
+            state.slot_assignments, before,
+            "both slots were already Bob's — nothing should change"
+        );
         let _ = aid;
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
@@ -5404,19 +7238,33 @@ mod tests {
         let (mut state, group_id, aid, bid, ..) = multi_slot_group_matrix();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 1, iso_year: year, iso_week: week,
-            person_id: Some(aid), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 1,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(aid),
+            source: Default::default(),
         });
         let (ctx, path, _admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
-        let reply = cmd_takeover(&ctx, &bob, &["Floor", "Bath"]).await.unwrap().unwrap();
+        let reply = cmd_takeover(&ctx, &bob, &["Floor", "Bath"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("took over"), "{reply}");
         assert!(reply.contains("Bath"), "{reply}");
 
         let state = ctx.state.lock().await;
-        let assignment = state.slot_assignments.iter()
-            .find(|a| a.group_id == group_id && a.iso_year == year && a.iso_week == week && a.slot_index == 1)
+        let assignment = state
+            .slot_assignments
+            .iter()
+            .find(|a| {
+                a.group_id == group_id
+                    && a.iso_year == year
+                    && a.iso_week == week
+                    && a.slot_index == 1
+            })
             .unwrap();
         assert_eq!(assignment.person_id.as_deref(), Some(bid.as_str()));
         drop(state);
@@ -5435,11 +7283,17 @@ mod tests {
         let (ctx, path, _admin) = test_context(state);
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
 
-        let reply = cmd_swap(&ctx, &alice, &["@bob:example.org", "Floor"]).await.unwrap().unwrap();
+        let reply = cmd_swap(&ctx, &alice, &["@bob:example.org", "Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("multiple slots"), "{reply}");
 
         let state = ctx.state.lock().await;
-        assert!(state.swap_requests.is_empty(), "no swap request should be created for a multi-slot group");
+        assert!(
+            state.swap_requests.is_empty(),
+            "no swap request should be created for a multi-slot group"
+        );
         let _ = group_id;
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
@@ -5455,8 +7309,12 @@ mod tests {
         let (mut state, group_id, first_id, _second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id.clone()),
+            source: Default::default(),
         });
         let carla = Person::new_matrix("@carla:example.org");
         let carla_id = carla.id.clone();
@@ -5464,31 +7322,58 @@ mod tests {
 
         let (ctx, path, _admin) = test_context(state);
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
-        let bob   = OwnedUserId::try_from("@bob:example.org").unwrap();
+        let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
-        let swap_reply = cmd_swap(&ctx, &alice, &["@bob:example.org", "2nd Floor"]).await.unwrap().unwrap();
-        let id: u64 = swap_reply.split('#').nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        let swap_reply = cmd_swap(&ctx, &alice, &["@bob:example.org", "2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
+        let id: u64 = swap_reply
+            .split('#')
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
 
         {
             let mut state = ctx.state.lock().await;
-            state.apply_event(DomainEvent::SlotAssigned {
-                group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-                person_id: Some(carla_id.clone()), source: AssignmentSource::Assign,
-                actor_id: Some("@admin:example.org".to_owned()), previous_person_id: Some(first_id.clone()),
-            }).unwrap();
+            state
+                .apply_event(DomainEvent::SlotAssigned {
+                    group_id: group_id.clone(),
+                    slot_index: 0,
+                    iso_year: year,
+                    iso_week: week,
+                    person_id: Some(carla_id.clone()),
+                    source: AssignmentSource::Assign,
+                    actor_id: Some("@admin:example.org".to_owned()),
+                    previous_person_id: Some(first_id.clone()),
+                })
+                .unwrap();
             state.save(&path).await.unwrap();
         }
 
-        let accept_reply = cmd_acceptswap(&ctx, &bob, &[&id.to_string()]).await.unwrap().unwrap();
+        let accept_reply = cmd_acceptswap(&ctx, &bob, &[&id.to_string()])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(accept_reply.contains("no longer valid"), "{accept_reply}");
 
         let state = ctx.state.lock().await;
         assert_eq!(
-            assignee_for(&state, &group_id, year, week), Some(carla_id),
+            assignee_for(&state, &group_id, year, week),
+            Some(carla_id),
             "Carla's reassignment must survive an unrelated stale swap acceptance"
         );
         assert_eq!(
-            state.swap_requests.iter().find(|s| s.id == id).unwrap().status,
+            state
+                .swap_requests
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .status,
             SwapStatus::Rejected,
             "the stale request should be auto-cancelled, not left pending forever"
         );
@@ -5505,12 +7390,15 @@ mod tests {
         // to a different room.
         let mut group = CleaningGroup::new("Floor");
         let gid = group.id.clone();
-        let mut kitchen = CleaningSlot::new("Kitchen"); kitchen.id = "kitchen".into();
-        let mut bath    = CleaningSlot::new("Bath");    bath.id = "bath".into();
-        let mut hallway = CleaningSlot::new("Hallway"); hallway.id = "hallway".into();
+        let mut kitchen = CleaningSlot::new("Kitchen");
+        kitchen.id = "kitchen".into();
+        let mut bath = CleaningSlot::new("Bath");
+        bath.id = "bath".into();
+        let mut hallway = CleaningSlot::new("Hallway");
+        hallway.id = "hallway".into();
         group.slots = vec![kitchen, bath, hallway];
         let alice = Person::new_named("Alice");
-        let bob   = Person::new_named("Bob");
+        let bob = Person::new_named("Bob");
         let (aid, bid) = (alice.id.clone(), bob.id.clone());
         group.member_ids = vec![aid.clone(), bid.clone()];
 
@@ -5519,34 +7407,73 @@ mod tests {
         state.cleaning_groups.push(group);
         let (year, week) = current_iso_week();
         state.slot_assignments = vec![
-            SlotAssignment { group_id: gid.clone(), slot_index: 0, iso_year: year, iso_week: week, person_id: Some(aid.clone()), source: Default::default() },
-            SlotAssignment { group_id: gid.clone(), slot_index: 2, iso_year: year, iso_week: week, person_id: Some(bid.clone()), source: Default::default() },
+            SlotAssignment {
+                group_id: gid.clone(),
+                slot_index: 0,
+                iso_year: year,
+                iso_week: week,
+                person_id: Some(aid.clone()),
+                source: Default::default(),
+            },
+            SlotAssignment {
+                group_id: gid.clone(),
+                slot_index: 2,
+                iso_year: year,
+                iso_week: week,
+                person_id: Some(bid.clone()),
+                source: Default::default(),
+            },
         ];
 
         let (ctx, path, admin) = test_context(state);
-        let reply = cmd_removeslot(&ctx, &admin, &["Floor", "Bath"]).await.unwrap().unwrap();
+        let reply = cmd_removeslot(&ctx, &admin, &["Floor", "Bath"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("Removed slot"), "{reply}");
 
         let state = ctx.state.lock().await;
         let group = state.group_by_id(&gid).unwrap();
-        assert_eq!(group.slots.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["kitchen", "hallway"]);
+        assert_eq!(
+            group
+                .slots
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["kitchen", "hallway"]
+        );
 
         // Alice's Kitchen assignment (index 0, before the removed slot) is untouched.
-        let alice_assignment = state.slot_assignments.iter()
-            .find(|a| a.person_id.as_deref() == Some(aid.as_str())).unwrap();
+        let alice_assignment = state
+            .slot_assignments
+            .iter()
+            .find(|a| a.person_id.as_deref() == Some(aid.as_str()))
+            .unwrap();
         assert_eq!(alice_assignment.slot_index, 0);
 
         // Bob's Hallway assignment (index 2, after the removed slot) must be
         // re-pointed to Hallway's new index, not silently become Bath's old slot.
-        let bob_assignment = state.slot_assignments.iter()
-            .find(|a| a.person_id.as_deref() == Some(bid.as_str())).unwrap();
-        assert_eq!(bob_assignment.slot_index, 1, "must be re-pointed at Hallway's new index");
+        let bob_assignment = state
+            .slot_assignments
+            .iter()
+            .find(|a| a.person_id.as_deref() == Some(bid.as_str()))
+            .unwrap();
         assert_eq!(
-            group.slots.get(bob_assignment.slot_index).map(|s| s.id.as_str()),
+            bob_assignment.slot_index, 1,
+            "must be re-pointed at Hallway's new index"
+        );
+        assert_eq!(
+            group
+                .slots
+                .get(bob_assignment.slot_index)
+                .map(|s| s.id.as_str()),
             Some("hallway"),
             "the re-pointed index must resolve back to the same physical slot"
         );
-        assert!(state.slot_assignments.iter().all(|a| a.slot_index < group.slots.len()));
+        assert!(state
+            .slot_assignments
+            .iter()
+            .all(|a| a.slot_index < group.slots.len()));
         drop(state);
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -5563,17 +7490,25 @@ mod tests {
         let (mut state, group_id, first_id, _second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id.clone()),
+            source: Default::default(),
         });
         let (ctx, path, admin) = test_context(state);
 
-        let reply = cmd_absent(&ctx, &admin, &["@alice:example.org"]).await.unwrap().unwrap();
+        let reply = cmd_absent(&ctx, &admin, &["@alice:example.org"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(reply.contains("away"), "{reply}");
 
         let state = ctx.state.lock().await;
         assert_eq!(
-            assignee_for(&state, &group_id, year, week), Some(first_id),
+            assignee_for(&state, &group_id, year, week),
+            Some(first_id),
             "an already-frozen assignment must survive a later !absent for the same person"
         );
         drop(state);
@@ -5592,8 +7527,12 @@ mod tests {
         let (mut state, group_id, first_id, second_id) = rotation_state();
         let (year, week) = current_iso_week();
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: year, iso_week: week,
-            person_id: Some(first_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: year,
+            iso_week: week,
+            person_id: Some(first_id.clone()),
+            source: Default::default(),
         });
         let carla = Person::new_matrix("@carla:example.org");
         let carla_id = carla.id.clone();
@@ -5603,19 +7542,28 @@ mod tests {
         // check below ("is the requester still the current holder") has a
         // deterministic answer instead of depending on queue-preview internals.
         state.slot_assignments.push(SlotAssignment {
-            group_id: group_id.clone(), slot_index: 0, iso_year: next_year, iso_week: next_week,
-            person_id: Some(second_id.clone()), source: Default::default(),
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: next_year,
+            iso_week: next_week,
+            person_id: Some(second_id.clone()),
+            source: Default::default(),
         });
 
         let (ctx, path, admin) = test_context(state);
         let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
         // 1. Admin !assign — actor is the admin, previous is Alice.
-        cmd_assign(&ctx, &admin, &["2nd Floor", "@carla:example.org"]).await.unwrap();
+        cmd_assign(&ctx, &admin, &["2nd Floor", "@carla:example.org"])
+            .await
+            .unwrap();
         {
             let state = ctx.state.lock().await;
-            let a = state.slot_assignments.iter()
-                .find(|a| a.group_id == group_id && a.iso_year == year && a.iso_week == week).unwrap();
+            let a = state
+                .slot_assignments
+                .iter()
+                .find(|a| a.group_id == group_id && a.iso_year == year && a.iso_week == week)
+                .unwrap();
             assert_eq!(a.source, AssignmentSource::Assign);
         }
         let assign_event = last_slot_assigned_event(&ctx).await;
@@ -5624,9 +7572,20 @@ mod tests {
         assert_eq!(assign_event.2.as_deref(), Some(first_id.as_str()));
 
         // 2. Self-service !takeover — actor is the claimant, previous is Carla.
-        let takeover_reply = cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
+        let takeover_reply = cmd_takeover(&ctx, &bob, &["2nd Floor"])
+            .await
+            .unwrap()
+            .unwrap();
         assert!(takeover_reply.contains("took over"), "{takeover_reply}");
-        let bob_id = { ctx.state.lock().await.person_by_matrix_id("@bob:example.org").unwrap().id.clone() };
+        let bob_id = {
+            ctx.state
+                .lock()
+                .await
+                .person_by_matrix_id("@bob:example.org")
+                .unwrap()
+                .id
+                .clone()
+        };
         let takeover_event = last_slot_assigned_event(&ctx).await;
         assert_eq!(takeover_event.0, AssignmentSource::Takeover);
         assert_eq!(takeover_event.1.as_deref(), Some("@bob:example.org"));
@@ -5635,11 +7594,32 @@ mod tests {
         // 3. Accepted swap (next week, so it doesn't collide with the
         // already-completed-this-week checks above) — actor is the
         // accepter, previous is the original requester.
-        let swap_reply = cmd_swap(&ctx, &bob, &["@alice:example.org", "2nd Floor", "week", &next_week.to_string()])
-            .await.unwrap().unwrap();
-        let id: u64 = swap_reply.split('#').nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        let swap_reply = cmd_swap(
+            &ctx,
+            &bob,
+            &[
+                "@alice:example.org",
+                "2nd Floor",
+                "week",
+                &next_week.to_string(),
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let id: u64 = swap_reply
+            .split('#')
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
-        cmd_acceptswap(&ctx, &alice, &[&id.to_string()]).await.unwrap();
+        cmd_acceptswap(&ctx, &alice, &[&id.to_string()])
+            .await
+            .unwrap();
         let swap_event = last_slot_assigned_event(&ctx).await;
         assert_eq!(swap_event.0, AssignmentSource::Swap);
         assert_eq!(swap_event.1.as_deref(), Some("@alice:example.org"));
@@ -5651,12 +7631,23 @@ mod tests {
     /// The `(source, actor_id, previous_person_id)` of the most recent
     /// `SlotAssigned` in the event log — lets a test check the audit trail
     /// a command actually left behind, not just the resulting live state.
-    async fn last_slot_assigned_event(ctx: &BotContext) -> (AssignmentSource, Option<String>, Option<PersonId>) {
+    async fn last_slot_assigned_event(
+        ctx: &BotContext,
+    ) -> (AssignmentSource, Option<String>, Option<PersonId>) {
         let state = ctx.state.lock().await;
-        state.event_log.iter().rev().find_map(|logged| match &logged.event {
-            DomainEvent::SlotAssigned { source, actor_id, previous_person_id, .. } =>
-                Some((source.clone(), actor_id.clone(), previous_person_id.clone())),
-            _ => None,
-        }).expect("expected a SlotAssigned event in the log")
+        state
+            .event_log
+            .iter()
+            .rev()
+            .find_map(|logged| match &logged.event {
+                DomainEvent::SlotAssigned {
+                    source,
+                    actor_id,
+                    previous_person_id,
+                    ..
+                } => Some((source.clone(), actor_id.clone(), previous_person_id.clone())),
+                _ => None,
+            })
+            .expect("expected a SlotAssigned event in the log")
     }
 }

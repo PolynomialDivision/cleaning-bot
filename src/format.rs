@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
-use matrix_sdk::{Room, ruma::OwnedUserId};
 use matrix_sdk::ruma::events::{room::message::RoomMessageEventContent, Mentions};
+use matrix_sdk::{ruma::OwnedUserId, Room};
 
 /// Scan `text` for Matrix user IDs (`@localpart:server`) and return a
 /// `RoomMessageEventContent` with an HTML body where each ID is a clickable
@@ -16,7 +16,10 @@ pub fn mentionify(text: &str) -> RoomMessageEventContent {
 /// (key = full MXID, value = display name) so the pill shows the
 /// friendly name instead of the localpart.
 /// The plain-text body is also updated: `@user:server` → `Display Name`.
-pub fn mentionify_with_names(text: &str, names: &HashMap<String, String>) -> RoomMessageEventContent {
+pub fn mentionify_with_names(
+    text: &str,
+    names: &HashMap<String, String>,
+) -> RoomMessageEventContent {
     build(text, |token| {
         names
             .get(token)
@@ -47,8 +50,7 @@ pub fn extract_mxids(text: &str) -> Vec<String> {
         if text.as_bytes()[pos] == b'@' {
             let token_len = text[pos..]
                 .find(|c: char| {
-                    c.is_whitespace()
-                        || matches!(c, ',' | '!' | '?' | '*' | ')' | ']' | '"' | '\'')
+                    c.is_whitespace() || matches!(c, ',' | '!' | '?' | '*' | ')' | ']' | '"' | '\'')
                 })
                 .unwrap_or(text.len() - pos);
             let token = &text[pos..pos + token_len];
@@ -60,7 +62,11 @@ pub fn extract_mxids(text: &str) -> Vec<String> {
             }
             pos += token_len.max(1);
         } else {
-            pos += text[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            pos += text[pos..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
         }
     }
     result
@@ -101,10 +107,10 @@ fn default_label(token: &str) -> &str {
 ///
 /// `label_for(mxid)` returns the display label for a given MXID.
 fn build(text: &str, label_for: impl Fn(&str) -> String) -> RoomMessageEventContent {
-    let mut plain   = String::with_capacity(text.len());
-    let mut html    = String::with_capacity(text.len() * 2);
-    let mut pos     = 0;
-    let mut found   = false; // true when HTML output differs from plain
+    let mut plain = String::with_capacity(text.len());
+    let mut html = String::with_capacity(text.len() * 2);
+    let mut pos = 0;
+    let mut found = false; // true when HTML output differs from plain
     let mut in_bold = false;
     // Every MXID pill rendered below must also land in `m.mentions` on this
     // same event — that field, not the HTML pill, is what current Matrix
@@ -113,17 +119,15 @@ fn build(text: &str, label_for: impl Fn(&str) -> String) -> RoomMessageEventCont
 
     while pos < text.len() {
         // ── **bold** markers ──────────────────────────────────────────────────
-        if text.as_bytes().get(pos) == Some(&b'*')
-            && text.as_bytes().get(pos + 1) == Some(&b'*')
-        {
+        if text.as_bytes().get(pos) == Some(&b'*') && text.as_bytes().get(pos + 1) == Some(&b'*') {
             if in_bold {
                 html.push_str("</strong>");
             } else {
                 html.push_str("<strong>");
             }
             in_bold = !in_bold;
-            found   = true;
-            pos    += 2;
+            found = true;
+            pos += 2;
             continue;
         }
 
@@ -131,8 +135,7 @@ fn build(text: &str, label_for: impl Fn(&str) -> String) -> RoomMessageEventCont
         if text.as_bytes()[pos] == b'@' {
             let token_len = text[pos..]
                 .find(|c: char| {
-                    c.is_whitespace()
-                        || matches!(c, ',' | '!' | '?' | '*' | ')' | ']' | '"' | '\'')
+                    c.is_whitespace() || matches!(c, ',' | '!' | '?' | '*' | ')' | ']' | '"' | '\'')
                 })
                 .unwrap_or(text.len() - pos);
 
@@ -157,12 +160,15 @@ fn build(text: &str, label_for: impl Fn(&str) -> String) -> RoomMessageEventCont
         let ch = text[pos..].chars().next().unwrap();
         plain.push(ch);
         match ch {
-            '&'  => html.push_str("&amp;"),
-            '<'  => html.push_str("&lt;"),
-            '>'  => html.push_str("&gt;"),
-            '"'  => html.push_str("&quot;"),
-            '\n' => { html.push_str("<br>"); found = true; }
-            _    => html.push(ch),
+            '&' => html.push_str("&amp;"),
+            '<' => html.push_str("&lt;"),
+            '>' => html.push_str("&gt;"),
+            '"' => html.push_str("&quot;"),
+            '\n' => {
+                html.push_str("<br>");
+                found = true;
+            }
+            _ => html.push(ch),
         }
         pos += ch.len_utf8();
     }
@@ -187,15 +193,12 @@ fn build(text: &str, label_for: impl Fn(&str) -> String) -> RoomMessageEventCont
 
 #[cfg(test)]
 mod tests {
-    use matrix_sdk::ruma::events::room::message::MessageType;
     use super::*;
+    use matrix_sdk::ruma::events::room::message::MessageType;
 
     fn bodies(c: &RoomMessageEventContent) -> (String, Option<String>) {
         match &c.msgtype {
-            MessageType::Text(t) => (
-                t.body.clone(),
-                t.formatted.as_ref().map(|f| f.body.clone()),
-            ),
+            MessageType::Text(t) => (t.body.clone(), t.formatted.as_ref().map(|f| f.body.clone())),
             _ => panic!("unexpected msgtype"),
         }
     }
@@ -272,7 +275,10 @@ mod tests {
         // clients/servers key push/highlight behaviour off `m.mentions`.
         let c = mentionify("Hello @alice:example.org!");
         let mentions = c.mentions.expect("m.mentions must be set");
-        assert_eq!(mentions.user_ids, [uid("@alice:example.org")].into_iter().collect());
+        assert_eq!(
+            mentions.user_ids,
+            [uid("@alice:example.org")].into_iter().collect()
+        );
         assert!(!mentions.room);
     }
 

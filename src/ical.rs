@@ -5,10 +5,7 @@
 //!
 //! Determinism guarantee: identical snapshot + identical person_id → identical bytes.
 
-use crate::{
-    domain::PersonId,
-    schedule::ScheduleSnapshot,
-};
+use crate::{domain::PersonId, schedule::ScheduleSnapshot};
 
 /// Render an RFC 5545–compliant `.ics` string for a specific person.
 ///
@@ -18,9 +15,13 @@ use crate::{
 pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
     let assignments = snapshot.for_person(person_id);
 
-    let dtstamp = snapshot.state_timestamp.format("%Y%m%dT%H%M%SZ").to_string();
+    let dtstamp = snapshot
+        .state_timestamp
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string();
 
-    let person_name = assignments.first()
+    let person_name = assignments
+        .first()
         .and_then(|a| a.assignee.as_ref())
         .map(|p| p.name.as_str())
         .unwrap_or("?");
@@ -28,7 +29,9 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
     let mut events = String::new();
     for a in &assignments {
         let dtstart = a.week_monday.format("%Y%m%d").to_string();
-        let dtend   = (a.week_sunday + chrono::Duration::days(1)).format("%Y%m%d").to_string();
+        let dtend = (a.week_sunday + chrono::Duration::days(1))
+            .format("%Y%m%d")
+            .to_string();
         let summary = ical_text(&format!("🧹 {}", a.group_name));
 
         let mut desc_parts = vec![a.week_label.clone()];
@@ -36,9 +39,18 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
             desc_parts.push(format!("Rooms: {}", a.room_names.join(", ")));
         }
         // Show other assignees from the same group this week (siblings in snapshot).
-        let others: Vec<&str> = snapshot.assignments.iter()
-            .filter(|b| b.group_id == a.group_id && b.iso_year == a.iso_year && b.iso_week == a.iso_week
-                && b.assignee.as_ref().map(|p| &p.id != person_id).unwrap_or(false))
+        let others: Vec<&str> = snapshot
+            .assignments
+            .iter()
+            .filter(|b| {
+                b.group_id == a.group_id
+                    && b.iso_year == a.iso_year
+                    && b.iso_week == a.iso_week
+                    && b.assignee
+                        .as_ref()
+                        .map(|p| &p.id != person_id)
+                        .unwrap_or(false)
+            })
             .filter_map(|b| b.assignee.as_ref().map(|p| p.name.as_str()))
             .collect();
         if !others.is_empty() {
@@ -54,23 +66,29 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
         let description = ical_text(&desc_parts.join("\n"));
 
         events.push_str("BEGIN:VEVENT\r\n");
-        prop(&mut events, "UID",                &a.uid);
-        prop(&mut events, "DTSTAMP",            &dtstamp);
+        prop(&mut events, "UID", &a.uid);
+        prop(&mut events, "DTSTAMP", &dtstamp);
         prop(&mut events, "DTSTART;VALUE=DATE", &dtstart);
-        prop(&mut events, "DTEND;VALUE=DATE",   &dtend);
-        prop(&mut events, "SUMMARY",            &summary);
-        prop(&mut events, "DESCRIPTION",        &description);
-        if a.is_completed { prop(&mut events, "STATUS", "COMPLETED"); }
+        prop(&mut events, "DTEND;VALUE=DATE", &dtend);
+        prop(&mut events, "SUMMARY", &summary);
+        prop(&mut events, "DESCRIPTION", &description);
+        if a.is_completed {
+            prop(&mut events, "STATUS", "COMPLETED");
+        }
         events.push_str("END:VEVENT\r\n");
     }
 
     let mut out = String::new();
     out.push_str("BEGIN:VCALENDAR\r\n");
-    prop(&mut out, "VERSION",       "2.0");
-    prop(&mut out, "PRODID",        "-//Cleaning Bot//EN");
-    prop(&mut out, "CALSCALE",      "GREGORIAN");
-    prop(&mut out, "METHOD",        "PUBLISH");
-    prop(&mut out, "X-WR-CALNAME", &ical_text(&format!("Putzplan – {person_name}")));
+    prop(&mut out, "VERSION", "2.0");
+    prop(&mut out, "PRODID", "-//Cleaning Bot//EN");
+    prop(&mut out, "CALSCALE", "GREGORIAN");
+    prop(&mut out, "METHOD", "PUBLISH");
+    prop(
+        &mut out,
+        "X-WR-CALNAME",
+        &ical_text(&format!("Putzplan – {person_name}")),
+    );
     out.push_str(&events);
     out.push_str("END:VCALENDAR\r\n");
     out
@@ -80,10 +98,10 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
 
 fn ical_text(s: &str) -> String {
     s.replace('\\', "\\\\")
-     .replace(';', "\\;")
-     .replace(',', "\\,")
-     .replace('\n', "\\n")
-     .replace('\r', "")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace('\n', "\\n")
+        .replace('\r', "")
 }
 
 fn prop(out: &mut String, name: &str, value: &str) {
@@ -119,18 +137,18 @@ fn char_boundary(s: &str, max: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use crate::{
         domain::{CleaningGroup, Person},
         schedule::build_schedule,
         state::State,
     };
+    use chrono::Utc;
 
     fn make_state() -> State {
         let mut st = State::default();
-        st.created_at  = Some(Utc::now());
+        st.created_at = Some(Utc::now());
         st.last_modified = st.created_at;
-        let p  = Person::new_matrix("@alice:example.org");
+        let p = Person::new_matrix("@alice:example.org");
         let id = p.id.clone();
         st.persons.push(p);
         let mut g = CleaningGroup::new("Kitchen");
@@ -141,19 +159,19 @@ mod tests {
 
     #[test]
     fn ics_output_is_deterministic() {
-        let st  = make_state();
+        let st = make_state();
         let sn1 = build_schedule(&st, 1, 4);
         let sn2 = build_schedule(&st, 1, 4);
-        let id  = &st.persons[0].id;
+        let id = &st.persons[0].id;
         assert_eq!(render_ics(&sn1, id), render_ics(&sn2, id));
     }
 
     #[test]
     fn ics_contains_stable_uids() {
-        let st  = make_state();
+        let st = make_state();
         let sn1 = build_schedule(&st, 1, 2);
         let sn2 = build_schedule(&st, 1, 2);
-        let id  = &st.persons[0].id;
+        let id = &st.persons[0].id;
         let body1 = render_ics(&sn1, id);
         let body2 = render_ics(&sn2, id);
         // Extract all UID lines and compare.
@@ -168,7 +186,10 @@ mod tests {
         let st = make_state();
         let sn = build_schedule(&st, 1, 4);
         let ics = render_ics(&sn, &"not-a-real-uuid".to_owned());
-        assert!(!ics.contains("BEGIN:VEVENT"), "no events for unknown person");
+        assert!(
+            !ics.contains("BEGIN:VEVENT"),
+            "no events for unknown person"
+        );
     }
 
     #[test]

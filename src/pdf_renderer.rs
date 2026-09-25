@@ -17,12 +17,14 @@ pub async fn tex_to_pdf(tex: &str) -> Result<Vec<u8>> {
     let tex_path = tmp.path().join("schedule.tex");
     let pdf_path = tmp.path().join("schedule.pdf");
 
-    tokio::fs::write(&tex_path, tex.as_bytes()).await
+    tokio::fs::write(&tex_path, tex.as_bytes())
+        .await
         .context("Failed to write temp .tex file")?;
 
     let out = tokio::process::Command::new("tectonic")
         .args([
-            "--outdir", tmp.path().to_str().unwrap(),
+            "--outdir",
+            tmp.path().to_str().unwrap(),
             "--print",
             tex_path.to_str().unwrap(),
         ])
@@ -42,6 +44,7 @@ pub async fn tex_to_pdf(tex: &str) -> Result<Vec<u8>> {
         anyhow::bail!("tectonic exited {}: {}", out.status, detail);
     }
 
-    tokio::fs::read(&pdf_path).await
+    tokio::fs::read(&pdf_path)
+        .await
         .context("tectonic succeeded but PDF output file not found")
 }

@@ -49,24 +49,35 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
 
     let mut body = String::new();
     for (gi, (group_id, group_name)) in group_order.iter().enumerate() {
-        let rows: Vec<_> = snapshot.assignments.iter()
+        let rows: Vec<_> = snapshot
+            .assignments
+            .iter()
             .filter(|a| &a.group_id == group_id)
             .collect();
 
-        if rows.is_empty() { continue; }
+        if rows.is_empty() {
+            continue;
+        }
 
         let date_range = match (rows.first(), rows.last()) {
-            (Some(f), Some(l)) if f.week_monday != l.week_sunday =>
-                format!("{} -- {}",
-                    f.week_monday.format("%d %b %Y"),
-                    l.week_sunday.format("%d %b %Y")),
+            (Some(f), Some(l)) if f.week_monday != l.week_sunday => format!(
+                "{} -- {}",
+                f.week_monday.format("%d %b %Y"),
+                l.week_sunday.format("%d %b %Y")
+            ),
             (Some(f), _) => f.week_label.clone(),
             _ => String::new(),
         };
 
-        if gi > 0 { body.push_str("\n\\clearpage\n\n"); }
+        if gi > 0 {
+            body.push_str("\n\\clearpage\n\n");
+        }
         body.push_str(&group_section(
-            group_name, &date_range, snapshot.interval_weeks, &generated, &rows,
+            group_name,
+            &date_range,
+            snapshot.interval_weeks,
+            &generated,
+            &rows,
         ));
     }
 
@@ -78,9 +89,9 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
 fn group_section(
     group_name: &str,
     date_range: &str,
-    interval:   u32,
-    generated:  &str,
-    rows:       &[&crate::schedule::AssignmentInstance],
+    interval: u32,
+    generated: &str,
+    rows: &[&crate::schedule::AssignmentInstance],
 ) -> String {
     let (fsize, fskip) = font_size_for_rows(rows.len());
     let mut s = String::new();
@@ -101,7 +112,9 @@ fn group_section(
     s.push_str(&format!(
         "{{\\fontsize{{7.5}}{{9.5}}\\selectfont\\itshape \
          {} $\\cdot$ Every {} week(s) $\\cdot$ Generated {}}}\n",
-        tex_esc(date_range), interval, tex_esc(generated),
+        tex_esc(date_range),
+        interval,
+        tex_esc(generated),
     ));
     s.push_str("\\vspace{2mm}\n\n");
 
@@ -120,8 +133,10 @@ fn group_section(
 
     // ── First-page header ────────────────────────────────────────────────────
     s.push_str("\\hline\n");
-    s.push_str("\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
-                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n");
+    s.push_str(
+        "\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
+                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n",
+    );
     s.push_str("\\hline\\hline\n");
     s.push_str("\\endfirsthead\n");
 
@@ -131,8 +146,10 @@ fn group_section(
         tex_esc(group_name),
     ));
     s.push_str("\\hline\n");
-    s.push_str("\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
-                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n");
+    s.push_str(
+        "\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
+                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n",
+    );
     s.push_str("\\hline\\hline\n");
     s.push_str("\\endhead\n");
 
@@ -178,14 +195,10 @@ fn group_section(
                 ),
                 // No sub-rooms: render at a readable size regardless of the
                 // table's scaled-down font.
-                Some(slot) => format!(
-                    "{{\\fontsize{{10}}{{13}}\\selectfont {}}}",
-                    tex_esc(slot),
-                ),
-                None if !a.room_names.is_empty() => format!(
-                    "{{\\tiny {}}}",
-                    tex_esc(&a.room_names.join(", ")),
-                ),
+                Some(slot) => format!("{{\\fontsize{{10}}{{13}}\\selectfont {}}}", tex_esc(slot),),
+                None if !a.room_names.is_empty() => {
+                    format!("{{\\tiny {}}}", tex_esc(&a.room_names.join(", ")),)
+                }
                 None => String::new(),
             };
             s.push_str(&area);
@@ -224,7 +237,7 @@ fn group_section(
     // Legend.
     s.push_str(
         "{\\fontsize{6.5}{8}\\selectfont\\hfill \
-         $\\checkmark$ = done}\n"
+         $\\checkmark$ = done}\n",
     );
 
     s
@@ -238,9 +251,9 @@ fn group_section(
 fn font_size_for_rows(n: usize) -> (&'static str, &'static str) {
     match n {
         0..=25 => ("10", "13"),
-        26..=34 => ("9",  "11"),
-        35..=45 => ("8",  "10"),
-        _       => ("7",  "9"),
+        26..=34 => ("9", "11"),
+        35..=45 => ("8", "10"),
+        _ => ("7", "9"),
     }
 }
 
@@ -249,20 +262,20 @@ fn tex_esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         match c {
-            '&'  => out.push_str(r"\&"),
-            '%'  => out.push_str(r"\%"),
-            '$'  => out.push_str(r"\$"),
-            '#'  => out.push_str(r"\#"),
-            '_'  => out.push_str(r"\_"),
-            '{'  => out.push_str(r"\{"),
-            '}'  => out.push_str(r"\}"),
-            '~'  => out.push_str(r"\textasciitilde{}"),
-            '^'  => out.push_str(r"\textasciicircum{}"),
+            '&' => out.push_str(r"\&"),
+            '%' => out.push_str(r"\%"),
+            '$' => out.push_str(r"\$"),
+            '#' => out.push_str(r"\#"),
+            '_' => out.push_str(r"\_"),
+            '{' => out.push_str(r"\{"),
+            '}' => out.push_str(r"\}"),
+            '~' => out.push_str(r"\textasciitilde{}"),
+            '^' => out.push_str(r"\textasciicircum{}"),
             '\\' => out.push_str(r"\textbackslash{}"),
             // Unicode dashes: map to LaTeX ligatures (pdfLaTeX drops raw U+2013/U+2014).
-            '\u{2013}' => out.push_str("--"),   // en dash
-            '\u{2014}' => out.push_str("---"),  // em dash
-            c    => out.push(c),
+            '\u{2013}' => out.push_str("--"),  // en dash
+            '\u{2014}' => out.push_str("---"), // em dash
+            c => out.push(c),
         }
     }
     out
@@ -273,18 +286,18 @@ fn tex_esc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use crate::{
         domain::{CleaningGroup, Person},
         schedule::build_schedule,
         state::State,
     };
+    use chrono::Utc;
 
     fn make_state() -> State {
         let mut st = State::default();
-        st.created_at    = Some(Utc::now());
+        st.created_at = Some(Utc::now());
         st.last_modified = st.created_at;
-        let p  = Person::new_matrix("@bob:example.org");
+        let p = Person::new_matrix("@bob:example.org");
         let id = p.id.clone();
         st.persons.push(p);
         let mut g = CleaningGroup::new("Hallway");
@@ -295,7 +308,7 @@ mod tests {
 
     #[test]
     fn tex_output_is_deterministic() {
-        let st  = make_state();
+        let st = make_state();
         let sn1 = build_schedule(&st, 1, 4);
         let sn2 = build_schedule(&st, 1, 4);
         assert_eq!(render_tex(&sn1), render_tex(&sn2));
@@ -303,18 +316,24 @@ mod tests {
 
     #[test]
     fn tex_contains_group_name() {
-        let st  = make_state();
-        let sn  = build_schedule(&st, 1, 2);
+        let st = make_state();
+        let sn = build_schedule(&st, 1, 2);
         let tex = render_tex(&sn);
-        assert!(tex.contains("Hallway"), "group name must appear in .tex output");
+        assert!(
+            tex.contains("Hallway"),
+            "group name must appear in .tex output"
+        );
     }
 
     #[test]
     fn tex_column_headers_are_english() {
-        let st  = make_state();
-        let sn  = build_schedule(&st, 1, 2);
+        let st = make_state();
+        let sn = build_schedule(&st, 1, 2);
         let tex = render_tex(&sn);
-        assert!(tex.contains("Responsible"), "column headers must be in English");
+        assert!(
+            tex.contains("Responsible"),
+            "column headers must be in English"
+        );
         assert!(tex.contains("Area / Rooms"));
         assert!(!tex.contains("Putzplan"));
     }
@@ -331,11 +350,14 @@ mod tests {
             g.member_ids.push(pid);
             st.cleaning_groups.push(g);
         }
-        let sn  = build_schedule(&st, 1, 2);
+        let sn = build_schedule(&st, 1, 2);
         let tex = render_tex(&sn);
         assert!(tex.contains("Floor A"));
         assert!(tex.contains("Floor B"));
-        assert!(tex.contains(r"\clearpage"), "groups must be separated by \\clearpage");
+        assert!(
+            tex.contains(r"\clearpage"),
+            "groups must be separated by \\clearpage"
+        );
     }
 
     #[test]
@@ -351,10 +373,16 @@ mod tests {
 
     #[test]
     fn uses_longtable_not_tabularx() {
-        let st  = make_state();
-        let sn  = build_schedule(&st, 1, 2);
+        let st = make_state();
+        let sn = build_schedule(&st, 1, 2);
         let tex = render_tex(&sn);
-        assert!(tex.contains("longtable"), "must use longtable for page-breaking");
-        assert!(!tex.contains("tabularx"), "tabularx cannot break across pages");
+        assert!(
+            tex.contains("longtable"),
+            "must use longtable for page-breaking"
+        );
+        assert!(
+            !tex.contains("tabularx"),
+            "tabularx cannot break across pages"
+        );
     }
 }

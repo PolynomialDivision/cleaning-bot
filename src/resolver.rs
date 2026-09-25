@@ -52,17 +52,24 @@ use crate::{
 /// restarting it at `member_ids[0]`.
 pub fn reconcile_queue(state: &State, group: &CleaningGroup) -> Vec<PersonId> {
     let known: HashSet<&PersonId> = group.member_ids.iter().collect();
-    let mut queue: Vec<PersonId> = group.rotation_queue.iter()
+    let mut queue: Vec<PersonId> = group
+        .rotation_queue
+        .iter()
         .filter(|id| known.contains(id))
         .cloned()
         .collect();
 
     if queue.is_empty() && !group.member_ids.is_empty() {
-        let prior = state.slot_assignments.iter()
+        let prior = state
+            .slot_assignments
+            .iter()
             .filter(|a| a.group_id == group.id && a.person_id.is_some())
             .count();
         let shift = prior % group.member_ids.len();
-        queue = group.member_ids.iter().cloned()
+        queue = group
+            .member_ids
+            .iter()
+            .cloned()
             .cycle()
             .skip(shift)
             .take(group.member_ids.len())
@@ -85,13 +92,17 @@ pub fn reconcile_queue(state: &State, group: &CleaningGroup) -> Vec<PersonId> {
 /// repeatedly, and it never revisits or changes a week it already froze —
 /// callers rely on that to make join/leave additive rather than destructive.
 pub fn materialize(state: &State, interval: u32, weeks_ahead: usize) -> Vec<DomainEvent> {
-    if weeks_ahead == 0 { return vec![]; }
+    if weeks_ahead == 0 {
+        return vec![];
+    }
 
     let first_due = first_due_week(state, interval);
     let mut events: Vec<DomainEvent> = Vec::new();
 
     for group in &state.cleaning_groups {
-        if group.member_ids.is_empty() { continue; }
+        if group.member_ids.is_empty() {
+            continue;
+        }
         let num_slots = group.slots.len().max(1);
         let mut queue = reconcile_queue(state, group);
         let mut any_pop = false;
@@ -110,8 +121,10 @@ pub fn materialize(state: &State, interval: u32, weeks_ahead: usize) -> Vec<Doma
             for si in 0..num_slots {
                 // Skip if already frozen — this is what makes materialize additive.
                 if state.slot_assignments.iter().any(|a| {
-                    a.group_id == group.id && a.slot_index == si
-                        && a.iso_year == dy && a.iso_week == dw
+                    a.group_id == group.id
+                        && a.slot_index == si
+                        && a.iso_year == dy
+                        && a.iso_week == dw
                 }) {
                     continue;
                 }
@@ -137,12 +150,12 @@ pub fn materialize(state: &State, interval: u32, weeks_ahead: usize) -> Vec<Doma
                 };
 
                 events.push(DomainEvent::SlotAssigned {
-                    group_id:   group.id.clone(),
+                    group_id: group.id.clone(),
                     slot_index: si,
-                    iso_year:   dy,
-                    iso_week:   dw,
+                    iso_year: dy,
+                    iso_week: dw,
                     person_id,
-                    source:     AssignmentSource::RoundRobin,
+                    source: AssignmentSource::RoundRobin,
                     // Automatic — nobody "did" this, and materialize only
                     // ever fills a not-yet-frozen slot, so there is no prior
                     // occupant to record either.
@@ -153,7 +166,10 @@ pub fn materialize(state: &State, interval: u32, weeks_ahead: usize) -> Vec<Doma
         }
 
         if any_pop {
-            events.push(DomainEvent::RotationQueueSet { group_id: group.id.clone(), queue });
+            events.push(DomainEvent::RotationQueueSet {
+                group_id: group.id.clone(),
+                queue,
+            });
         }
     }
 
@@ -176,17 +192,30 @@ pub fn preview_slot_assignee(
 ) -> Option<PersonId> {
     let first_due = first_due_week(state, interval);
     let target_offset = weeks_between(first_due, (year, week));
-    if target_offset < 0 { return None; }
+    if target_offset < 0 {
+        return None;
+    }
     let weeks_ahead = (target_offset as usize) / (interval.max(1) as usize) + 1;
 
-    materialize(state, interval, weeks_ahead).into_iter().find_map(|e| match e {
-        DomainEvent::SlotAssigned { group_id, slot_index: si, iso_year, iso_week, person_id, .. }
-            if group_id == group.id && si == slot_index && iso_year == year && iso_week == week =>
-        {
-            person_id
-        }
-        _ => None,
-    })
+    materialize(state, interval, weeks_ahead)
+        .into_iter()
+        .find_map(|e| match e {
+            DomainEvent::SlotAssigned {
+                group_id,
+                slot_index: si,
+                iso_year,
+                iso_week,
+                person_id,
+                ..
+            } if group_id == group.id
+                && si == slot_index
+                && iso_year == year
+                && iso_week == week =>
+            {
+                person_id
+            }
+            _ => None,
+        })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -194,8 +223,11 @@ pub fn preview_slot_assignee(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        domain::{CleaningGroup, CleaningSlot, Person},
+        state::State,
+    };
     use chrono::Utc;
-    use crate::{domain::{CleaningGroup, CleaningSlot, Person}, state::State};
 
     fn two_person_state() -> (State, String, String) {
         let mut st = State::default();
@@ -228,10 +260,15 @@ mod tests {
         let (mut st, id1, _id2) = two_person_state();
         // Store the first assignment manually.
         let first_evs = materialize(&st, 1, 1);
-        for ev in &first_evs { st.apply_event(ev.clone()).unwrap(); }
+        for ev in &first_evs {
+            st.apply_event(ev.clone()).unwrap();
+        }
         // Running materialize again should produce no new events for week 1.
         let second_evs = materialize(&st, 1, 1);
-        assert!(second_evs.is_empty(), "should skip already-stored assignment");
+        assert!(
+            second_evs.is_empty(),
+            "should skip already-stored assignment"
+        );
         // The stored assignment should still be Alice.
         let stored = &st.slot_assignments[0];
         assert_eq!(stored.person_id.as_deref(), Some(id1.as_str()));
@@ -242,21 +279,32 @@ mod tests {
         let (mut st, id1, id2) = two_person_state();
         // Materialize week 1 (Alice) and week 2 (Bob).
         let evs = materialize(&st, 1, 2);
-        for ev in evs { st.apply_event(ev).unwrap(); }
+        for ev in evs {
+            st.apply_event(ev).unwrap();
+        }
 
         // Alice leaves.
         let gid = st.cleaning_groups[0].id.clone();
-        st.apply_event(DomainEvent::PersonLeftGroup { person_id: id1.clone(), group_id: gid }).unwrap();
+        st.apply_event(DomainEvent::PersonLeftGroup {
+            person_id: id1.clone(),
+            group_id: gid,
+        })
+        .unwrap();
 
         // Materialize week 3: only Bob remains in member_ids, so reconcile_queue
         // drops Alice even though nothing explicitly touched the stored queue.
         let new_evs = materialize(&st, 1, 3);
-        let unfrozen: Vec<_> = new_evs.iter()
+        let unfrozen: Vec<_> = new_evs
+            .iter()
             .filter(|e| matches!(e, DomainEvent::SlotAssigned { .. }))
             .collect();
         assert!(!unfrozen.is_empty());
         if let DomainEvent::SlotAssigned { person_id, .. } = &unfrozen[0] {
-            assert_eq!(person_id.as_deref(), Some(id2.as_str()), "Bob should be next");
+            assert_eq!(
+                person_id.as_deref(),
+                Some(id2.as_str()),
+                "Bob should be next"
+            );
         }
     }
 
@@ -264,26 +312,41 @@ mod tests {
     fn multi_slot_round_robin() {
         let mut st = State::default();
         st.created_at = Some(Utc::now());
-        let people: Vec<Person> = (0..4).map(|i| Person::new_named(&format!("P{i}"))).collect();
+        let people: Vec<Person> = (0..4)
+            .map(|i| Person::new_named(&format!("P{i}")))
+            .collect();
         let ids: Vec<_> = people.iter().map(|p| p.id.clone()).collect();
         st.persons.extend(people);
 
         let mut g = CleaningGroup::new("Floor");
         g.member_ids.extend(ids.clone());
-        let mut s0 = CleaningSlot::new("Scharni"); s0.id = "s0".into();
-        let mut s1 = CleaningSlot::new("Colbe");   s1.id = "s1".into();
+        let mut s0 = CleaningSlot::new("Scharni");
+        s0.id = "s0".into();
+        let mut s1 = CleaningSlot::new("Colbe");
+        s1.id = "s1".into();
         g.slots.extend([s0, s1]);
         st.cleaning_groups.push(g);
 
         let evs = materialize(&st, 1, 2);
-        let slot_evs: Vec<_> = evs.iter().filter(|e| matches!(e, DomainEvent::SlotAssigned { .. })).collect();
+        let slot_evs: Vec<_> = evs
+            .iter()
+            .filter(|e| matches!(e, DomainEvent::SlotAssigned { .. }))
+            .collect();
         assert_eq!(slot_evs.len(), 4);
         // Week1/slot0 → P0, Week1/slot1 → P1, Week2/slot0 → P2, Week2/slot1 → P3.
-        if let (DomainEvent::SlotAssigned { person_id: p0, .. }, DomainEvent::SlotAssigned { person_id: p1, .. }) = (slot_evs[0], slot_evs[1]) {
+        if let (
+            DomainEvent::SlotAssigned { person_id: p0, .. },
+            DomainEvent::SlotAssigned { person_id: p1, .. },
+        ) = (slot_evs[0], slot_evs[1])
+        {
             assert_eq!(p0.as_deref(), Some(ids[0].as_str()));
             assert_eq!(p1.as_deref(), Some(ids[1].as_str()));
         }
-        if let (DomainEvent::SlotAssigned { person_id: p2, .. }, DomainEvent::SlotAssigned { person_id: p3, .. }) = (slot_evs[2], slot_evs[3]) {
+        if let (
+            DomainEvent::SlotAssigned { person_id: p2, .. },
+            DomainEvent::SlotAssigned { person_id: p3, .. },
+        ) = (slot_evs[2], slot_evs[3])
+        {
             assert_eq!(p2.as_deref(), Some(ids[2].as_str()));
             assert_eq!(p3.as_deref(), Some(ids[3].as_str()));
         }
@@ -293,7 +356,10 @@ mod tests {
     fn three_person_rotation_cycles_stably() {
         let mut st = State::default();
         st.created_at = Some(Utc::now());
-        let people: Vec<Person> = ["Anna", "Bob", "Carla"].iter().map(|n| Person::new_named(n)).collect();
+        let people: Vec<Person> = ["Anna", "Bob", "Carla"]
+            .iter()
+            .map(|n| Person::new_named(n))
+            .collect();
         let ids: Vec<_> = people.iter().map(|p| p.id.clone()).collect();
         st.persons.extend(people);
         let mut g = CleaningGroup::new("Floor");
@@ -301,14 +367,24 @@ mod tests {
         st.cleaning_groups.push(g);
 
         let evs = materialize(&st, 1, 6);
-        let names: Vec<Option<String>> = evs.iter().filter_map(|e| match e {
-            DomainEvent::SlotAssigned { person_id, .. } => Some(person_id.clone()),
-            _ => None,
-        }).collect();
-        assert_eq!(names, vec![
-            Some(ids[0].clone()), Some(ids[1].clone()), Some(ids[2].clone()),
-            Some(ids[0].clone()), Some(ids[1].clone()), Some(ids[2].clone()),
-        ]);
+        let names: Vec<Option<String>> = evs
+            .iter()
+            .filter_map(|e| match e {
+                DomainEvent::SlotAssigned { person_id, .. } => Some(person_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                Some(ids[0].clone()),
+                Some(ids[1].clone()),
+                Some(ids[2].clone()),
+                Some(ids[0].clone()),
+                Some(ids[1].clone()),
+                Some(ids[2].clone()),
+            ]
+        );
     }
 
     #[test]
@@ -334,11 +410,17 @@ mod tests {
         // populated (as if this state.json predates the field).
         let (mut st, id1, id2) = two_person_state();
         let gid = st.cleaning_groups[0].id.clone();
-        for (i, pid) in [id1.clone(), id2.clone(), id1.clone()].into_iter().enumerate() {
+        for (i, pid) in [id1.clone(), id2.clone(), id1.clone()]
+            .into_iter()
+            .enumerate()
+        {
             st.slot_assignments.push(crate::domain::SlotAssignment {
-                group_id: gid.clone(), slot_index: 0,
-                iso_year: 2020, iso_week: (i + 1) as u32,
-                person_id: Some(pid), source: Default::default(),
+                group_id: gid.clone(),
+                slot_index: 0,
+                iso_year: 2020,
+                iso_week: (i + 1) as u32,
+                person_id: Some(pid),
+                source: Default::default(),
             });
         }
         st.cleaning_groups[0].rotation_queue.clear();
@@ -348,10 +430,16 @@ mod tests {
         assert_eq!(queue, vec![id2, id1]);
     }
 
-    fn make_group(name: &str, member_count: usize, slot_count: usize) -> (State, crate::domain::GroupId, Vec<PersonId>) {
+    fn make_group(
+        name: &str,
+        member_count: usize,
+        slot_count: usize,
+    ) -> (State, crate::domain::GroupId, Vec<PersonId>) {
         let mut st = State::default();
         st.created_at = Some(Utc::now());
-        let people: Vec<Person> = (0..member_count).map(|i| Person::new_named(&format!("P{i}"))).collect();
+        let people: Vec<Person> = (0..member_count)
+            .map(|i| Person::new_named(&format!("P{i}")))
+            .collect();
         let ids: Vec<_> = people.iter().map(|p| p.id.clone()).collect();
         st.persons.extend(people);
         let mut g = CleaningGroup::new(name);
@@ -366,14 +454,21 @@ mod tests {
         (st, gid, ids)
     }
 
-    fn week_slot_picks(evs: &[DomainEvent], week_index: usize, num_slots: usize) -> Vec<Option<PersonId>> {
-        let slot_evs: Vec<_> = evs.iter().filter(|e| matches!(e, DomainEvent::SlotAssigned { .. })).collect();
-        (0..num_slots).map(|si| {
-            match slot_evs[week_index * num_slots + si] {
+    fn week_slot_picks(
+        evs: &[DomainEvent],
+        week_index: usize,
+        num_slots: usize,
+    ) -> Vec<Option<PersonId>> {
+        let slot_evs: Vec<_> = evs
+            .iter()
+            .filter(|e| matches!(e, DomainEvent::SlotAssigned { .. }))
+            .collect();
+        (0..num_slots)
+            .map(|si| match slot_evs[week_index * num_slots + si] {
                 DomainEvent::SlotAssigned { person_id, .. } => person_id.clone(),
                 _ => unreachable!(),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     #[test]
@@ -382,7 +477,10 @@ mod tests {
         let evs = materialize(&st, 1, 1);
         let week0 = week_slot_picks(&evs, 0, 2);
         assert_eq!(week0[0], Some(ids[0].clone()), "the one member gets slot 0");
-        assert_eq!(week0[1], None, "slot 1 must stay unassigned, not double-book P0");
+        assert_eq!(
+            week0[1], None,
+            "slot 1 must stay unassigned, not double-book P0"
+        );
     }
 
     #[test]
@@ -392,7 +490,10 @@ mod tests {
         let week0 = week_slot_picks(&evs, 0, 3);
         assert_eq!(week0[0], Some(ids[0].clone()));
         assert_eq!(week0[1], Some(ids[1].clone()));
-        assert_eq!(week0[2], None, "no third distinct member — must not repeat P0");
+        assert_eq!(
+            week0[2], None,
+            "no third distinct member — must not repeat P0"
+        );
 
         // Next week: with only 2 people ever available, both are drawn
         // again (2 picks exactly returns a 2-length queue to its starting
@@ -428,19 +529,37 @@ mod tests {
         // Simulates dashboard refreshes / repeated bot restarts hitting the
         // same already-materialized range: must never advance the queue.
         let (mut st, id1, id2) = two_person_state();
-        for ev in materialize(&st, 1, 4) { st.apply_event(ev).unwrap(); }
+        for ev in materialize(&st, 1, 4) {
+            st.apply_event(ev).unwrap();
+        }
         let queue_after_first = st.cleaning_groups[0].rotation_queue.clone();
-        let assignments_after_first: Vec<_> = st.slot_assignments.iter().map(|a| (a.iso_week, a.person_id.clone())).collect();
+        let assignments_after_first: Vec<_> = st
+            .slot_assignments
+            .iter()
+            .map(|a| (a.iso_week, a.person_id.clone()))
+            .collect();
 
         // "Refresh" three more times with the identical horizon.
         for _ in 0..3 {
             let evs = materialize(&st, 1, 4);
-            assert!(evs.is_empty(), "re-materializing the same horizon must produce zero events");
-            for ev in evs { st.apply_event(ev).unwrap(); }
+            assert!(
+                evs.is_empty(),
+                "re-materializing the same horizon must produce zero events"
+            );
+            for ev in evs {
+                st.apply_event(ev).unwrap();
+            }
         }
 
-        assert_eq!(st.cleaning_groups[0].rotation_queue, queue_after_first, "queue must not drift");
-        let assignments_after: Vec<_> = st.slot_assignments.iter().map(|a| (a.iso_week, a.person_id.clone())).collect();
+        assert_eq!(
+            st.cleaning_groups[0].rotation_queue, queue_after_first,
+            "queue must not drift"
+        );
+        let assignments_after: Vec<_> = st
+            .slot_assignments
+            .iter()
+            .map(|a| (a.iso_week, a.person_id.clone()))
+            .collect();
         assert_eq!(assignments_after, assignments_after_first);
         let _ = (id1, id2);
     }
@@ -455,9 +574,12 @@ mod tests {
         let weeks: Vec<(i32, u32)> = (-2..2i64).map(|n| add_weeks(cur_y, cur_w, n)).collect();
         for (i, &(y, w)) in weeks.iter().enumerate() {
             st.slot_assignments.push(crate::domain::SlotAssignment {
-                group_id: gid.clone(), slot_index: 0,
-                iso_year: y, iso_week: w,
-                person_id: Some(ids[i % 3].clone()), source: Default::default(),
+                group_id: gid.clone(),
+                slot_index: 0,
+                iso_year: y,
+                iso_week: w,
+                person_id: Some(ids[i % 3].clone()),
+                source: Default::default(),
             });
         }
         st.cleaning_groups[0].rotation_queue.clear();
@@ -473,9 +595,14 @@ mod tests {
         let b = materialize(&st, 1, 4);
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
         for ev in a {
-            if let DomainEvent::SlotAssigned { iso_year, iso_week, .. } = &ev {
-                assert!(weeks.iter().all(|&(y, w)| (*iso_year, *iso_week) != (y, w)),
-                    "must not re-touch an already-frozen week");
+            if let DomainEvent::SlotAssigned {
+                iso_year, iso_week, ..
+            } = &ev
+            {
+                assert!(
+                    weeks.iter().all(|&(y, w)| (*iso_year, *iso_week) != (y, w)),
+                    "must not re-touch an already-frozen week"
+                );
             }
         }
     }
@@ -485,22 +612,39 @@ mod tests {
         let (st, id1, id2) = two_person_state();
         let interval = 1;
         // Week 5 is beyond what's been materialized (nothing has yet).
-        let (y, w) = add_weeks(first_due_week(&st, interval).0, first_due_week(&st, interval).1, 4);
+        let (y, w) = add_weeks(
+            first_due_week(&st, interval).0,
+            first_due_week(&st, interval).1,
+            4,
+        );
         let group = &st.cleaning_groups[0];
         let preview = preview_slot_assignee(&st, group, 0, y, w, interval);
 
         let evs = materialize(&st, interval, 5);
-        let expected = evs.iter().find_map(|e| match e {
-            DomainEvent::SlotAssigned { iso_year, iso_week, person_id, .. } if *iso_year == y && *iso_week == w => Some(person_id.clone()),
-            _ => None,
-        }).flatten();
+        let expected = evs
+            .iter()
+            .find_map(|e| match e {
+                DomainEvent::SlotAssigned {
+                    iso_year,
+                    iso_week,
+                    person_id,
+                    ..
+                } if *iso_year == y && *iso_week == w => Some(person_id.clone()),
+                _ => None,
+            })
+            .flatten();
         assert_eq!(preview, expected);
         assert!(preview == Some(id1) || preview == Some(id2));
     }
 
     // ── !absent eligibility ──────────────────────────────────────────────
 
-    fn absence(person_id: &PersonId, group_id: &str, from: (i32, u32), duration_weeks: u32) -> crate::state::Absence {
+    fn absence(
+        person_id: &PersonId,
+        group_id: &str,
+        from: (i32, u32),
+        duration_weeks: u32,
+    ) -> crate::state::Absence {
         crate::state::Absence {
             person_id: person_id.clone(),
             group_id: group_id.to_owned(),
@@ -520,9 +664,15 @@ mod tests {
 
         let evs = materialize(&st, 1, 1);
         let picked = week_slot_picks(&evs, 0, 1);
-        assert_eq!(picked[0], Some(bob.clone()), "Bob is next in line after Anna is skipped");
+        assert_eq!(
+            picked[0],
+            Some(bob.clone()),
+            "Bob is next in line after Anna is skipped"
+        );
 
-        for ev in evs { st.apply_event(ev).unwrap(); }
+        for ev in evs {
+            st.apply_event(ev).unwrap();
+        }
         assert_eq!(
             st.cleaning_groups[0].rotation_queue,
             vec![anna, carla, bob],
@@ -541,7 +691,9 @@ mod tests {
         st.absences.push(absence(&anna, &gid, due, 2));
 
         let evs = materialize(&st, 1, 3);
-        let picks: Vec<_> = (0..3).map(|i| week_slot_picks(&evs, i, 1)[0].clone()).collect();
+        let picks: Vec<_> = (0..3)
+            .map(|i| week_slot_picks(&evs, i, 1)[0].clone())
+            .collect();
         assert_eq!(picks, vec![Some(bob), Some(carla), Some(anna)]);
     }
 
@@ -554,19 +706,31 @@ mod tests {
         st.absences.push(absence(&bob, &gid, due, 1));
 
         let evs = materialize(&st, 1, 1);
-        assert_eq!(week_slot_picks(&evs, 0, 1), vec![Some(carla)], "only Carla is eligible");
+        assert_eq!(
+            week_slot_picks(&evs, 0, 1),
+            vec![Some(carla)],
+            "only Carla is eligible"
+        );
     }
 
     #[test]
     fn all_members_absent_leaves_the_slot_unassigned_not_a_fallback_pick() {
         let (mut st, gid, ids) = make_group("Floor", 2, 0);
         let due = first_due_week(&st, 1);
-        for id in &ids { st.absences.push(absence(id, &gid, due, 1)); }
+        for id in &ids {
+            st.absences.push(absence(id, &gid, due, 1));
+        }
 
         let evs = materialize(&st, 1, 1);
-        assert_eq!(week_slot_picks(&evs, 0, 1), vec![None], "nobody eligible — must stay unassigned, not fall back to an absent member");
+        assert_eq!(
+            week_slot_picks(&evs, 0, 1),
+            vec![None],
+            "nobody eligible — must stay unassigned, not fall back to an absent member"
+        );
         // Nobody was actually drawn, so the queue is untouched — no RotationQueueSet.
-        assert!(!evs.iter().any(|e| matches!(e, DomainEvent::RotationQueueSet { .. })));
+        assert!(!evs
+            .iter()
+            .any(|e| matches!(e, DomainEvent::RotationQueueSet { .. })));
     }
 
     #[test]
@@ -580,9 +744,15 @@ mod tests {
 
         let evs = materialize(&st, 1, 1);
         let picked = week_slot_picks(&evs, 0, 2);
-        assert!(picked.iter().all(|p| p.is_some()), "both slots must be filled from the remaining two members");
+        assert!(
+            picked.iter().all(|p| p.is_some()),
+            "both slots must be filled from the remaining two members"
+        );
         assert_ne!(picked[0], picked[1], "must not double-book the same person");
-        assert!(picked.iter().all(|p| p != &Some(anna.clone())), "the absent member must never be drawn");
+        assert!(
+            picked.iter().all(|p| p != &Some(anna.clone())),
+            "the absent member must never be drawn"
+        );
         let picked_set: std::collections::HashSet<_> = picked.into_iter().flatten().collect();
         assert_eq!(picked_set, std::collections::HashSet::from([bob, carla]));
     }
@@ -598,20 +768,35 @@ mod tests {
 
         let a = materialize(&st, 1, 6);
         let b = materialize(&st, 1, 6);
-        assert_eq!(format!("{a:?}"), format!("{b:?}"), "must be a pure function of state");
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{b:?}"),
+            "must be a pure function of state"
+        );
 
-        for ev in a { st.apply_event(ev).unwrap(); }
+        for ev in a {
+            st.apply_event(ev).unwrap();
+        }
         let queue_after_first_pass = st.cleaning_groups[0].rotation_queue.clone();
-        let assignments_after_first_pass: Vec<_> = st.slot_assignments.iter()
-            .map(|a| (a.iso_week, a.person_id.clone())).collect();
+        let assignments_after_first_pass: Vec<_> = st
+            .slot_assignments
+            .iter()
+            .map(|a| (a.iso_week, a.person_id.clone()))
+            .collect();
 
         // Simulate a restart: materialize again over the same now-frozen
         // horizon (idempotent — every slot is already stored).
         let replay_evs = materialize(&st, 1, 6);
-        assert!(replay_evs.is_empty(), "already-frozen weeks must not be revisited on a restart");
+        assert!(
+            replay_evs.is_empty(),
+            "already-frozen weeks must not be revisited on a restart"
+        );
         assert_eq!(st.cleaning_groups[0].rotation_queue, queue_after_first_pass);
-        let assignments_after_replay: Vec<_> = st.slot_assignments.iter()
-            .map(|a| (a.iso_week, a.person_id.clone())).collect();
+        let assignments_after_replay: Vec<_> = st
+            .slot_assignments
+            .iter()
+            .map(|a| (a.iso_week, a.person_id.clone()))
+            .collect();
         assert_eq!(assignments_after_first_pass, assignments_after_replay);
     }
 }
