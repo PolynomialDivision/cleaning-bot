@@ -358,6 +358,18 @@ async fn main() -> Result<()> {
                 {
                     let mut state = ctx.state.lock().await;
                     if let Some(info) = state.greeting_event_ids.get(&reacted_to).cloned() {
+                        // A greeting sent to someone who turns out to be on
+                        // the plan already (e.g. they rejoined) is void.
+                        if info.is_linking
+                            && info.for_user == sender_mxid
+                            && state.person_by_matrix_id(&sender_mxid).is_some_and(|p| p.active)
+                        {
+                            state.greeting_event_ids.remove(&reacted_to);
+                            if let Err(e) = state.save(&ctx.state_path).await {
+                                tracing::error!("Failed to save after dropping greeting: {e}");
+                            }
+                            return;
+                        }
                         if info.for_user == sender_mxid {
                             if let Some(choice) = info.choices.iter().find(|c| c.emoji == emoji_key) {
                                 if info.is_linking {
@@ -564,6 +576,12 @@ async fn main() -> Result<()> {
 
                 {
                     let mut state = ctx.state.lock().await;
+                    // Someone rejoining who is still on the plan needs no
+                    // greeting — their account is already linked.
+                    if let Some(person) = state.person_by_matrix_id(&user_id).filter(|p| p.active) {
+                        info!("{user_id} rejoined — already on the plan as {}", person.display_name);
+                        return;
+                    }
                     if state.greeted_users.contains(&user_id) { return; }
                     state.greeted_users.insert(user_id.clone());
                     if let Err(e) = state.save(&ctx.state_path).await {
