@@ -3478,7 +3478,10 @@ async fn groups_overview_shows_every_group_with_its_members() {
         "{text}"
     );
     assert!(text.contains("Slots: Scharni · Colbe"), "{text}");
-    assert!(text.contains("🚫 Disabled: Storage"), "{text}");
+    assert!(
+        text.contains("🚫 **Storage** (1) · bob · disabled"),
+        "{text}"
+    );
 
     let detail = cmd_groups(&ctx, Some("floor")).await.unwrap().unwrap();
     assert!(detail.contains("🏢 **Floor**"), "{detail}");

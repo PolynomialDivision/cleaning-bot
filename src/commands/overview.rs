@@ -208,13 +208,16 @@ pub(crate) fn groups_text(state: &State) -> String {
         return "No cleaning groups configured yet.".into();
     }
     let (year, week) = current_iso_week();
-    let active: Vec<_> = state
+    let active_count = state.cleaning_groups.iter().filter(|g| g.is_active).count();
+    let mut lines = vec![format!("🏢 **Cleaning groups** ({active_count})")];
+    // Active groups first; disabled ones follow, marked 🚫 but still with
+    // their members.
+    let ordered = state
         .cleaning_groups
         .iter()
         .filter(|g| g.is_active)
-        .collect();
-    let mut lines = vec![format!("🏢 **Cleaning groups** ({})", active.len())];
-    for group in active {
+        .chain(state.cleaning_groups.iter().filter(|g| !g.is_active));
+    for group in ordered {
         let members = state.members_of(group);
         let members_text = if members.is_empty() {
             "no members".to_owned()
@@ -231,25 +234,17 @@ pub(crate) fn groups_text(state: &State) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let marker = if group.is_active { "" } else { "🚫 " };
+        let suffix = if group.is_active { "" } else { " · disabled" };
         lines.push(String::new());
         lines.push(format!(
-            "**{}** ({}) · {members_text}",
+            "{marker}**{}** ({}) · {members_text}{suffix}",
             group.name,
             members.len()
         ));
         if let Some(rooms) = rooms_summary(group) {
             lines.push(rooms);
         }
-    }
-    let disabled: Vec<&str> = state
-        .cleaning_groups
-        .iter()
-        .filter(|g| !g.is_active)
-        .map(|g| g.name.as_str())
-        .collect();
-    if !disabled.is_empty() {
-        lines.push(String::new());
-        lines.push(format!("🚫 Disabled: {}", disabled.join(", ")));
     }
     lines.join("\n")
 }
