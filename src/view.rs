@@ -60,15 +60,38 @@ pub fn relative(turn: Turn, rhythm: &Rhythm, today: NaiveDate) -> String {
     }
 }
 
-/// A person in a message that must not notify anyone: their display name.
-pub fn name(person: &Person) -> &str {
-    &person.display_name
-}
-
 /// A person in a message meant to notify them: their Matrix ID, which the
-/// formatter turns into a pill and a mention — or, without Matrix, the name.
+/// formatter turns into a pill *and* an `m.mentions` entry — or, without
+/// Matrix, the plain name.
 pub fn mention(person: &Person) -> &str {
     person.matrix_id.as_deref().unwrap_or(&person.display_name)
+}
+
+/// A person in a read-only view (`!plan`, `!next`, `!status`, `!groups`):
+/// a `[name](https://matrix.to/#/@user:server)` link, which the formatter
+/// renders as a user pill (clickable, avatar in Element and FluffyChat) but
+/// *without* an `m.mentions` entry, so looking at the plan pings nobody.
+/// Without Matrix — or with an ID that can't sit in a link — the plain name.
+pub fn user_link(person: &Person) -> String {
+    match person.matrix_id.as_deref() {
+        Some(mxid) => link_to(mxid, &person.display_name),
+        None => person.display_name.clone(),
+    }
+}
+
+/// A Matrix ID shown as itself — for "use the Matrix ID instead" — as a
+/// pill that pings nobody, like `user_link`.
+pub fn user_id_link(mxid: &str) -> String {
+    link_to(mxid, mxid)
+}
+
+fn link_to(mxid: &str, label: &str) -> String {
+    let label = label.replace(']', "］").replace('\n', " ");
+    if mxid.contains([')', ' ', '\n']) {
+        // Can't sit in a link; the plain label at least doesn't ping.
+        return label;
+    }
+    format!("[{label}](https://matrix.to/#/{mxid})")
 }
 
 /// How a pinned week came about ("imported", …); `None` for a plain
@@ -91,6 +114,26 @@ pub fn plural(n: usize, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matrix_users_become_links_and_everyone_else_stays_plain() {
+        let mut mia = Person::new_matrix("@mia:example.org");
+        assert_eq!(
+            user_link(&mia),
+            "[mia](https://matrix.to/#/@mia:example.org)"
+        );
+        // A name can't end the link label early.
+        mia.display_name = "Mia [away]".into();
+        assert_eq!(
+            user_link(&mia),
+            "[Mia [away］](https://matrix.to/#/@mia:example.org)"
+        );
+        assert_eq!(user_link(&Person::new_named("Dan")), "Dan");
+        assert_eq!(
+            user_id_link("@mia:example.org"),
+            "[@mia:example.org](https://matrix.to/#/@mia:example.org)"
+        );
+    }
 
     #[test]
     fn week_labels_name_the_year_only_when_it_differs() {

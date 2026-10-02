@@ -47,6 +47,7 @@ use exports::*;
 pub(crate) use helpers::*;
 use maintenance::*;
 use member::*;
+pub(crate) use member::{join_group, leave_group};
 use overview::*;
 use rotation::*;
 use setup::*;
@@ -139,6 +140,7 @@ pub async fn handle(
         ("!plan", Some("pdf")) => {
             return cmd_pdf(ctx, sender, room, rest, event_id, thread_root).await
         }
+        ("!mygroups", _) => return cmd_mygroups(ctx, sender, room).await,
         ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, room, rest).await,
         ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
         ("!member", Some("link")) => {
@@ -215,7 +217,9 @@ pub async fn handle(
 
     match reply {
         None => Ok(None),
-        Some(s) => Ok(Some(format::mentionify_rich(&s, room).await)),
+        Some(s) => Ok(Some(format::intentional(
+            format::mentionify_rich(&s, room).await,
+        ))),
     }
 }
 
@@ -361,7 +365,7 @@ fn help_text() -> String {
 !status · this week, done or open
 !plan [N] · the next N weeks
 !groups [group] · groups, members, rooms
-!join <group> · !leave <group>
+!mygroups · join or leave groups
 **More**
 !stats [person | group] · !ical · your calendar feed
 Admins: !help admin"#

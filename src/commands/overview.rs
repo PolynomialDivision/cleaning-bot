@@ -3,10 +3,10 @@
 use super::*;
 use crate::state::State;
 
-/// Name shown in overviews — never a mention, so looking at the status does
-/// not ping anyone.
+/// A person in an overview: a user pill that pings nobody (see
+/// `view::user_link`).
 fn name(person: &Person) -> String {
-    crate::view::name(person).to_owned()
+    crate::view::user_link(person)
 }
 
 fn away_marker(
@@ -51,7 +51,7 @@ pub(crate) fn week_task_lines(
                     let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
                         .then(|| state.person_by_id(&c.completed_by_id))
                         .flatten()
-                        .map(|p| format!(" · done by {}", p.display_name))
+                        .map(|p| format!(" · done by {}", name(p)))
                         .unwrap_or_default();
                     (true, format!("✅ {what}{who}{by}"))
                 }

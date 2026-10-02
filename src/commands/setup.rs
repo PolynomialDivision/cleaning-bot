@@ -237,8 +237,8 @@ pub(crate) async fn cmd_linkmatrix(
 
 /// True when `person_id` shows any sign of actually being used — group
 /// membership, a slot assignment, or a completion — as opposed to an empty
-/// placeholder (e.g. a stub created by the greeting reaction that nobody
-/// ever finished onboarding). Used to disambiguate between several people
+/// placeholder (e.g. a stub someone created by joining a group themselves
+/// before an admin linked them). Used to disambiguate between several people
 /// sharing a display name; deliberately broader than the stub-merge check
 /// below (which only looks at completions), since a mere "which of these
 /// same-named records is actually somebody" question should also count
@@ -344,8 +344,9 @@ pub(crate) async fn apply_linkmatrix(
 
     let mut state = ctx.state.lock().await;
 
-    // Auto-merge: if the MXID belongs to a stub person created by the greeting
-    // reaction (no cleaning history), remove it so the link can proceed cleanly.
+    // Auto-merge: if the MXID belongs to a stub person created on their own (the
+    // group selector, !join, a ✅) with no cleaning history, remove it so the
+    // link can proceed cleanly.
     if let Some(stub_id) = state.person_by_matrix_id(mxid).map(|p| p.id.clone()) {
         let has_history = state
             .completions

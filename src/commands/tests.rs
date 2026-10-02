@@ -3927,13 +3927,13 @@ async fn status_lists_every_person_of_a_shared_week_with_their_own_state() {
     let (ctx, path, _admin) = test_context(state);
     let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
 
-    let before = cmd_status(&ctx).await.unwrap().unwrap();
+    let before = names_only(&cmd_status(&ctx).await.unwrap().unwrap());
     assert!(before.contains("· 0/2 done"), "{before}");
     assert!(before.contains("⬜ Scharni: alice"), "{before}");
     assert!(before.contains("⬜ Colbe: bob"), "{before}");
 
     cmd_done(&ctx, &alice, &[]).await.unwrap().unwrap();
-    let after = cmd_status(&ctx).await.unwrap().unwrap();
+    let after = names_only(&cmd_status(&ctx).await.unwrap().unwrap());
     assert!(after.contains("· 1/2 done"), "{after}");
     assert!(after.contains("✅ Scharni: alice"), "{after}");
     assert!(after.contains("⬜ Colbe: bob"), "{after}");
@@ -3965,7 +3965,7 @@ async fn status_shows_who_actually_cleaned_and_skips() {
     }
     cmd_skip(&ctx, &admin, &["Floor"]).await.unwrap();
 
-    let text = cmd_status(&ctx).await.unwrap().unwrap();
+    let text = names_only(&cmd_status(&ctx).await.unwrap().unwrap());
     assert!(text.contains("✅ Scharni: alice · done by bob"), "{text}");
     assert!(text.contains("⏭️ Colbe: bob · skipped"), "{text}");
     assert!(text.contains("· 2/2 done"), "{text}");
@@ -4060,7 +4060,7 @@ async fn groups_overview_shows_every_group_with_its_members() {
     state.cleaning_groups.push(storage);
     let (ctx, path, _admin) = test_context(state);
 
-    let text = cmd_groups(&ctx, None).await.unwrap().unwrap();
+    let text = names_only(&cmd_groups(&ctx, None).await.unwrap().unwrap());
     assert!(
         text.contains("**Floor** · 3 members\nalice, bob, Carol"),
         "{text}"
@@ -4069,7 +4069,7 @@ async fn groups_overview_shows_every_group_with_its_members() {
         text.contains("🚫 **Storage** · disabled · 1 member\nbob"),
         "disabled groups follow, still with their members: {text}"
     );
-    let detail = cmd_groups(&ctx, Some("floor")).await.unwrap().unwrap();
+    let detail = names_only(&cmd_groups(&ctx, Some("floor")).await.unwrap().unwrap());
     assert!(detail.contains("Carol (no Matrix)"), "{detail}");
     assert!(
         !detail.contains("@alice"),
@@ -4084,7 +4084,7 @@ async fn groups_overview_shows_every_group_with_its_members() {
         "looking at a group must not ping its members: {detail}"
     );
 
-    let missing = cmd_groups(&ctx, Some("Attic")).await.unwrap().unwrap();
+    let missing = names_only(&cmd_groups(&ctx, Some("Attic")).await.unwrap().unwrap());
     assert!(missing.contains("not found"), "{missing}");
 
     let _ = tokio::fs::remove_file(path).await;
@@ -4441,7 +4441,7 @@ async fn status_shows_each_shift_with_its_own_person_state_and_whats_next() {
         };
         mark_duties_done(&mut state, &pid, &[duty]).unwrap();
     }
-    let text = cmd_status(&ctx).await.unwrap().unwrap();
+    let text = names_only(&cmd_status(&ctx).await.unwrap().unwrap());
     assert!(
         text.contains("**Bathroom** · 2× per week (Mon–Wed, Thu–Sun)"),
         "{text}"
@@ -4713,14 +4713,18 @@ fn cleaning_person_ctx() -> (BotContext, PathBuf, OwnedUserId, Vec<(i32, u32)>) 
 async fn cleaning_person_shows_a_matrix_participant_across_groups() {
     let (ctx, path, viewer, weeks) = cleaning_person_ctx();
     // No admin needed; full Matrix ID and display name find the same person.
-    let by_mxid = cmd_cleaning_person(&ctx, &viewer, &["@mia:example.org", "3"])
-        .await
-        .unwrap()
-        .unwrap();
-    let by_name = cmd_cleaning_person(&ctx, &viewer, &["MIA", "3"])
-        .await
-        .unwrap()
-        .unwrap();
+    let by_mxid = names_only(
+        &cmd_cleaning_person(&ctx, &viewer, &["@mia:example.org", "3"])
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    let by_name = names_only(
+        &cmd_cleaning_person(&ctx, &viewer, &["MIA", "3"])
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert_eq!(by_mxid, by_name);
     let lines: Vec<&str> = by_mxid.lines().collect();
     let indent = crate::view::INDENT;
@@ -4772,19 +4776,23 @@ async fn cleaning_person_shows_a_non_matrix_participant_with_pinned_turns() {
 #[tokio::test]
 async fn cleaning_person_reports_an_ambiguous_name_instead_of_guessing() {
     let (ctx, path, viewer, weeks) = cleaning_person_ctx();
-    let reply = cmd_cleaning_person(&ctx, &viewer, &["Alex"])
-        .await
-        .unwrap()
-        .unwrap();
+    let reply = names_only(
+        &cmd_cleaning_person(&ctx, &viewer, &["Alex"])
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert_eq!(
         reply,
         "«Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix) — use the Matrix ID instead."
     );
     // The Matrix ID settles it.
-    let alex = cmd_cleaning_person(&ctx, &viewer, &["@alex:example.org", "1"])
-        .await
-        .unwrap()
-        .unwrap();
+    let alex = names_only(
+        &cmd_cleaning_person(&ctx, &viewer, &["@alex:example.org", "1"])
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert!(alex.starts_with("📅 **Next turns · alex**"), "{alex}");
     assert!(
         alex.contains(&format!("• **Week {} · ", weeks[2].1)),
@@ -4839,11 +4847,13 @@ fn cleaning_person_takes_multi_word_names_without_quotes() {
 #[tokio::test]
 async fn next_finds_a_person_by_unique_display_name_or_matrix_id() {
     let (ctx, path, viewer, weeks) = cleaning_person_ctx();
-    let by_name = cmd_next(&ctx, &viewer, &["Mia"]).await.unwrap().unwrap();
-    let by_mxid = cmd_next(&ctx, &viewer, &["@mia:example.org"])
-        .await
-        .unwrap()
-        .unwrap();
+    let by_name = names_only(&cmd_next(&ctx, &viewer, &["Mia"]).await.unwrap().unwrap());
+    let by_mxid = names_only(
+        &cmd_next(&ctx, &viewer, &["@mia:example.org"])
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert_eq!(by_name, by_mxid);
     let lines: Vec<&str> = by_name.lines().collect();
     assert_eq!(lines[0], "📅 **Next turns · mia**", "{by_name}");
@@ -4854,10 +4864,12 @@ async fn next_finds_a_person_by_unique_display_name_or_matrix_id() {
     assert_eq!(lines[2], format!("{}Floor, Kitchen", crate::view::INDENT));
 
     // A Matrix ID picks its owner even though the display name collides.
-    let alex = cmd_next(&ctx, &viewer, &["@alex:example.org"])
-        .await
-        .unwrap()
-        .unwrap();
+    let alex = names_only(
+        &cmd_next(&ctx, &viewer, &["@alex:example.org"])
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert!(alex.starts_with("📅 **Next turns · alex**"), "{alex}");
     assert!(
         alex.contains(&format!("• **Week {} · ", weeks[2].1)),
@@ -4885,9 +4897,12 @@ async fn next_reports_an_ambiguous_display_name() {
     let (ctx, path, viewer, _) = cleaning_person_ctx();
     let reply = cmd_next(&ctx, &viewer, &["Alex"]).await.unwrap().unwrap();
     assert_eq!(
-        reply,
+        names_only(&reply),
         "«Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix) — use the Matrix ID instead."
     );
+    // The ID to use is a pill, but the candidates aren't pinged.
+    let content = crate::format::intentional(crate::format::mentionify(&reply));
+    assert_eq!(content.mentions.map(|m| m.user_ids.len()), Some(0));
     let _ = tokio::fs::remove_file(path).await;
 }
 
@@ -5028,29 +5043,98 @@ async fn taking_back_a_reaction_leaves_marks_by_others_alone() {
 }
 
 #[tokio::test]
-async fn looking_at_the_plan_never_pings_anyone() {
+async fn the_plan_shows_user_pills_but_pings_nobody() {
+    use matrix_sdk::ruma::events::room::message::MessageType;
     let (ctx, path, _, _) = cleaning_person_ctx();
-    let text = plan_text(&*ctx.state.lock().await, 4);
-    assert!(!text.contains('@'), "{text}");
-    let content = crate::format::mentionify(&text);
+    let content = plan_message(&*ctx.state.lock().await, 4);
+    // Matrix users are pills — links to their Matrix ID, labelled with
+    // their name — …
+    let MessageType::Text(text) = &content.msgtype else {
+        panic!("not a text message")
+    };
+    let html = &text.formatted.as_ref().expect("formatted").body;
     assert!(
-        content
-            .mentions
-            .as_ref()
-            .is_none_or(|m| m.user_ids.is_empty()),
-        "{text}"
+        html.contains(r#"<a href="https://matrix.to/#/@mia:example.org">mia</a>"#),
+        "{html}"
     );
+    // … people without Matrix stay plain text …
+    assert!(html.contains("Floor: Dan"), "{html}");
+    assert!(!html.contains("#/Dan"), "{html}");
+    // … and nobody is mentioned. `m.mentions` is there but empty, so
+    // legacy name-in-body push rules don't kick in either.
+    assert_eq!(content.mentions.as_ref().map(|m| m.user_ids.len()), Some(0));
+    let json = serde_json::to_value(&content).unwrap();
+    assert_eq!(json["m.mentions"], serde_json::json!({}), "{json}");
+
     // Week by week, current week first with its status.
     let (y, w) = current_iso_week();
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines[0], "📅 **Next 4 weeks**");
+    let lines: Vec<&str> = text.body.lines().collect();
+    assert_eq!(lines[0], "📅 Next 4 weeks");
     assert_eq!(
         lines[2],
-        format!("**{}** · this week", crate::view::week_label(y, w))
+        format!("{} · this week", crate::view::week_label(y, w))
     );
     assert_eq!(lines[3], "⬜ Floor: mia");
     assert_eq!(lines[4], "⬜ Kitchen: mia");
     let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn every_read_only_view_shows_pills_without_mentioning_anyone() {
+    let (ctx, path, viewer, _) = cleaning_person_ctx();
+    let views = [
+        cmd_next(&ctx, &viewer, &["Mia"]).await.unwrap().unwrap(),
+        cmd_cleaning_person(&ctx, &viewer, &["Mia"])
+            .await
+            .unwrap()
+            .unwrap(),
+        cmd_status(&ctx).await.unwrap().unwrap(),
+        cmd_groups(&ctx, None).await.unwrap().unwrap(),
+        cmd_groups(&ctx, Some("Floor")).await.unwrap().unwrap(),
+    ];
+    for text in views {
+        assert!(
+            text.contains("[mia](https://matrix.to/#/@mia:example.org)"),
+            "{text}"
+        );
+        assert!(!text.contains("#/Dan") && !text.contains("[Dan]"), "{text}");
+        let content = crate::format::intentional(crate::format::mentionify(&text));
+        assert_eq!(
+            content.mentions.map(|m| m.user_ids.len()),
+            Some(0),
+            "{text}"
+        );
+    }
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+/// `text` with every user link (`view::user_link`) reduced to its label —
+/// the names as they read in the message.
+fn names_only(text: &str) -> String {
+    const LINK: &str = "](https://matrix.to/#/";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let link = tail.find(LINK).and_then(|mid| {
+            let label = &tail[1..mid];
+            let end = mid + tail[mid..].find(')')?;
+            (!label.contains(['[', '\n'])).then_some((label, end))
+        });
+        match link {
+            Some((label, end)) => {
+                out.push_str(label);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push('[');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[tokio::test]
@@ -5075,5 +5159,413 @@ async fn adding_by_a_matrix_persons_display_name_says_who_it_is() {
         reply.starts_with("✅ Added @alice:example.org to Kitchen"),
         "an existing Matrix person, not a new one without Matrix: {reply}"
     );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+// ── Welcome & group selector ──────────────────────────────────────────────────
+
+use crate::onboarding::{self, claim_welcome, new_selector, selector_text};
+
+/// 2nd Floor (alice, bob), Kitchen (alice) and a disabled Attic, with a few
+/// weeks planned.
+fn selector_world() -> (BotContext, PathBuf, OwnedUserId) {
+    let (mut state, _floor, alice, _bob) = rotation_state();
+    let mut kitchen = CleaningGroup::new("Kitchen");
+    kitchen.member_ids = vec![alice];
+    state.cleaning_groups.push(kitchen);
+    let mut attic = CleaningGroup::new("Attic");
+    attic.is_active = false;
+    state.cleaning_groups.push(attic);
+    state.created_at = Some(Utc::now());
+    seed_materialized_weeks(&mut state, 4);
+    test_context(state)
+}
+
+/// Put up `user`'s selector as if it had been posted; returns its event ID.
+fn open_selector(state: &mut State, user: &str, welcome: bool) -> String {
+    let id = format!("$selector-{user}");
+    let selector = new_selector(state, user, welcome);
+    state
+        .group_selectors
+        .retain(|_, s| s.user_id != selector.user_id);
+    state.group_selectors.insert(id.clone(), selector);
+    id
+}
+
+fn is_in(state: &State, user: &str, group: &str) -> bool {
+    let group = state.group_by_name(group).unwrap();
+    state
+        .person_by_matrix_id(user)
+        .is_some_and(|p| group.member_ids.contains(&p.id))
+}
+
+/// No duplicate people or queue entries, and nothing `validate` complains
+/// about.
+fn assert_consistent(state: &State) {
+    let report = crate::validate::validate_state(state);
+    assert!(report.errors.is_empty(), "{}", report.summary());
+    let mxids: Vec<_> = state
+        .persons
+        .iter()
+        .filter_map(|p| p.matrix_id.as_ref())
+        .collect();
+    let unique: HashSet<_> = mxids.iter().collect();
+    assert_eq!(mxids.len(), unique.len(), "duplicate Matrix people");
+    for g in &state.cleaning_groups {
+        let unique: HashSet<_> = g.rotation_queue.iter().collect();
+        assert_eq!(
+            g.rotation_queue.len(),
+            unique.len(),
+            "{}: {:?}",
+            g.name,
+            g.rotation_queue
+        );
+    }
+}
+
+const MIA: &str = "@mia:example.org";
+
+#[tokio::test]
+async fn a_new_user_is_welcomed_once_with_every_active_group_to_tap() {
+    let (ctx, path, _) = selector_world();
+    let mut state = ctx.state.lock().await;
+    let people = state.persons.len();
+    assert!(claim_welcome(&mut state, MIA));
+    assert!(
+        !claim_welcome(&mut state, MIA),
+        "a welcome is once per user"
+    );
+
+    let selector = new_selector(&state, MIA, true);
+    assert_eq!(
+        selector.rendered,
+        "👋 Welcome, @mia:example.org! I'm the cleaning bot: I keep track of whose turn \
+         it is and remind you when it's yours.\n\
+         \n\
+         Tap a number to join or leave a group:\n\
+         1️⃣ 2nd Floor\n\
+         2️⃣ Kitchen\n\
+         \n\
+         !mygroups brings this back anytime."
+    );
+    // The disabled Attic isn't offered; looking creates nobody.
+    assert_eq!(selector.group_ids.len(), 2);
+    assert_eq!(state.persons.len(), people);
+    // The welcome is addressed to them — a real mention.
+    let content = crate::format::intentional(crate::format::mentionify(&selector.rendered));
+    let mentioned: Vec<String> = content
+        .mentions
+        .unwrap()
+        .user_ids
+        .iter()
+        .map(|u| u.to_string())
+        .collect();
+    assert_eq!(mentioned, [MIA]);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn the_welcome_shows_groups_an_admin_already_added_them_to() {
+    let (ctx, path, admin) = selector_world();
+    cmd_member_add(&ctx, &admin, &[MIA, "Kitchen"])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut state = ctx.state.lock().await;
+    let people = state.persons.len();
+    // Being added by an admin is no welcome; they still get theirs.
+    assert!(claim_welcome(&mut state, MIA));
+    let selector = new_selector(&state, MIA, true);
+    assert!(
+        selector
+            .rendered
+            .contains("1️⃣ 2nd Floor\n2️⃣ ✅ **Kitchen**\n"),
+        "{}",
+        selector.rendered
+    );
+    // Joining another group reuses their person.
+    let id = open_selector(&mut state, MIA, true);
+    onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.persons.len(), people);
+    assert!(is_in(&state, MIA, "2nd Floor") && is_in(&state, MIA, "Kitchen"));
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn tapping_a_number_joins_and_taking_it_back_leaves() {
+    let (ctx, path, _) = selector_world();
+    let mut state = ctx.state.lock().await;
+    let people = state.persons.len();
+    let id = open_selector(&mut state, MIA, true);
+
+    let joined = onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(
+        joined.starts_with(
+            "✅ [mia](https://matrix.to/#/@mia:example.org) joined **2nd Floor**\nFirst turn: "
+        ),
+        "{joined}"
+    );
+    assert!(is_in(&state, MIA, "2nd Floor"));
+    assert_eq!(state.persons.len(), people + 1);
+    let shown = selector_text(&state, &state.group_selectors[&id]);
+    assert!(shown.contains("1️⃣ ✅ **2nd Floor**\n2️⃣ Kitchen"), "{shown}");
+    assert_consistent(&state);
+
+    let (selector, left) = onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
+    assert_eq!(selector, id);
+    assert!(
+        left.starts_with("👋 [mia](https://matrix.to/#/@mia:example.org) left **2nd Floor**\n"),
+        "{left}"
+    );
+    assert!(!is_in(&state, MIA, "2nd Floor"));
+    // Their person stays (history may point at it) — and is reused.
+    assert_eq!(state.persons.len(), people + 1);
+    onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(is_in(&state, MIA, "2nd Floor"));
+    assert_eq!(state.persons.len(), people + 1);
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn tapping_a_group_youre_in_leaves_it_and_taking_it_back_rejoins() {
+    let (ctx, path, admin) = selector_world();
+    cmd_member_add(&ctx, &admin, &[MIA, "Kitchen"])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut state = ctx.state.lock().await;
+    let id = open_selector(&mut state, MIA, false);
+    assert!(
+        state.group_selectors[&id]
+            .rendered
+            .starts_with("🏠 Groups for [mia](https://matrix.to/#/@mia:example.org) — tap"),
+        "{}",
+        state.group_selectors[&id].rendered
+    );
+    let left = onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "2️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(left.contains(" left **Kitchen**"), "{left}");
+    assert!(!is_in(&state, MIA, "Kitchen"));
+    let (_, back) = onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
+    assert!(back.contains(" joined **Kitchen**"), "{back}");
+    assert!(is_in(&state, MIA, "Kitchen"));
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn several_groups_can_be_joined_from_one_selector() {
+    let (ctx, path, _) = selector_world();
+    let mut state = ctx.state.lock().await;
+    let id = open_selector(&mut state, MIA, true);
+    onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "2️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(is_in(&state, MIA, "2nd Floor") && is_in(&state, MIA, "Kitchen"));
+    let shown = selector_text(&state, &state.group_selectors[&id]);
+    assert!(
+        shown.contains("1️⃣ ✅ **2nd Floor**\n2️⃣ ✅ **Kitchen**"),
+        "{shown}"
+    );
+    // Leaving one leaves the other alone.
+    onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
+    assert!(!is_in(&state, MIA, "2nd Floor") && is_in(&state, MIA, "Kitchen"));
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn repeated_foreign_and_unknown_reactions_change_nothing() {
+    let (ctx, path, _) = selector_world();
+    let mut state = ctx.state.lock().await;
+    let id = open_selector(&mut state, MIA, true);
+    // Some clients leave out the emoji variation selector.
+    onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1\u{20e3}")
+        .unwrap()
+        .unwrap();
+    let before = serde_json::to_string(&*state).unwrap();
+    let tap = |state: &mut State, reaction: &str, sender: &str, key: &str| {
+        onboarding::tap(&ctx, state, &id, reaction, sender, key).unwrap()
+    };
+    assert_eq!(tap(&mut state, "$r1", MIA, "1️⃣"), None, "re-delivered");
+    assert_eq!(
+        tap(&mut state, "$r9", "@bob:example.org", "2️⃣"),
+        None,
+        "not theirs"
+    );
+    assert_eq!(tap(&mut state, "$r9", MIA, "👍"), None, "not a number");
+    assert_eq!(tap(&mut state, "$r9", MIA, "3️⃣"), None, "not offered");
+    assert_eq!(
+        onboarding::tap(&ctx, &mut state, "$no-selector", "$r9", MIA, "1️⃣").unwrap(),
+        None
+    );
+    assert_eq!(
+        onboarding::untap(&ctx, &mut state, "$unknown").unwrap(),
+        None
+    );
+    // Only the dismissed reactions were seen; nothing else changed.
+    assert_eq!(serde_json::to_string(&*state).unwrap(), before);
+
+    onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
+    assert_eq!(
+        onboarding::untap(&ctx, &mut state, "$r1").unwrap(),
+        None,
+        "redacted twice"
+    );
+    assert_eq!(
+        tap(&mut state, "$r1", MIA, "1️⃣"),
+        None,
+        "a taken-back tap re-delivered"
+    );
+    assert!(!is_in(&state, MIA, "2nd Floor"));
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn taking_a_tap_back_after_leaving_by_command_does_nothing() {
+    let (ctx, path, _) = selector_world();
+    let mia = OwnedUserId::try_from(MIA).unwrap();
+    let id = {
+        let mut state = ctx.state.lock().await;
+        let id = open_selector(&mut state, MIA, true);
+        onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "2️⃣")
+            .unwrap()
+            .unwrap();
+        id
+    };
+    cmd_leavefloor(&ctx, &mia, &["Kitchen"])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut state = ctx.state.lock().await;
+    assert_eq!(onboarding::untap(&ctx, &mut state, "$r1").unwrap(), None);
+    assert!(!is_in(&state, MIA, "Kitchen"), "no surprise re-join");
+    assert!(state.group_selectors[&id].taps["$r1"].undone);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn leaving_with_this_weeks_turn_open_is_refused_and_its_undo_does_nothing() {
+    let (ctx, path, _) = selector_world();
+    let mut state = ctx.state.lock().await;
+    let (y, w) = current_iso_week();
+    let floor = state.group_by_name("2nd Floor").unwrap().id.clone();
+    let holder = state
+        .slot_assignments
+        .iter()
+        .find(|a| a.group_id == floor && (a.iso_year, a.iso_week) == (y, w))
+        .and_then(|a| a.person_id.clone())
+        .unwrap();
+    let mxid = state
+        .person_by_id(&holder)
+        .unwrap()
+        .matrix_id
+        .clone()
+        .unwrap();
+    let id = open_selector(&mut state, &mxid, false);
+    let refused = onboarding::tap(&ctx, &mut state, &id, "$r1", &mxid, "1️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(
+        refused.starts_with("You cannot leave «2nd Floor»"),
+        "{refused}"
+    );
+    assert!(is_in(&state, &mxid, "2nd Floor"));
+    assert_eq!(onboarding::untap(&ctx, &mut state, "$r1").unwrap(), None);
+    assert!(is_in(&state, &mxid, "2nd Floor"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn welcomes_selectors_and_taps_survive_a_restart() {
+    let (ctx, path, _) = selector_world();
+    let id = {
+        let mut state = ctx.state.lock().await;
+        assert!(claim_welcome(&mut state, MIA));
+        let id = open_selector(&mut state, MIA, true);
+        onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣")
+            .unwrap()
+            .unwrap();
+        state.save(&ctx.state_path).await.unwrap();
+        id
+    };
+    // Restart: a fresh state from disk.
+    let mut state = State::load(&path).await.unwrap();
+    assert!(!claim_welcome(&mut state, MIA), "no second welcome");
+    assert!(!onboarding::migrate_welcomes(&mut state) || state.greeted_users.contains(MIA));
+    assert_eq!(
+        onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣").unwrap(),
+        None,
+        "a tap replayed after the restart counts once"
+    );
+    assert!(is_in(&state, MIA, "2nd Floor"));
+    // The message still shows the state before the tap (its edit may not
+    // have gone out before the restart): the startup refresh catches up.
+    let selector = &state.group_selectors[&id];
+    assert_ne!(selector_text(&state, selector), selector.rendered);
+    // The selector still knows the tap, so taking it back still works.
+    onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
+    assert!(!is_in(&state, MIA, "2nd Floor"));
+    assert_consistent(&state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn people_who_used_the_bot_before_count_as_welcomed() {
+    let (ctx, path, _) = selector_world();
+    let mut state = ctx.state.lock().await;
+    state.welcomes_migrated = false;
+    state.greeted_users.insert("@old:example.org".into());
+    let (y, w) = current_iso_week();
+    let floor = state.group_by_name("2nd Floor").unwrap().id.clone();
+    let alice = state
+        .person_by_matrix_id("@alice:example.org")
+        .unwrap()
+        .id
+        .clone();
+    state
+        .apply_event(DomainEvent::CleaningCompleted {
+            group_id: floor,
+            slot_id: None,
+            person_id: alice.clone(),
+            responsible_person_ids: vec![alice],
+            iso_year: y,
+            iso_week: w,
+            shift: 0,
+        })
+        .unwrap();
+
+    assert!(onboarding::migrate_welcomes(&mut state));
+    // Alice cleaned and the old greeting's list stays; Bob was only ever
+    // added by an admin, so he still gets his welcome.
+    assert!(!claim_welcome(&mut state, "@alice:example.org"));
+    assert!(!claim_welcome(&mut state, "@old:example.org"));
+    assert!(claim_welcome(&mut state, "@bob:example.org"));
+    // Once only.
+    state.greeted_users.clear();
+    assert!(!onboarding::migrate_welcomes(&mut state));
+    assert!(state.greeted_users.is_empty());
+    drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }

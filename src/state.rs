@@ -115,25 +115,46 @@ pub struct SentReminder {
     pub sent_at: Option<DateTime<Utc>>,
 }
 
-// ── Greeting ──────────────────────────────────────────────────────────────────
+// ── Group selector ────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct GreetingChoice {
-    pub emoji: String,
-    pub group_id: GroupId,
-    pub group_name: String,
-    /// Set when this choice links the joining user to an existing non-Matrix person.
+/// A posted group selector (the welcome, `!mygroups`): one user's list of
+/// groups to tap. See `onboarding`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct GroupSelector {
+    /// Whose selector it is; nobody else's taps count.
+    pub user_id: String,
+    /// The groups offered, in number order (1️⃣ first). Fixed once posted,
+    /// so a number always means the same group.
+    pub group_ids: Vec<GroupId>,
+    /// The welcome (with its short intro) rather than a `!mygroups` list.
     #[serde(default)]
-    pub person_id: Option<PersonId>,
+    pub welcome: bool,
+    /// Every tap (reaction event ID) and what it did: a re-delivered tap
+    /// counts once, and taking one back undoes exactly that tap.
+    #[serde(default)]
+    pub taps: HashMap<String, SelectorTap>,
+    /// The text last sent or edited in — edit only when it changes.
+    #[serde(default)]
+    pub rendered: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct GreetingInfo {
-    pub for_user: String,
-    pub choices: Vec<GreetingChoice>,
-    /// True during the identity-linking step (choosing which non-Matrix placeholder you are).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SelectorTap {
+    pub group_id: GroupId,
+    pub effect: TapEffect,
+    /// The reaction was taken back (and its effect undone, if it still
+    /// applied).
     #[serde(default)]
-    pub is_linking: bool,
+    pub undone: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TapEffect {
+    Joined,
+    Left,
+    /// Refused (e.g. leaving with this week's turn open) or no such group.
+    Nothing,
 }
 
 pub use crate::domain::CalendarToken;
@@ -190,10 +211,17 @@ pub struct State {
     pub weekly_plan_rendered: HashMap<String, String>,
     #[serde(default)]
     pub reaction_dones: HashMap<String, ReactionDone>,
-    #[serde(default)]
-    pub greeting_event_ids: HashMap<String, GreetingInfo>,
+    /// Matrix users who have had their welcome — once each, ever. (Named
+    /// for the old greeting, so everyone greeted by it still counts.)
     #[serde(default)]
     pub greeted_users: HashSet<String>,
+    /// Live group selectors by event ID — the latest one per user.
+    #[serde(default)]
+    pub group_selectors: HashMap<String, GroupSelector>,
+    /// `greeted_users` has been seeded with everyone who used the bot
+    /// before welcomes were tracked this way (see `onboarding`).
+    #[serde(default)]
+    pub welcomes_migrated: bool,
 }
 
 // ── Load / Save ───────────────────────────────────────────────────────────────
@@ -835,6 +863,10 @@ impl State {
     }
     pub fn group_by_id(&self, id: &GroupId) -> Option<&CleaningGroup> {
         self.cleaning_groups.iter().find(|g| &g.id == id)
+    }
+    pub fn is_member(&self, group_id: &GroupId, person_id: &PersonId) -> bool {
+        self.group_by_id(group_id)
+            .is_some_and(|g| g.member_ids.contains(person_id))
     }
     pub fn groups_for_person(&self, person_id: &PersonId) -> Vec<&CleaningGroup> {
         self.cleaning_groups

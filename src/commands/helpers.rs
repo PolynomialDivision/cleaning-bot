@@ -996,7 +996,17 @@ pub(crate) fn lookup_person<'a>(
         [] => Ok(None),
         [one] => Ok(Some(one)),
         several => {
-            let who: Vec<String> = several.iter().map(|p| person_label(p)).collect();
+            // The candidates' IDs as pills that ping nobody — they're only
+            // being looked up.
+            let who: Vec<String> = several
+                .iter()
+                .map(|p| match p.matrix_id.as_deref() {
+                    Some(mxid) => {
+                        format!("{} ({})", p.display_name, crate::view::user_id_link(mxid))
+                    }
+                    None => format!("{} (no Matrix)", p.display_name),
+                })
+                .collect();
             Err(format!(
                 "«{query}» matches {} people: {} — use the Matrix ID instead.",
                 several.len(),

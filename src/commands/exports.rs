@@ -16,11 +16,16 @@ pub(crate) async fn cmd_cleanplan(
         .unwrap_or(6)
         .clamp(1, 20);
     let state = ctx.state.lock().await;
-    Ok(Some(format::mentionify(&plan_text(&state, n))))
+    Ok(Some(plan_message(&state, n)))
 }
 
-/// The next `n` weeks, week by week — everyone by name, so looking at the
-/// plan never pings anyone. This week's lines show their status
+/// `!plan` as sent: user pills, but nobody in `m.mentions`.
+pub(crate) fn plan_message(state: &crate::state::State, n: usize) -> RoomMessageEventContent {
+    format::intentional(format::mentionify(&plan_text(state, n)))
+}
+
+/// The next `n` weeks, week by week — everyone as a user pill that pings
+/// nobody (`view::user_link`). This week's lines show their status
 /// (⬜ ✅ ⏭️ ❌); later weeks are plain bullets.
 pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
     let groups: Vec<&CleaningGroup> = state
@@ -48,7 +53,8 @@ pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
                         turn,
                     }
                     .label();
-                    let who = assignee.map_or("nobody assigned", crate::view::name);
+                    let who =
+                        assignee.map_or_else(|| "nobody assigned".into(), crate::view::user_link);
                     let away = assignee
                         .filter(|p| state.is_absent(&p.id, &group.id, y, w))
                         .map_or("", |_| " 🌴 away");
@@ -58,7 +64,7 @@ pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
                             let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
                                 .then(|| state.person_by_id(&c.completed_by_id))
                                 .flatten()
-                                .map(|p| format!(" · done by {}", p.display_name))
+                                .map(|p| format!(" · done by {}", crate::view::user_link(p)))
                                 .unwrap_or_default();
                             format!("✅ {what}: {who}{by}")
                         }

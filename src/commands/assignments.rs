@@ -808,7 +808,7 @@ pub(crate) fn next_text(
         })
         .collect();
 
-    let who = crate::view::name(person);
+    let who = crate::view::user_link(person);
     if duties.is_empty() {
         let mut reply = if !in_a_group {
             if own {

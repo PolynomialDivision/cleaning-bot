@@ -187,80 +187,136 @@ pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<
     ))
 }
 
-// ── !join <group> ────────────────────────────────────────────────────────
+// ── !mygroups ────────────────────────────────────────────────────────────
+
+/// `!mygroups` — the group selector again (the welcome, the first time).
+pub(crate) async fn cmd_mygroups(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+) -> Result<Option<RoomMessageEventContent>> {
+    if room.room_id() != ctx.room_id {
+        return Ok(Some(format::mentionify(
+            "!mygroups works in the cleaning room.",
+        )));
+    }
+    let welcome = {
+        let mut state = ctx.state.lock().await;
+        let first = crate::onboarding::claim_welcome(&mut state, sender.as_str());
+        state.save(&ctx.state_path).await?;
+        first
+    };
+    crate::onboarding::post_selector(ctx, room, sender.as_str(), welcome).await?;
+    Ok(None)
+}
+
+// ── !join <group> / !leave <group> ──────────────────────────────────────
 
 pub(crate) async fn cmd_joinfloor(
     ctx: &BotContext,
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<String>> {
-    let group_name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !join <group>".into())),
+    let Some(group_name) = args.first() else {
+        return Ok(Some("Usage: !join <group>".into()));
     };
-    let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
-
-    let group_id = match state.group_by_name(&group_name) {
-        Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+    let Some(group_id) = state.group_by_name(group_name).map(|g| g.id.clone()) else {
+        return Ok(Some(format!("Group «{group_name}» not found.")));
     };
-    // PersonCreated is idempotent — safe even if this Matrix user already exists.
-    let new_person_id = uuid::Uuid::new_v4().to_string();
-    state.apply_event(DomainEvent::PersonCreated {
-        person_id: new_person_id,
-        display_name: mxid.to_owned(),
-        matrix_id: Some(mxid.to_owned()),
-    })?;
-    let person_id = state.person_by_matrix_id(mxid).unwrap().id.clone();
-    if state
-        .group_by_id(&group_id)
-        .map(|g| g.member_ids.contains(&person_id))
-        .unwrap_or(false)
-    {
-        return Ok(Some(format!("You are already in «{group_name}».")));
-    }
-    let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
-    let summary = join_summary(&state, &group_id, &person_id, replanned_from);
+    let reply = match join_group(ctx, &mut state, sender.as_str(), &group_id)? {
+        Ok(summary) => format!(
+            "✅ You joined {}\n{summary}",
+            group_name_of(&state, &group_id)
+        ),
+        Err(why) => return Ok(Some(why)),
+    };
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "✅ You joined {}\n{summary}",
-        group_name_of(&state, &group_id)
-    )))
+    Ok(Some(reply))
 }
-
-// ── !leave <group> ───────────────────────────────────────────────────────
 
 pub(crate) async fn cmd_leavefloor(
     ctx: &BotContext,
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<String>> {
-    let group_name = match args.first() {
-        Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !leave <group>".into())),
+    let Some(group_name) = args.first() else {
+        return Ok(Some("Usage: !leave <group>".into()));
     };
-    let mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
-
-    let person_id = match state.person_by_matrix_id(mxid).map(|p| p.id.clone()) {
-        Some(id) => id,
-        None => return Ok(Some("You are not registered in any group.".into())),
-    };
-    let group_id = match state.group_by_name(&group_name) {
-        Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
-    };
-    if !state
-        .group_by_id(&group_id)
-        .map(|g| g.member_ids.contains(&person_id))
-        .unwrap_or(false)
-    {
-        return Ok(Some(format!("You are not in «{group_name}».")));
+    if state.person_by_matrix_id(sender.as_str()).is_none() {
+        return Ok(Some("You are not registered in any group.".into()));
     }
-    let open = current_open_assignments(&state, &group_id, &person_id);
+    let Some(group_id) = state.group_by_name(group_name).map(|g| g.id.clone()) else {
+        return Ok(Some(format!("Group «{group_name}» not found.")));
+    };
+    let reply = match leave_group(ctx, &mut state, sender.as_str(), &group_id)? {
+        Ok(summary) => format!(
+            "✅ You left {}\n{summary}",
+            group_name_of(&state, &group_id)
+        ),
+        Err(why) => return Ok(Some(why)),
+    };
+    state.save(&ctx.state_path).await?;
+    Ok(Some(reply))
+}
+
+/// A Matrix user joins a group on their own (`!join`, the group selector):
+/// their person is created if it doesn't exist yet — never a second one —
+/// and the rotation re-planned from the next cycle (`apply_group_join`).
+/// `Ok(summary)` for the reply, `Err(why)` when nothing changed.
+pub(crate) fn join_group(
+    ctx: &BotContext,
+    state: &mut crate::state::State,
+    mxid: &str,
+    group_id: &GroupId,
+) -> Result<std::result::Result<String, String>> {
+    // PersonCreated is idempotent — safe even if this Matrix user already exists.
+    state.apply_event(DomainEvent::PersonCreated {
+        person_id: uuid::Uuid::new_v4().to_string(),
+        display_name: mxid.to_owned(),
+        matrix_id: Some(mxid.to_owned()),
+    })?;
+    let person_id = state
+        .person_by_matrix_id(mxid)
+        .map(|p| p.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("no person for {mxid} after PersonCreated"))?;
+    if state.is_member(group_id, &person_id) {
+        return Ok(Err(format!(
+            "You are already in «{}».",
+            group_name_of(state, group_id)
+        )));
+    }
+    let replanned_from = apply_group_join(ctx, state, group_id, &person_id)?;
+    Ok(Ok(join_summary(
+        state,
+        group_id,
+        &person_id,
+        replanned_from,
+    )))
+}
+
+/// A Matrix user leaves a group on their own (`!leave`, the group
+/// selector) — refused while their turn of this week is still open; their
+/// upcoming turns are handed on (`apply_group_departure`). `Ok(summary)`
+/// for the reply, `Err(why)` when nothing changed.
+pub(crate) fn leave_group(
+    ctx: &BotContext,
+    state: &mut crate::state::State,
+    mxid: &str,
+    group_id: &GroupId,
+) -> Result<std::result::Result<String, String>> {
+    let group_name = group_name_of(state, group_id);
+    let Some(person_id) = state
+        .person_by_matrix_id(mxid)
+        .map(|p| p.id.clone())
+        .filter(|pid| state.is_member(group_id, pid))
+    else {
+        return Ok(Err(format!("You are not in «{group_name}».")));
+    };
+    let open = current_open_assignments(state, group_id, &person_id);
     if !open.is_empty() {
-        return Ok(Some(format!(
+        return Ok(Err(format!(
             "You cannot leave «{group_name}» while your current assignment is open ({}). \
              Complete or skip it first.",
             open.join(", ")
@@ -270,11 +326,6 @@ pub(crate) async fn cmd_leavefloor(
         person_id: person_id.clone(),
         group_id: group_id.clone(),
     })?;
-    let departure = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
-    let summary = departure_summary(&state, &group_id, &departure);
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "✅ You left {}\n{summary}",
-        group_name_of(&state, &group_id)
-    )))
+    let departure = apply_group_departure(ctx, state, &person_id, group_id)?;
+    Ok(Ok(departure_summary(state, group_id, &departure)))
 }
