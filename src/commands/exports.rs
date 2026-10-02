@@ -7,7 +7,7 @@ use super::*;
 pub(crate) async fn cmd_cleanplan(
     ctx: &BotContext,
     _sender: &OwnedUserId,
-    room: &Room,
+    _room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
     let n: usize = args
@@ -15,111 +15,72 @@ pub(crate) async fn cmd_cleanplan(
         .and_then(|s| s.parse().ok())
         .unwrap_or(6)
         .clamp(1, 20);
+    let state = ctx.state.lock().await;
+    Ok(Some(format::mentionify(&plan_text(&state, n))))
+}
 
-    let (snapshot, is_empty) = {
-        let state = ctx.state.lock().await;
-        let empty = state.cleaning_groups.is_empty();
-        (build_schedule(&state, n), empty)
-    };
-
-    if is_empty {
-        return Ok(Some(format::mentionify(
-            "No cleaning groups configured yet.",
-        )));
+/// The next `n` weeks, week by week — everyone by name, so looking at the
+/// plan never pings anyone. This week's lines show their status
+/// (⬜ ✅ ⏭️ ❌); later weeks are plain bullets.
+pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
+    let groups: Vec<&CleaningGroup> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active)
+        .collect();
+    if groups.is_empty() {
+        return "No cleaning groups configured yet.".into();
     }
-
-    // Pre-fetch Matrix display names for all assignees and completers.
-    let all_mxids: Vec<String> = {
-        let mut ids = Vec::new();
-        for a in &snapshot.assignments {
-            if let Some(mxid) = a.assignee_mxid() {
-                if !ids.contains(&mxid.to_owned()) {
-                    ids.push(mxid.to_owned());
-                }
-            }
-            if let Some(by) = &a.completed_by {
-                // completed_by is a display_name, look it up
-                if !ids.contains(by) {
-                    let state = ctx.state.lock().await;
-                    if let Some(p) = state.find_person(by) {
-                        if let Some(m) = &p.matrix_id {
-                            if !ids.contains(m) {
-                                ids.push(m.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ids
-    };
-    let uid_refs: Vec<&str> = all_mxids.iter().map(String::as_str).collect();
-    let names = format::fetch_names(room, &uid_refs).await;
-
-    let (cur_y, cur_w) = current_iso_week();
-    let today = crate::state::today();
-
+    let current = current_iso_week();
     let mut lines = vec![format!(
-        "📅 **Cleaning plan** · next {n} week{}",
-        if n == 1 { "" } else { "s" }
+        "📅 **Next {}**",
+        crate::view::plural(n, "week", "weeks")
     )];
-
-    for (dy, dw) in snapshot.weeks() {
-        let is_cur = (dy, dw) == (cur_y, cur_w);
-        lines.push(String::new());
-        if is_cur {
-            lines.push(format!(
-                "📆 **Week {dw} ({})** ← this week",
-                week_dates(dy, dw)
-            ));
-        } else {
-            lines.push(format!("📆 Week {dw} ({})", week_dates(dy, dw)));
-        }
-        for a in snapshot.for_group_in_week(dy, dw) {
-            let icon = if a.is_completed {
-                "✅"
-            } else if a.start <= today {
-                "🔲"
-            } else {
-                "🗓"
-            };
-            let detail = if a.is_completed {
-                if a.is_skipped {
-                    "skipped ⏭️".into()
-                } else {
-                    let by = a.completed_by.as_deref().unwrap_or("?");
-                    format!("done by {by}")
-                }
-            } else {
-                match &a.assignee {
-                    None => "nobody assigned yet".into(),
-                    Some(p) => {
-                        let key = p.mxid.as_deref().unwrap_or(&p.name);
-                        let state = ctx.state.lock().await;
-                        let away = state.is_absent(&p.id, &a.group_id, dy, dw);
-                        drop(state);
-                        if away {
-                            format!("{key} (away)")
-                        } else {
-                            key.to_owned()
-                        }
+    for i in 0..n as i64 {
+        let (y, w) = add_weeks(current.0, current.1, i);
+        let mut week_lines = Vec::new();
+        for group in &groups {
+            for turn in state.turns_in_week(group, y, w) {
+                for (slot_index, assignee) in state.turn_assignees(group, turn) {
+                    let what = Duty {
+                        group: (*group).clone(),
+                        slot_index,
+                        turn,
                     }
+                    .label();
+                    let who = assignee.map_or("nobody assigned", crate::view::name);
+                    let away = assignee
+                        .filter(|p| state.is_absent(&p.id, &group.id, y, w))
+                        .map_or("", |_| " 🌴 away");
+                    let line = match state.completion_for(group, slot_index, turn) {
+                        Some(c) if c.skipped => format!("⏭️ {what}: {who} · skipped"),
+                        Some(c) => {
+                            let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
+                                .then(|| state.person_by_id(&c.completed_by_id))
+                                .flatten()
+                                .map(|p| format!(" · done by {}", p.display_name))
+                                .unwrap_or_default();
+                            format!("✅ {what}: {who}{by}")
+                        }
+                        None if state.turn_over(group, turn) => {
+                            format!("❌ {what}: {who} · missed")
+                        }
+                        None if i == 0 => format!("⬜ {what}: {who}{away}"),
+                        None => format!("• {what}: {who}{away}"),
+                    };
+                    week_lines.push(line);
                 }
-            };
-            let what = match (&a.slot_name, &a.shift_label) {
-                (Some(slot), Some(shift)) => format!("{} / {slot} · {shift}", a.group_name),
-                (Some(slot), None) => format!("{} / {slot}", a.group_name),
-                (None, Some(shift)) => format!("{} · {shift}", a.group_name),
-                (None, None) => a.group_name.clone(),
-            };
-            lines.push(format!("  {icon} {what} : {detail}"));
+            }
         }
+        if week_lines.is_empty() {
+            continue;
+        }
+        lines.push(String::new());
+        let now = if i == 0 { " · this week" } else { "" };
+        lines.push(format!("**{}**{now}", crate::view::week_label(y, w)));
+        lines.extend(week_lines);
     }
-
-    Ok(Some(format::mentionify_with_names(
-        &lines.join("\n"),
-        &names,
-    )))
+    lines.join("\n")
 }
 
 // ── Admin: !plan pdf [N] ───────────────────────────────────────────────────────────

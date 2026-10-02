@@ -154,9 +154,13 @@ pub async fn handle(
         ("!done", _) => cmd_done(ctx, sender, &args).await,
         ("!undo", _) => cmd_undo(ctx, sender, &args).await,
         ("!groups", None) => cmd_groups(ctx, None).await,
-        ("!next", _) => cmd_next(ctx, sender, &args).await,
-        ("!myplan" | "!mycleaning", _) => cmd_myplan(ctx, sender, &args).await,
+        ("!next" | "!myplan" | "!mycleaning", _) => cmd_next(ctx, sender, &args).await,
         ("!cleaning", Some("person")) => cmd_cleaning_person(ctx, sender, rest).await,
+        ("!cleaning", _) => Ok(Some(
+            "!cleaning person <name> shows someone's turns (same as !next <name>). \
+             !groups lists groups; !help lists everything."
+                .into(),
+        )),
         ("!takeover", _) => cmd_takeover(ctx, sender, &args).await,
         ("!swap", Some("accept")) => cmd_acceptswap(ctx, sender, rest).await,
         ("!swap", Some("reject")) => cmd_rejectswap(ctx, sender, rest).await,
@@ -271,8 +275,8 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
     let sub = args.first().map(|a| a.to_ascii_lowercase());
     let rest = args.get(1..).unwrap_or_default();
     match (cmd, sub.as_deref()) {
-        ("!done" | "!undo" | "!next" | "!join" | "!leave", _) => joined(args),
-        ("!myplan" | "!mycleaning", _) => person_then_number(args),
+        ("!done" | "!undo" | "!join" | "!leave", _) => joined(args),
+        ("!next" | "!myplan" | "!mycleaning", _) => person_then_number(args),
         ("!cleaning", Some("person")) => with_sub(args[0], person_then_number(rest)),
         ("!takeover", _) => group_first(state, args, 0),
         ("!swap", Some("accept" | "reject")) => owned(args),
@@ -347,20 +351,19 @@ const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <gro
 
 fn help_text() -> String {
     r#"🧹 **Cleaning bot**
-
-!status · this week: who cleans what, done or open
-!done [group] · mark your part done (or react ✅ on the plan)
-!undo [group] · take back your done mark
-!groups · all groups and their members
-!plan [N] · the next N weeks (default 6)
-!next [person] · when is your next turn?
-!myplan [N] · your next turns · !cleaning person <name | @user> [N] · someone else's
-!takeover [group] [slot] [week N] [on <day>] · take a turn over yourself
-!swap @user [group] [slot] [week N] [on <day>] · ask someone to swap · !swap accept|reject <id>
+**Your turns**
+!next [person] [N] · when you (or they) clean next
+!done [group] · mark yours done — or react ✅ on the plan
+!undo [group] · take a done mark back
+!takeover [group] [week N] · take a turn over yourself
+!swap @user [group] [week N] · ask someone to take yours
+**The plan**
+!status · this week, done or open
+!plan [N] · the next N weeks
+!groups [group] · groups, members, rooms
 !join <group> · !leave <group>
-!stats [person | group | fairness | load]
-!ical [N] · calendar feed of your turns · !ical reset
-
+**More**
+!stats [person | group] · !ical · your calendar feed
 Admins: !help admin"#
         .to_owned()
 }
@@ -407,9 +410,6 @@ fn renamed_command_hint(cmd: &str) -> Option<String> {
     let new = match cmd {
         "!cleanplan" => "!plan [N]",
         "!areas" | "!listgroups" | "!floors" => "!groups",
-        "!cleaning" => {
-            "!cleaning person <name> (their turns), !groups (list) or !member add|remove (changes)"
-        }
         "!joingroup" => "!join <group>",
         "!leavegroup" => "!leave <group>",
         "!icalreset" => "!ical reset",

@@ -122,10 +122,18 @@ pub(crate) async fn cmd_addperson(
     }
     let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
     let summary = join_summary(&state, &group_id, &person_id, replanned_from);
+    // Matched an existing person (possibly one with Matrix), or created a
+    // new one without Matrix.
+    let who = state
+        .person_by_id(&person_id)
+        .map(|p| match p.matrix_id.as_deref() {
+            Some(mxid) => mxid.to_owned(),
+            None => format!("{} (no Matrix)", p.display_name),
+        })
+        .unwrap_or(name);
+    let group = group_name_of(&state, &group_id);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "✅ Added {name} (no Matrix) to «{group_name}».\n{summary}"
-    )))
+    Ok(Some(format!("✅ Added {who} to {group}\n{summary}")))
 }
 
 // ── Admin: !member remove <name> <group> ──────────────────────────────────────
@@ -177,10 +185,13 @@ pub(crate) async fn cmd_removeperson(
     })?;
     let departure = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
     let summary = departure_summary(&state, &group_id, &departure);
+    let who = state
+        .person_by_id(&person_id)
+        .map(|p| p.display_name.clone())
+        .unwrap_or(query);
+    let group = group_name_of(&state, &group_id);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "✅ Removed {query} from «{group_name}».\n{summary}"
-    )))
+    Ok(Some(format!("✅ Removed {who} from {group}\n{summary}")))
 }
 
 // ── Admin: !member link <name> <@user:server> ─────────────────────────────────

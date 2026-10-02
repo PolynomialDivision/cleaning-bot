@@ -1,4 +1,4 @@
-//! Assignments: !plan assign, !plan unassign, !plan import, !takeover, !undo, !next, !myplan, !plan skip, !plan remind.
+//! Assignments: !plan assign, !plan unassign, !plan import, !takeover, !undo, !next, !plan skip, !plan remind.
 
 use super::*;
 
@@ -712,12 +712,17 @@ pub(crate) fn holds_any_turn(
         .any(|t| !state.held_slots(group, person_id, t).is_empty())
 }
 
-// ── !next [person] ────────────────────────────────────────────────────────────
+// ── !next [person] [N] ───────────────────────────────────────────────────────
 //
-// The person's own next turn: the earliest turn (in any of their groups,
-// each in its own rhythm) they hold that isn't done and isn't over yet —
-// frozen plan first, rotation preview beyond it. Turns of this week that are
-// already done are mentioned too.
+// Someone's next N open turns (default 3) across every active group —
+// including turns they hold in a group they're not a member of (a takeover,
+// a swap) — frozen plan first, rotation preview beyond it, which is marked
+// tentative. Anyone may look anyone up: the plan itself is public via
+// `!plan`. `!myplan`, `!mycleaning` and `!cleaning person <who>` are the
+// same command.
+
+const NEXT_DEFAULT: usize = 3;
+const NEXT_MAX: usize = 20;
 
 pub(crate) async fn cmd_next(
     ctx: &BotContext,
@@ -725,177 +730,32 @@ pub(crate) async fn cmd_next(
     args: &[&str],
 ) -> Result<Option<String>> {
     let state = ctx.state.lock().await;
-    let current = current_iso_week();
-
-    let query = if args.is_empty() {
-        sender.as_str().to_owned()
-    } else {
-        args.join(" ")
-    };
-    let person = match lookup_person(&state, &query) {
-        Ok(Some(p)) => p.clone(),
-        Ok(None) => return Ok(Some(format!("{query} is not registered."))),
-        Err(ambiguous) => return Ok(Some(ambiguous)),
-    };
-    let groups: Vec<CleaningGroup> = state
-        .groups_for_person(&person.id)
-        .into_iter()
-        .filter(|g| g.is_active)
-        .cloned()
-        .collect();
-    if groups.is_empty() {
-        return Ok(Some(format!(
-            "{} is not in any cleaning group.",
-            person.display_name
-        )));
-    }
-
-    let horizon = add_weeks(current.0, current.1, 104);
-    let mut done_now: Vec<String> = Vec::new();
-    let mut next: Option<(chrono::NaiveDate, Vec<Duty>)> = None;
-    for group in &groups {
-        for turn in state.turns_between(group, current, horizon) {
-            let start = turn.dates(&group.rhythm).0;
-            if next.as_ref().is_some_and(|(d, _)| start > *d) {
-                break;
-            }
-            for slot_index in state.held_slots(group, &person.id, turn) {
-                let duty = Duty {
-                    group: group.clone(),
-                    slot_index,
-                    turn,
-                };
-                if state.is_turn_slot_done(group, slot_index, turn) {
-                    if turn.week() == current {
-                        done_now.push(duty.label());
-                    }
-                } else if !state.turn_over(group, turn) {
-                    match &mut next {
-                        Some((d, duties)) if *d == start => duties.push(duty),
-                        Some((d, _)) if *d < start => {}
-                        _ => next = Some((start, vec![duty])),
-                    }
-                }
-            }
-        }
-    }
-
-    let Some((start, duties)) = next else {
-        return Ok(Some(format!(
-            "No upcoming turn found for {} in the next two years.",
-            person.display_name
-        )));
-    };
-    let first = &duties[0];
-    let today = crate::state::today();
-    let (_, end) = first.turn.dates(&first.group.rhythm);
-    let weeks_away = crate::state::weeks_between(current, first.turn.week());
-    let when = if start <= today {
-        format!("now — this week, until {} ⚠️", end.format("%a %-d %b"))
-    } else if weeks_away == 0 {
-        format!("later this week, from {}", start.format("%a %-d %b"))
-    } else if weeks_away == 1 {
-        "next week".to_owned()
-    } else {
-        format!("in {weeks_away} weeks")
-    };
-    let mut reply = format!(
-        "📅 Next turn for {}: **week {} · {}** ({when}) · {}",
-        person.display_name,
-        first.turn.week,
-        first.turn.period_label(&first.group.rhythm),
-        duties
-            .iter()
-            .map(Duty::label)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    if !done_now.is_empty() {
-        reply.push_str(&format!("\nAlready done: {} ✅", done_now.join(", ")));
-    }
-    Ok(Some(reply))
-}
-
-// ── !myplan [person] [N] · !cleaning person <person> [N] ─────────────────────────────────────────────────────
-//
-// The person's next N open turns (default 5) across every active group —
-// including turns they hold in a group they're not a member of (a takeover,
-// a swap) — frozen plan first, rotation preview beyond it. Like `!next`,
-// anyone may look anyone up: the plan itself is public via `!plan`.
-
-const MYPLAN_DEFAULT: usize = 5;
-const MYPLAN_MAX: usize = 20;
-
-pub(crate) async fn cmd_myplan(
-    ctx: &BotContext,
-    sender: &OwnedUserId,
-    args: &[&str],
-) -> Result<Option<String>> {
-    let state = ctx.state.lock().await;
     let (query, count) = match args {
-        [] => (sender.as_str().to_owned(), MYPLAN_DEFAULT),
+        [] => (sender.as_str().to_owned(), NEXT_DEFAULT),
         [n] if n.parse::<usize>().is_ok() => (sender.as_str().to_owned(), n.parse().unwrap()),
         [who, n] if n.parse::<usize>().is_ok() => (who.to_string(), n.parse().unwrap()),
-        _ => (args.join(" "), MYPLAN_DEFAULT),
+        _ => (args.join(" "), NEXT_DEFAULT),
     };
-    let count = count.clamp(1, MYPLAN_MAX);
+    let is_self = query == sender.as_str();
     let person = match lookup_person(&state, &query) {
         Ok(Some(p)) => p.clone(),
-        Ok(None) if query == sender.as_str() => {
+        Ok(None) if is_self => {
             return Ok(Some(
-                "You are not registered yet — join a group with !join <group>.".into(),
+                "You're not on the cleaning plan yet — !join <group> to join one.".into(),
             ))
         }
         Ok(None) => return Ok(Some(format!("{query} is not registered."))),
         Err(ambiguous) => return Ok(Some(ambiguous)),
     };
-
-    let duties = upcoming_duties(&state, &person.id, count);
-    if duties.is_empty() {
-        return Ok(Some(format!(
-            "📅 No upcoming turns for {} in the next two years.",
-            person.display_name
-        )));
-    }
-    let today = crate::state::today();
-    let mut lines = vec![format!("📅 **Upcoming turns for {}**", person.display_name)];
-    let mut any_tentative = false;
-    for duty in &duties {
-        let (start, end) = duty.turn.dates(&duty.group.rhythm);
-        let mut dates = crate::rhythm::date_range(start, end);
-        if duty.turn.year != current_iso_week().0 {
-            dates.push_str(&format!(" {}", duty.turn.year));
-        }
-        let mut line = format!("• week {} · {dates} · {}", duty.turn.week, duty.label());
-        if start <= today {
-            line.push_str(" · now ⚠️");
-        }
-        match state.slot_assignments.iter().find(|a| {
-            a.group_id == duty.group.id
-                && a.slot_index == duty.slot_index
-                && (a.iso_year, a.iso_week, a.shift)
-                    == (duty.turn.year, duty.turn.week, duty.turn.shift)
-        }) {
-            Some(a) if a.source != AssignmentSource::RoundRobin => {
-                line.push_str(&format!(" ({})", source_label(&a.source)));
-            }
-            Some(_) => {}
-            None => {
-                any_tentative = true;
-                line.push_str(" (tentative)");
-            }
-        }
-        lines.push(line);
-    }
-    if any_tentative {
-        lines
-            .push("_tentative = beyond the fixed plan; can still shift if members change._".into());
-    }
-    Ok(Some(lines.join("\n")))
+    Ok(Some(next_text(
+        &state,
+        &person,
+        is_self || person.matrix_id.as_deref() == Some(sender.as_str()),
+        count.clamp(1, NEXT_MAX),
+    )))
 }
 
-/// `!cleaning person <name | @user:server> [N]` — `!myplan` for someone else,
-/// spelled the way the rest of the command set names a subject first.
+/// `!cleaning person <name | @user:server> [N]` — `!next` for someone else.
 pub(crate) async fn cmd_cleaning_person(
     ctx: &BotContext,
     sender: &OwnedUserId,
@@ -906,7 +766,117 @@ pub(crate) async fn cmd_cleaning_person(
             "Usage: !cleaning person <name | @user:server> [N]".into(),
         ));
     }
-    cmd_myplan(ctx, sender, args).await
+    cmd_next(ctx, sender, args).await
+}
+
+/// The reply of `!next`: one entry per turn, when on the first line and
+/// what (plus whether it's pinned or still tentative) indented below.
+pub(crate) fn next_text(
+    state: &crate::state::State,
+    person: &Person,
+    own: bool,
+    count: usize,
+) -> String {
+    let current = current_iso_week();
+    let in_a_group = state
+        .groups_for_person(&person.id)
+        .iter()
+        .any(|g| g.is_active);
+    let duties = upcoming_duties(state, &person.id, count);
+    let done_now: Vec<String> = state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active)
+        .flat_map(|group| {
+            state
+                .turns_in_week(group, current.0, current.1)
+                .into_iter()
+                .flat_map(move |turn| {
+                    state
+                        .held_slots(group, &person.id, turn)
+                        .into_iter()
+                        .filter(move |&i| state.is_turn_slot_done(group, i, turn))
+                        .map(move |slot_index| {
+                            Duty {
+                                group: group.clone(),
+                                slot_index,
+                                turn,
+                            }
+                            .label()
+                        })
+                })
+        })
+        .collect();
+
+    let who = crate::view::name(person);
+    if duties.is_empty() {
+        let mut reply = if !in_a_group {
+            if own {
+                "You're not in any cleaning group — !join <group> to join one.".to_owned()
+            } else {
+                format!("{who} is not in any cleaning group.")
+            }
+        } else {
+            format!("📅 No upcoming turns for {who} in the next two years.")
+        };
+        if !done_now.is_empty() {
+            reply.push_str(&format!("\n✅ Done this week: {}", done_now.join(", ")));
+        }
+        return reply;
+    }
+
+    let today = crate::state::today();
+    let mut lines = vec![if own {
+        "📅 **Your next turns**".to_owned()
+    } else {
+        format!("📅 **Next turns · {who}**")
+    }];
+    // Duties over the same days (two groups the same week, say) share one
+    // entry: when once, then everything due then.
+    let mut entries: Vec<(String, Turn, &Duty, Vec<String>)> = Vec::new();
+    let mut any_tentative = false;
+    for duty in &duties {
+        let when = crate::view::turn_label(duty.turn, &duty.group.rhythm);
+        let mut what = duty.label();
+        match state.slot_assignments.iter().find(|a| {
+            a.group_id == duty.group.id
+                && a.slot_index == duty.slot_index
+                && (a.iso_year, a.iso_week, a.shift)
+                    == (duty.turn.year, duty.turn.week, duty.turn.shift)
+        }) {
+            Some(a) => {
+                if let Some(note) = crate::view::source_note(&a.source) {
+                    what.push_str(&format!(" · {note}"));
+                }
+            }
+            None => {
+                any_tentative = true;
+                what.push_str(" · tentative");
+            }
+        }
+        match entries.last_mut().filter(|entry| entry.0 == when) {
+            Some(entry) => entry.3.push(what),
+            None => entries.push((when, duty.turn, duty, vec![what])),
+        }
+    }
+    for (i, (when, turn, duty, whats)) in entries.iter().enumerate() {
+        lines.push(if i == 0 {
+            format!(
+                "• **{when}** · {}",
+                crate::view::relative(*turn, &duty.group.rhythm, today)
+            )
+        } else {
+            format!("• {when}")
+        });
+        lines.push(format!("{}{}", crate::view::INDENT, whats.join(", ")));
+    }
+    if !done_now.is_empty() {
+        lines.push(format!("✅ Done this week: {}", done_now.join(", ")));
+    }
+    if any_tentative {
+        lines.push("Tentative = not fixed yet; may shift if members change.".into());
+    }
+    lines.join("\n")
 }
 
 /// `person_id`'s next `count` open turns (not done, not over), across every

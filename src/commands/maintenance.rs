@@ -20,11 +20,20 @@ pub(crate) async fn cmd_disablegroup(
         Some(g) => g.id.clone(),
         None => return Ok(Some(format!("Group «{name}» not found."))),
     };
+    // Its rotation stands still while disabled: planned rotation weeks go
+    // back to the queue, so enabling it later continues where it stopped.
+    let returned = return_future_rotation_turns(&mut state, &group_id)?;
     state.apply_event(DomainEvent::GroupDisabled { group_id })?;
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "🚫 «{name}» disabled — excluded from scheduling and statistics."
-    )))
+    let mut reply =
+        format!("🚫 {name} disabled — no turns, reminders or stats until it's enabled again.");
+    if !returned.is_empty() {
+        reply.push_str(&format!(
+            "\n{} planned week(s) cleared; the rotation picks up there when enabled.",
+            returned.len()
+        ));
+    }
+    Ok(Some(reply))
 }
 
 // ── Admin: !groups enable <group> ──────────────────────────────────────────────
@@ -45,11 +54,20 @@ pub(crate) async fn cmd_enablegroup(
         Some(g) => g.id.clone(),
         None => return Ok(Some(format!("Group «{name}» not found."))),
     };
-    state.apply_event(DomainEvent::GroupEnabled { group_id })?;
+    state.apply_event(DomainEvent::GroupEnabled {
+        group_id: group_id.clone(),
+    })?;
+    // Weeks planned while it was disabled (older versions kept rotating
+    // disabled groups) are handed back first, then the plan is filled anew.
+    return_future_rotation_turns(&mut state, &group_id)?;
+    materialize_group_and_apply(
+        &mut state,
+        &group_id,
+        ctx.config.schedule.materialize_weeks as usize,
+    )?;
+    let next = next_assignment_summary(&state, &group_id);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "✅ «{name}» enabled — now included in scheduling and statistics."
-    )))
+    Ok(Some(format!("✅ {name} enabled.\n{next}")))
 }
 
 // ── Admin: !plan announce ───────────────────────────────────────

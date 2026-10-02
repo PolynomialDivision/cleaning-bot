@@ -115,7 +115,7 @@ pub fn materialize_group(
     group: &CleaningGroup,
     cycles_ahead: usize,
 ) -> Vec<DomainEvent> {
-    if cycles_ahead == 0 || group.member_ids.is_empty() {
+    if cycles_ahead == 0 || group.member_ids.is_empty() || !group.is_active {
         return vec![];
     }
     let mut events: Vec<DomainEvent> = Vec::new();
@@ -124,6 +124,21 @@ pub fn materialize_group(
     let first_due = state.next_due_week(group, current_iso_week());
     let mut queue = reconcile_queue(state, group);
     let mut any_pop = false;
+    // The queue reflects every rotation draw up to the group's last one.
+    // A pinned turn after that (an import, `!plan assign`, a takeover or
+    // swap the rotation hasn't drawn past yet) counts as that person's turn
+    // too: they go to the back of the line like anyone who just cleaned, so
+    // the rotation doesn't hand them another turn right after it.
+    let drawn_until = state
+        .slot_assignments
+        .iter()
+        .filter(|a| {
+            a.group_id == group.id
+                && a.source == AssignmentSource::RoundRobin
+                && a.person_id.is_some()
+        })
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+        .max();
 
     for i in 0..cycles_ahead as i64 {
         let (dy, dw) = add_weeks(first_due.0, first_due.1, i * every);
@@ -141,11 +156,20 @@ pub fn materialize_group(
         for turn in state.turns_in_week(group, dy, dw) {
             for si in 0..num_slots {
                 // Skip if already frozen — this is what makes materialize additive.
-                if state.slot_assignments.iter().any(|a| {
+                if let Some(frozen) = state.slot_assignments.iter().find(|a| {
                     a.group_id == group.id
                         && a.slot_index == si
                         && (a.iso_year, a.iso_week, a.shift) == (turn.year, turn.week, turn.shift)
                 }) {
+                    let pinned_after_last_draw = frozen.source != AssignmentSource::RoundRobin
+                        && drawn_until.is_none_or(|last| turn > last);
+                    if let (true, Some(pid)) = (pinned_after_last_draw, &frozen.person_id) {
+                        if let Some(pos) = queue.iter().position(|q| q == pid) {
+                            let pinned = queue.remove(pos);
+                            queue.push(pinned);
+                            any_pop = true;
+                        }
+                    }
                     continue;
                 }
 
@@ -946,5 +970,102 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cycle_anchor(&st, &st.cleaning_groups[0]), Some(id2));
+    }
+
+    /// Kitchen with Anna, Bob, Carla; nothing frozen yet.
+    fn three_member_state() -> (State, Vec<PersonId>) {
+        let mut st = State::default();
+        st.created_at = Some(Utc::now());
+        let people: Vec<Person> = ["Anna", "Bob", "Carla"]
+            .iter()
+            .map(|n| Person::new_named(n))
+            .collect();
+        let ids: Vec<PersonId> = people.iter().map(|p| p.id.clone()).collect();
+        st.persons = people;
+        let mut g = CleaningGroup::new("Kitchen");
+        g.member_ids = ids.clone();
+        g.rotation_queue = ids.clone();
+        st.cleaning_groups.push(g);
+        (st, ids)
+    }
+
+    fn pin(st: &mut State, offset: i64, who: &PersonId) {
+        let (y, w) = current_iso_week();
+        let (py, pw) = add_weeks(y, w, offset);
+        st.apply_event(DomainEvent::SlotAssigned {
+            group_id: st.cleaning_groups[0].id.clone(),
+            slot_index: 0,
+            iso_year: py,
+            iso_week: pw,
+            shift: 0,
+            person_id: Some(who.clone()),
+            source: AssignmentSource::Import,
+            actor_id: None,
+            previous_person_id: None,
+        })
+        .unwrap();
+    }
+
+    fn plan(st: &State, weeks: i64) -> Vec<Option<PersonId>> {
+        let (y, w) = current_iso_week();
+        (0..weeks)
+            .map(|i| {
+                let (y, w) = add_weeks(y, w, i);
+                st.slot_assignments
+                    .iter()
+                    .find(|a| (a.iso_year, a.iso_week) == (y, w))
+                    .and_then(|a| a.person_id.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pinned_week_counts_as_that_persons_turn() {
+        let (mut st, ids) = three_member_state();
+        let [anna, bob, carla] = [&ids[0], &ids[1], &ids[2]];
+        // The paper plan has Carla on week 1.
+        pin(&mut st, 1, carla);
+        for ev in materialize(&st, 6) {
+            st.apply_event(ev).unwrap();
+        }
+        // Carla goes to the back after her pinned week like anyone who
+        // cleaned — the rotation doesn't hand her week 3 straight after.
+        assert_eq!(
+            plan(&st, 6),
+            [anna, carla, bob, anna, carla, bob].map(|p| Some(p.clone()))
+        );
+        // Filling again changes nothing (the pin isn't applied twice).
+        assert!(materialize(&st, 6).is_empty());
+    }
+
+    #[test]
+    fn pins_the_rotation_already_drew_past_change_nothing() {
+        // A week pinned after it was already planned (a takeover, say) was
+        // planned with the old draw — re-applying it later would shift
+        // everyone, so it's left alone.
+        let (mut st, ids) = three_member_state();
+        for ev in materialize(&st, 4) {
+            st.apply_event(ev).unwrap();
+        }
+        let mut pinned = st.clone();
+        pin(&mut pinned, 1, &ids[2]);
+        for state in [&mut st, &mut pinned] {
+            for ev in materialize(state, 7) {
+                state.apply_event(ev).unwrap();
+            }
+        }
+        let (unpinned_plan, pinned_plan) = (plan(&st, 7), plan(&pinned, 7));
+        assert_eq!(pinned_plan[4..], unpinned_plan[4..]);
+        assert_eq!(
+            pinned.cleaning_groups[0].rotation_queue,
+            st.cleaning_groups[0].rotation_queue
+        );
+    }
+
+    #[test]
+    fn a_disabled_group_is_never_planned() {
+        let (mut st, _) = three_member_state();
+        st.cleaning_groups[0].is_active = false;
+        assert!(materialize(&st, 6).is_empty());
     }
 }

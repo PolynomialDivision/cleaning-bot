@@ -18,8 +18,8 @@ use tracing::{error, info, warn};
 use crate::{
     domain::CleaningGroup,
     rhythm::Turn,
-    state::{current_iso_week, week_dates, ReminderKind},
-    BotContext,
+    state::{current_iso_week, ReminderKind},
+    view, BotContext,
 };
 
 async fn mention_message(
@@ -75,7 +75,7 @@ pub(crate) async fn roll_planning_horizon(ctx: &BotContext) -> anyhow::Result<()
 pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32, week: u32) {
     let week_key = format!("{year}-W{week:02}");
 
-    let (canonical_eid, msg, mxids) = {
+    let (canonical_eid, msg, mxids, already_mentioned) = {
         let state = ctx.state.lock().await;
         let eid_str = match state.weekly_plan_canonical.get(&week_key) {
             Some(e) => e.clone(),
@@ -95,15 +95,22 @@ pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32
             return;
         }
         let (msg, mxids) = build_weekly_plan(&state, year, week, &due_groups);
-        if state.weekly_plan_rendered.get(&week_key) == Some(&msg) {
+        let previous = state.weekly_plan_rendered.get(&week_key);
+        if previous == Some(&msg) {
             return;
         }
-        (eid, msg, mxids)
+        (eid, msg, mxids, previous.map(|p| previous_mentions(p)))
     };
 
-    let content = mention_message(&msg, &mxids, room)
-        .await
-        .make_replacement(ReplacementMetadata::new(canonical_eid.clone(), None));
+    // Only people new on the plan (a takeover, say) are notified by the
+    // edit — not everyone again on every ✅.
+    let content =
+        mention_message(&msg, &mxids, room)
+            .await
+            .make_replacement(ReplacementMetadata::new(
+                canonical_eid.clone(),
+                already_mentioned,
+            ));
     match room.send(content).await {
         Ok(_) => {
             if let Err(e) =
@@ -114,6 +121,15 @@ pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32
         }
         Err(e) => warn!("Failed to refresh pinned plan: {e}"),
     }
+}
+
+/// The mentions a plan message rendered from `text` carried.
+fn previous_mentions(text: &str) -> Mentions {
+    Mentions::with_user_ids(
+        crate::format::extract_mxids(text)
+            .into_iter()
+            .filter_map(|m| m.parse::<OwnedUserId>().ok()),
+    )
 }
 
 /// Record `msg` as the canonical, rendered plan message for `(year, week)`:
@@ -570,8 +586,17 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
         }
         PlanReconcileAction::NeedsEdit { event_id } => {
             info!("Reconcile: {week_key} plan message differs from persisted state (verified against live Matrix content) — editing in place");
-            let content =
-                expected_content.make_replacement(ReplacementMetadata::new(event_id.clone(), None));
+            let already_mentioned = {
+                let state = ctx.state.lock().await;
+                state
+                    .weekly_plan_rendered
+                    .get(&week_key)
+                    .map(|p| previous_mentions(p))
+            };
+            let content = expected_content.make_replacement(ReplacementMetadata::new(
+                event_id.clone(),
+                already_mentioned,
+            ));
             match room.send(content).await {
                 Ok(_) => {
                     match register_weekly_plan_message(ctx, year, week, &raw_msg, &event_id).await {
@@ -624,75 +649,83 @@ pub(crate) fn build_weekly_plan(
     due_groups: &[CleaningGroup],
 ) -> (String, Vec<String>) {
     let mut lines = vec![
-        format!("🧹 **Week {week} · {}**", week_dates(year, week)),
+        format!("🧹 **{}**", view::week_label(year, week)),
         "React ✅ when your part is done.".to_owned(),
-        String::new(),
     ];
     let mut all_mxids: Vec<String> = Vec::new();
-
     for group in due_groups {
-        lines.push(format!("**{}**", group.name));
+        lines.push(String::new());
+        lines.extend(group_heading(group));
         for turn in state.turns_in_week(group, year, week) {
             for (line, mxid) in turn_lines(state, group, turn, true) {
                 lines.push(line);
                 all_mxids.extend(mxid);
             }
         }
-        lines.push(String::new());
     }
-
     all_mxids.sort();
     all_mxids.dedup();
     (lines.join("\n"), all_mxids)
 }
 
-/// One line per slot of a turn, with the assignee's MXID for mentions:
-/// "⬜ person", "⬜ Slot · person", "⬜ Mon–Wed · person" — prefixed with the
-/// shift for groups split into shifts. `with_done` also lists finished slots.
+/// A group's heading, with its rooms as an indented subtitle when they
+/// belong to the whole group (a group with slots lists them per slot).
+pub(crate) fn group_heading(group: &CleaningGroup) -> Vec<String> {
+    let mut lines = vec![format!("**{}**", group.name)];
+    if !group.is_multi_slot() && !group.room_names.is_empty() {
+        lines.push(format!("{}{}", view::INDENT, group.room_names.join(", ")));
+    }
+    lines
+}
+
+/// "Thu–Sun · Scharni: " — what part of the turn a line is about, empty
+/// for a group that is neither split into shifts nor slots.
+pub(crate) fn duty_prefix(group: &CleaningGroup, slot_index: usize, turn: Turn) -> String {
+    let shift = turn.shift_label(&group.rhythm);
+    match (shift, group.slots.get(slot_index)) {
+        (Some(shift), Some(slot)) => format!("{shift} · {}: ", slot.name),
+        (Some(shift), None) => format!("{shift}: "),
+        (None, Some(slot)) => format!("{}: ", slot.name),
+        (None, None) => String::new(),
+    }
+}
+
+/// One line per slot of a turn, with the assignee's MXID for mentions —
+/// "⬜ @bob", "✅ Scharni: @alice", "⬜ Thu–Sun: @carol 🌴 away" — each
+/// slot's rooms indented below it. `with_done` also lists finished slots.
 fn turn_lines(
     state: &crate::state::State,
     group: &CleaningGroup,
     turn: Turn,
     with_done: bool,
 ) -> Vec<(String, Option<String>)> {
-    let shift = turn
-        .shift_label(&group.rhythm)
-        .map(|l| format!("{l} · "))
-        .unwrap_or_default();
     let mut out = Vec::new();
     for (slot_index, assignee) in state.turn_assignees(group, turn) {
-        let slot = group.slots.get(slot_index);
-        let rooms = match slot {
-            Some(slot) if !slot.room_names.is_empty() => {
-                format!(" · {}", slot.room_names.join(", "))
-            }
-            Some(_) => String::new(),
-            None => group
-                .rooms_text()
-                .map(|r| format!(" · {}", r.replace('\n', " · ")))
-                .unwrap_or_default(),
-        };
-        let slot_name = slot.map(|s| format!("{} · ", s.name)).unwrap_or_default();
         let completion = state.completion_for(group, slot_index, turn);
         if completion.is_some() && !with_done {
             continue;
         }
-        let line = match (assignee, completion) {
-            (None, done) => format!(
-                "{} {shift}{}{rooms}",
-                status_icon(done.is_some()),
-                slot.map_or("nobody assigned", |s| s.name.as_str())
-            ),
-            (Some(p), Some(c)) if c.skipped => {
-                format!("⏭️ {shift}{slot_name}{} · skipped{rooms}", person_label(p))
-            }
-            (Some(p), Some(_)) => format!("✅ {shift}{} · cleaned{rooms}", person_label(p)),
-            (Some(p), None) => {
-                let away = away_suffix(state, &p.id, &group.id, turn.year, turn.week);
-                format!("⬜ {shift}{slot_name}{}{away}{rooms}", person_label(p))
+        let what = duty_prefix(group, slot_index, turn);
+        let who = assignee.map_or("nobody assigned", view::mention);
+        let line = match completion {
+            Some(c) if c.skipped => format!("⏭️ {what}{who} · skipped"),
+            Some(_) => format!("✅ {what}{who}"),
+            None => {
+                let away = assignee
+                    .filter(|p| state.is_absent(&p.id, &group.id, turn.year, turn.week))
+                    .map_or("", |_| " 🌴 away");
+                format!("⬜ {what}{who}{away}")
             }
         };
         out.push((line, assignee.and_then(|p| p.matrix_id.clone())));
+        if let Some(slot) = group.slots.get(slot_index) {
+            if !slot.room_names.is_empty() {
+                out.push((
+                    format!("{}{}", view::INDENT, slot.room_names.join(", ")),
+                    None,
+                ));
+            }
+        }
     }
     out
 }
@@ -708,15 +741,15 @@ fn build_turn_reminder(
         ReminderKind::Initial => "🔔 **Your turn starts today**",
         _ => "⏰ **Still open · ends today**",
     };
-    let mut lines = vec![title.to_owned(), String::new()];
+    let mut lines = vec![title.to_owned()];
     let mut all_mxids: Vec<String> = Vec::new();
     for (group, turn) in turns {
-        lines.push(format!("**{}**", group.name));
+        lines.push(String::new());
+        lines.extend(group_heading(group));
         for (line, mxid) in turn_lines(state, group, *turn, false) {
             lines.push(line);
             all_mxids.extend(mxid);
         }
-        lines.push(String::new());
     }
     all_mxids.sort();
     all_mxids.dedup();
@@ -729,41 +762,6 @@ fn parse_hhmm(s: &str) -> (u8, u8) {
     let h = parts.next().and_then(|p| p.parse().ok()).unwrap_or(9u8);
     let m = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0u8);
     (h.min(23), m.min(59))
-}
-
-/// Returns the MXID if the person has one (so `mentionify_with_names` renders
-/// a pill and the Mentions field triggers a push notification), otherwise falls
-/// back to the plain display name (for non-Matrix users).
-fn person_label(p: &crate::domain::Person) -> &str {
-    p.matrix_id.as_deref().unwrap_or(&p.display_name)
-}
-
-fn status_icon(done: bool) -> &'static str {
-    if done {
-        "✅"
-    } else {
-        "⬜"
-    }
-}
-
-/// " (🌴 away)" when the shown assignee is on record absence for this
-/// (group, week) — purely a display hint. `!member away` never reassigns an
-/// already-frozen week automatically (see `resolver::materialize`'s
-/// eligibility filter, which only applies to not-yet-frozen picks); this
-/// just makes it visible on the plan that the frozen assignee won't be
-/// doing it themselves, so `!takeover`/`!swap`/`!plan assign` is expected.
-fn away_suffix(
-    state: &crate::state::State,
-    person_id: &crate::domain::PersonId,
-    group_id: &crate::domain::GroupId,
-    year: i32,
-    week: u32,
-) -> &'static str {
-    if state.is_absent(person_id, group_id, year, week) {
-        " (🌴 away)"
-    } else {
-        ""
-    }
 }
 
 #[cfg(test)]
@@ -873,7 +871,6 @@ mod tests {
             plan.contains("✅ bob") || plan.contains("✅ @bob:example.org"),
             "{plan}"
         );
-        assert!(plan.contains("cleaned"), "{plan}");
     }
 
     // ── Mentions ──────────────────────────────────────────────────────────────
@@ -1140,6 +1137,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_plan_edit_only_notifies_people_new_on_the_plan() {
+        // Dave was on the plan; Erin just took over a turn. The edit keeps
+        // both pills, but only Erin gets a notification.
+        let before = "🧹 Week 10\n⬜ @dave:example.org";
+        let after = "🧹 Week 10\n✅ @dave:example.org\n⬜ @erin:example.org";
+        let edit = crate::format::mentionify(after).make_replacement(ReplacementMetadata::new(
+            plan1_event_id(),
+            Some(previous_mentions(before)),
+        ));
+        let notified = edit.mentions.expect("the edit carries mentions");
+        assert_eq!(
+            notified.user_ids.into_iter().collect::<Vec<_>>(),
+            vec![uid("@erin:example.org")]
+        );
+        let Some(Relation::Replacement(replacement)) = edit.relates_to else {
+            panic!("an edit");
+        };
+        let shown = replacement
+            .new_content
+            .mentions
+            .expect("new content mentions");
+        assert!(shown.user_ids.contains(&uid("@dave:example.org")));
+    }
+
+    #[test]
+    fn weekly_plan_reads_well_on_a_phone() {
+        // Rooms are an indented subtitle — of the group, or of each slot —
+        // instead of a long tail on every line; done lines keep their slot.
+        let alice = Person::new_matrix("@alice:example.org");
+        let bob = Person::new_named("Bob");
+        let mut hall = CleaningGroup::new("Hall");
+        hall.room_names = vec!["Stairs".into(), "Entrance".into()];
+        hall.member_ids = vec![bob.id.clone()];
+        let mut floor = CleaningGroup::new("Floor");
+        let mut scharni = crate::domain::CleaningSlot::new("Scharni");
+        scharni.room_names = vec!["Toilet".into(), "Shower".into()];
+        floor.slots = vec![scharni, crate::domain::CleaningSlot::new("Colbe")];
+        floor.member_ids = vec![alice.id.clone(), bob.id.clone()];
+        let mut state = State::default();
+        let (year, week) = (2024, 10);
+        for (group, slot, who) in [
+            (&hall, 0, &bob.id),
+            (&floor, 0, &alice.id),
+            (&floor, 1, &bob.id),
+        ] {
+            state.slot_assignments.push(SlotAssignment {
+                group_id: group.id.clone(),
+                slot_index: slot,
+                iso_year: year,
+                iso_week: week,
+                shift: 0,
+                person_id: Some(who.clone()),
+                source: Default::default(),
+            });
+        }
+        state.completions.push(crate::state::Completion {
+            group_id: floor.id.clone(),
+            slot_id: Some(floor.slots[0].id.clone()),
+            completed_by_id: alice.id.clone(),
+            responsible_person_ids: vec![],
+            iso_year: year,
+            iso_week: week,
+            shift: 0,
+            completed_at: chrono::Utc::now(),
+            skipped: false,
+        });
+        state.persons = vec![alice, bob];
+        state.cleaning_groups = vec![hall, floor];
+        let (plan, mxids) = build_weekly_plan(&state, year, week, &state.cleaning_groups);
+        let i = view::INDENT;
+        assert_eq!(
+            plan,
+            format!(
+                "🧹 **{}**\nReact ✅ when your part is done.\n\n\
+                 **Hall**\n{i}Stairs, Entrance\n⬜ Bob\n\n\
+                 **Floor**\n✅ Scharni: @alice:example.org\n{i}Toilet, Shower\n⬜ Colbe: Bob",
+                view::week_label(year, week)
+            )
+        );
+        assert_eq!(mxids, vec!["@alice:example.org".to_owned()]);
+    }
+
     // ── Startup reconciliation ────────────────────────────────────────────────
 
     fn timeline_event_from_json(
@@ -1339,7 +1419,7 @@ mod tests {
         });
         let (expected_now, _) = build_weekly_plan(&state, year, week, &state.cleaning_groups);
         assert!(
-            expected_now.contains('✅') && expected_now.contains("cleaned"),
+            expected_now.contains("✅ @bob:example.org"),
             "{expected_now}"
         );
 

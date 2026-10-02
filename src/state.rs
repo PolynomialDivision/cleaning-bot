@@ -39,6 +39,21 @@ pub struct ReactionDone {
     pub completed_by_id: PersonId,
     pub iso_year: i32,
     pub iso_week: u32,
+    /// Every duty the ✅ marked, so taking the reaction back undoes exactly
+    /// those. Empty in records written by older versions, which only knew
+    /// `group_id`.
+    #[serde(default)]
+    pub marked: Vec<MarkedDuty>,
+}
+
+/// One slot (`None` without slots) of one shift that a ✅ reaction marked.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MarkedDuty {
+    pub group_id: GroupId,
+    #[serde(default)]
+    pub slot_id: Option<SlotId>,
+    #[serde(default)]
+    pub shift: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

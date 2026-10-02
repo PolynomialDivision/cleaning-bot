@@ -23,7 +23,8 @@ pub(crate) fn command_may_change_current_plan(cmd: &str, sub: Option<&str>) -> b
             sub,
             Some("enable" | "disable" | "remove" | "slot" | "rhythm")
         ),
-        "!member" => matches!(sub, Some("remove" | "away" | "back")),
+        "!member" => matches!(sub, Some("add" | "remove" | "away" | "back")),
+        "!join" | "!leave" => true,
         _ => false,
     }
 }
@@ -153,7 +154,13 @@ pub(crate) fn discarded_pins_note(cleared: &[crate::domain::SlotAssignment]) -> 
     pinned.sort_by_key(|a| (a.iso_year, a.iso_week, a.shift, a.slot_index));
     let weeks: Vec<String> = pinned
         .iter()
-        .map(|a| format!("{} ({})", a.iso_week, source_label(&a.source)))
+        .map(|a| {
+            format!(
+                "{} ({})",
+                a.iso_week,
+                crate::view::source_note(&a.source).unwrap_or("planned")
+            )
+        })
         .collect();
     Some(format!(
         "⚠️ Discarded {} pinned week(s), now plain rotation: {}.",
@@ -376,6 +383,29 @@ fn first_changed_turn(
         .min()
 }
 
+/// Give the group's plain rotation turns after the current week back to the
+/// queue, in the order they were drawn — as if they had never been planned.
+/// Pinned weeks and anything done stay. Used when a group is disabled
+/// (nothing may advance its rotation while nobody cleans) and re-enabled
+/// (pick up exactly where it stopped).
+pub(crate) fn return_future_rotation_turns(
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+) -> anyhow::Result<Vec<crate::domain::SlotAssignment>> {
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(Vec::new());
+    };
+    let (y, w) = current_iso_week();
+    let (ny, nw) = add_weeks(y, w, 1);
+    let dropped = take_replannable_assignments(state, &group, Turn::new(ny, nw, 0));
+    let queue = resolver::rewind_queue(&resolver::reconcile_queue(state, &group), &dropped);
+    state.apply_event(DomainEvent::RotationQueueSet {
+        group_id: group_id.clone(),
+        queue,
+    })?;
+    Ok(dropped)
+}
+
 /// Remove and return the group's round-robin assignments from turn `from`
 /// on — the ones a re-plan may redraw. Admin/self-service/imported weeks
 /// and anything already done or skipped stay where they are.
@@ -416,6 +446,14 @@ pub(crate) fn first_turn_of(
         .min()
 }
 
+/// The group's name as configured (whatever case the command used).
+pub(crate) fn group_name_of(state: &crate::state::State, group_id: &GroupId) -> String {
+    state
+        .group_by_id(group_id)
+        .map(|g| g.name.clone())
+        .unwrap_or_default()
+}
+
 /// Confirmation lines for a join: the newcomer's first scheduled turn and
 /// what happened to the plan around it.
 pub(crate) fn join_summary(
@@ -427,20 +465,25 @@ pub(crate) fn join_summary(
     let Some(group) = state.group_by_id(group_id) else {
         return String::new();
     };
+    if !group.is_active {
+        return format!(
+            "{} is disabled — turns start once it's enabled again.",
+            group.name
+        );
+    }
     let first = match first_turn_of(state, group_id, person_id) {
         Some(turn) => format!(
-            "First turn: {} (week {}).",
-            turn.period_label(&group.rhythm),
-            turn.week
+            "First turn: {}",
+            crate::view::turn_label(turn, &group.rhythm)
         ),
         None => "First turn: not planned yet.".to_owned(),
     };
     let plan = match replanned_from {
         Some(turn) => format!(
-            "The running round is unchanged; weeks from week {} on were re-planned to include them.",
+            "Re-planned from week {} on; earlier weeks unchanged.",
             turn.week
         ),
-        None => "Already-planned weeks are unchanged.".to_owned(),
+        None => "No planned week had to change.".to_owned(),
     };
     format!("{first}\n{plan}")
 }
@@ -515,15 +558,15 @@ pub(crate) fn departure_summary(
         return String::new();
     };
     if departure.vacated.is_empty() {
-        return "They had no upcoming turns; the plan is unchanged.".to_owned();
+        return "No upcoming turns to hand on — nothing else changed.".to_owned();
     }
-    let n = departure.vacated.len();
+    let turns = crate::view::plural(departure.vacated.len(), "upcoming turn", "upcoming turns");
     let mut lines = vec![match departure.changed_from {
         Some(turn) => format!(
-            "Their {n} upcoming turn(s) were handed on: from week {} on, everyone after them moves up.",
+            "{turns} handed on — from week {}, everyone after moves up one turn.",
             turn.week
         ),
-        None => format!("Their {n} upcoming turn(s) were handed on."),
+        None => format!("{turns} handed on."),
     }];
     let mut pinned: Vec<&crate::domain::SlotAssignment> = departure
         .vacated
@@ -531,7 +574,7 @@ pub(crate) fn departure_summary(
         .filter(|a| a.source != AssignmentSource::RoundRobin)
         .collect();
     pinned.sort_by_key(|a| (a.iso_year, a.iso_week, a.shift, a.slot_index));
-    for a in pinned {
+    for a in &pinned {
         let turn = Turn::new(a.iso_year, a.iso_week, a.shift);
         let now = state
             .slot_assignee(group, a.slot_index, turn)
@@ -543,24 +586,24 @@ pub(crate) fn departure_summary(
             turn,
         };
         lines.push(format!(
-            "⚠️ Their {} week {} ({}) is now {now} — re-assign it if that was arranged differently.",
-            source_label(&a.source),
+            "⚠️ {} week {} ({}) → now {now}",
+            capitalize(crate::view::source_note(&a.source).unwrap_or("planned")),
             turn.week,
             duty.label(),
         ));
     }
+    if !pinned.is_empty() {
+        lines.push("Use !plan assign if that was arranged differently.".into());
+    }
     lines.join("\n")
 }
 
-/// How a pinned assignment came about, for messages.
-pub(crate) fn source_label(source: &AssignmentSource) -> &'static str {
-    match source {
-        AssignmentSource::RoundRobin => "rotation",
-        AssignmentSource::Manual | AssignmentSource::Assign => "assigned",
-        AssignmentSource::Takeover => "taken-over",
-        AssignmentSource::Swap => "swapped",
-        AssignmentSource::Import => "imported",
-    }
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// Remove and return `person_id`'s assignments in `group_id` after the
@@ -1101,6 +1144,57 @@ pub(crate) fn markable_duties(
     open.into_iter()
         .filter(|d| Some(d.turn.dates(&d.group.rhythm).0) == first)
         .collect()
+}
+
+/// Take back what a ✅ reaction marked (its redaction), through the event
+/// log like `!undo`. Only marks still made by the reacting person go — a
+/// skip or someone else's mark on the same duty since then stays. Returns
+/// whether anything changed.
+pub(crate) fn undo_reaction_done(
+    state: &mut crate::state::State,
+    rd: &crate::state::ReactionDone,
+) -> anyhow::Result<bool> {
+    let marked: Vec<crate::state::MarkedDuty> = if rd.marked.is_empty() {
+        // Older record: every mark of that person in that group and week.
+        state
+            .completions
+            .iter()
+            .filter(|c| {
+                c.group_id == rd.group_id
+                    && (c.iso_year, c.iso_week) == (rd.iso_year, rd.iso_week)
+                    && c.completed_by_id == rd.completed_by_id
+                    && !c.skipped
+            })
+            .map(|c| crate::state::MarkedDuty {
+                group_id: c.group_id.clone(),
+                slot_id: c.slot_id.clone(),
+                shift: c.shift,
+            })
+            .collect()
+    } else {
+        rd.marked.clone()
+    };
+    let mut changed = false;
+    for duty in marked {
+        let still_theirs = state.completions.iter().any(|c| {
+            c.group_id == duty.group_id
+                && (c.iso_year, c.iso_week, c.shift) == (rd.iso_year, rd.iso_week, duty.shift)
+                && c.slot_id == duty.slot_id
+                && c.completed_by_id == rd.completed_by_id
+                && !c.skipped
+        });
+        if still_theirs {
+            state.apply_event(DomainEvent::CleaningUndone {
+                group_id: duty.group_id,
+                iso_year: rd.iso_year,
+                iso_week: rd.iso_week,
+                slot_id: duty.slot_id,
+                shift: Some(duty.shift),
+            })?;
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 /// Record `duties` as cleaned by `person_id`.

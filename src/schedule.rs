@@ -70,11 +70,6 @@ impl AssignmentInstance {
             .map(|p| p.name.as_str())
             .unwrap_or("(nobody assigned)")
     }
-
-    /// The MXID of the assignee if they have one, else `None`.
-    pub fn assignee_mxid(&self) -> Option<&str> {
-        self.assignee.as_ref().and_then(|p| p.mxid.as_deref())
-    }
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
@@ -115,26 +110,6 @@ impl ScheduleSnapshot {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.assignments.is_empty()
-    }
-
-    /// All assignments for a given (year, week) pair.
-    pub fn for_group_in_week(&self, year: i32, week: u32) -> Vec<&AssignmentInstance> {
-        self.assignments
-            .iter()
-            .filter(|a| a.iso_year == year && a.iso_week == week)
-            .collect()
-    }
-
-    /// Unique (iso_year, iso_week) pairs in order.
-    pub fn weeks(&self) -> Vec<(i32, u32)> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for a in &self.assignments {
-            if seen.insert((a.iso_year, a.iso_week)) {
-                result.push((a.iso_year, a.iso_week));
-            }
-        }
-        result
     }
 }
 

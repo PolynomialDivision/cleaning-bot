@@ -223,7 +223,10 @@ pub(crate) async fn cmd_joinfloor(
     let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
     let summary = join_summary(&state, &group_id, &person_id, replanned_from);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Joined «{group_name}».\n{summary}")))
+    Ok(Some(format!(
+        "✅ You joined {}\n{summary}",
+        group_name_of(&state, &group_id)
+    )))
 }
 
 // ── !leave <group> ───────────────────────────────────────────────────────
@@ -270,5 +273,8 @@ pub(crate) async fn cmd_leavefloor(
     let departure = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
     let summary = departure_summary(&state, &group_id, &departure);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Left «{group_name}».\n{summary}")))
+    Ok(Some(format!(
+        "✅ You left {}\n{summary}",
+        group_name_of(&state, &group_id)
+    )))
 }

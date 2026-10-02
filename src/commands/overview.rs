@@ -6,10 +6,7 @@ use crate::state::State;
 /// Name shown in overviews — never a mention, so looking at the status does
 /// not ping anyone.
 fn name(person: &Person) -> String {
-    match &person.matrix_id {
-        Some(_) => person.display_name.clone(),
-        None => format!("{} (no Matrix)", person.display_name),
-    }
+    crate::view::name(person).to_owned()
 }
 
 fn away_marker(
@@ -26,8 +23,8 @@ fn away_marker(
     }
 }
 
-/// One status line per slot of each turn of the week: "✅ Alice",
-/// "⬜ Thu–Sun · Carol ← now", "⬜ Colbe · bob" — so everyone sharing a week
+/// One status line per slot of each turn of the week — "✅ Scharni: Alice",
+/// "⬜ Thu–Sun: Carol ← now", "❌ Bob · missed" — so everyone sharing a week
 /// (slots, shifts) shows with their own done/open state.
 pub(crate) fn week_task_lines(
     state: &State,
@@ -43,37 +40,27 @@ pub(crate) fn week_task_lines(
         } else {
             ""
         };
-        let shift = turn
-            .shift_label(&group.rhythm)
-            .map(|l| format!("{l} · "))
-            .unwrap_or_default();
         for (slot_index, assignee) in state.turn_assignees(group, turn) {
-            let slot = group
-                .slots
-                .get(slot_index)
-                .map(|s| format!("{} · ", s.name))
-                .unwrap_or_default();
+            let what = crate::scheduler::duty_prefix(group, slot_index, turn);
             let who = assignee
                 .map(name)
                 .unwrap_or_else(|| "nobody assigned".into());
             let line = match state.completion_for(group, slot_index, turn) {
-                Some(c) if c.skipped => (true, format!("⏭️ {shift}{slot}{who} · skipped")),
+                Some(c) if c.skipped => (true, format!("⏭️ {what}{who} · skipped")),
                 Some(c) => {
                     let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
                         .then(|| state.person_by_id(&c.completed_by_id))
                         .flatten()
-                        .map(|p| format!(" (done by {})", p.display_name))
+                        .map(|p| format!(" · done by {}", p.display_name))
                         .unwrap_or_default();
-                    (true, format!("✅ {shift}{slot}{who}{by}"))
+                    (true, format!("✅ {what}{who}{by}"))
                 }
-                None if state.turn_over(group, turn) => {
-                    (false, format!("❌ {shift}{slot}{who} · missed"))
-                }
+                None if state.turn_over(group, turn) => (false, format!("❌ {what}{who} · missed")),
                 None => {
                     let away = assignee
                         .map(|p| away_marker(state, p, &group.id, year, week))
                         .unwrap_or_default();
-                    (false, format!("⬜ {shift}{slot}{who}{away}{now}"))
+                    (false, format!("⬜ {what}{who}{away}{now}"))
                 }
             };
             lines.push(line);
@@ -82,36 +69,46 @@ pub(crate) fn week_task_lines(
     lines
 }
 
-/// "Next (week 40): Mon–Wed Dave · Thu–Sun Eve" — the group's first due
-/// week after `after`, with everyone on it.
+/// Everyone on one due week of the group, compactly: "Koch (Scharni),
+/// Paul (Colbe)", "Ann (Mon–Wed), Bob (Thu–Sun)", or just "Dave".
+fn week_people(state: &State, group: &CleaningGroup, (y, w): (i32, u32)) -> String {
+    let mut parts = Vec::new();
+    for turn in state.turns_in_week(group, y, w) {
+        for (slot_index, assignee) in state.turn_assignees(group, turn) {
+            let who = assignee.map(name).unwrap_or_else(|| "nobody".into());
+            let part: Vec<String> = turn
+                .shift_label(&group.rhythm)
+                .into_iter()
+                .chain(group.slots.get(slot_index).map(|s| s.name.clone()))
+                .collect();
+            parts.push(if part.is_empty() {
+                who
+            } else {
+                format!("{who} ({})", part.join(" · "))
+            });
+        }
+    }
+    parts.join(", ")
+}
+
+/// "Next week: Dave" / "Week 43: Dave" — the group's first due week after
+/// `after`, with everyone on it.
 pub(crate) fn next_week_line(
     state: &State,
     group: &CleaningGroup,
     after: (i32, u32),
 ) -> Option<String> {
-    let (y, w) = state.next_due_week(group, add_weeks(after.0, after.1, 1));
-    let parts: Vec<String> = state
-        .turns_in_week(group, y, w)
-        .into_iter()
-        .map(|turn| {
-            let people: Vec<String> = state
-                .turn_assignees(group, turn)
-                .into_iter()
-                .map(|(i, p)| {
-                    let who = p.map(name).unwrap_or_else(|| "nobody".into());
-                    match group.slots.get(i) {
-                        Some(slot) => format!("{} {who}", slot.name),
-                        None => who,
-                    }
-                })
-                .collect();
-            match turn.shift_label(&group.rhythm) {
-                Some(label) => format!("{label} {}", people.join(", ")),
-                None => people.join(", "),
-            }
-        })
-        .collect();
-    (!parts.is_empty()).then(|| format!("Next (week {w}): {}", parts.join(" · ")))
+    let next = state.next_due_week(group, add_weeks(after.0, after.1, 1));
+    let people = week_people(state, group, next);
+    if people.is_empty() {
+        return None;
+    }
+    let when = if next == add_weeks(after.0, after.1, 1) {
+        "Next week".to_owned()
+    } else {
+        format!("Week {}", next.1)
+    };
+    Some(format!("{when}: {people}"))
 }
 
 // ── !status ───────────────────────────────────────────────────────────────────
@@ -156,8 +153,8 @@ pub(crate) fn status_text(state: &State, year: i32, week: u32) -> String {
     }
 
     let mut lines = vec![format!(
-        "📋 **Week {week}** ({}) · {done} of {total} done",
-        week_dates(year, week)
+        "📋 **{}** · {done}/{total} done",
+        crate::view::week_label(year, week)
     )];
     lines.extend(body);
     if !not_due.is_empty() {
@@ -183,33 +180,13 @@ pub(crate) async fn cmd_groups(
     }))
 }
 
-fn rooms_summary(group: &CleaningGroup) -> Option<String> {
-    if group.is_multi_slot() {
-        let slots: Vec<String> = group
-            .slots
-            .iter()
-            .map(|slot| {
-                if slot.room_names.is_empty() {
-                    slot.name.clone()
-                } else {
-                    format!("{} ({})", slot.name, slot.room_names.join(", "))
-                }
-            })
-            .collect();
-        Some(format!("Slots: {}", slots.join(" · ")))
-    } else {
-        group.rooms_text()
-    }
-}
-
 /// Every group with its members at a glance.
 pub(crate) fn groups_text(state: &State) -> String {
     if state.cleaning_groups.is_empty() {
         return "No cleaning groups configured yet.".into();
     }
     let (year, week) = current_iso_week();
-    let active_count = state.cleaning_groups.iter().filter(|g| g.is_active).count();
-    let mut lines = vec![format!("🏢 **Cleaning groups** ({active_count})")];
+    let mut lines = vec!["🏢 **Groups** · !groups <name> for details".to_owned()];
     // Active groups first; disabled ones follow, marked 🚫 but still with
     // their members.
     let ordered = state
@@ -219,41 +196,40 @@ pub(crate) fn groups_text(state: &State) -> String {
         .chain(state.cleaning_groups.iter().filter(|g| !g.is_active));
     for group in ordered {
         let members = state.members_of(group);
-        let members_text = if members.is_empty() {
-            "no members".to_owned()
+        let mut header = if group.is_active {
+            format!("**{}**", group.name)
         } else {
-            members
-                .iter()
-                .map(|p| {
-                    format!(
-                        "{}{}",
-                        name(p),
-                        away_marker(state, p, &group.id, year, week)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
+            format!("🚫 **{}** · disabled", group.name)
         };
-        let marker = if group.is_active { "" } else { "🚫 " };
-        let suffix = if group.is_active { "" } else { " · disabled" };
-        lines.push(String::new());
-        lines.push(format!(
-            "{marker}**{}** ({}) · {members_text}{suffix}",
-            group.name,
-            members.len()
+        header.push_str(&format!(
+            " · {}",
+            crate::view::plural(members.len(), "member", "members")
         ));
-        if let Some(rooms) = rooms_summary(group) {
-            lines.push(rooms);
+        lines.push(String::new());
+        lines.push(header);
+        if !members.is_empty() {
+            lines.push(
+                members
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{}{}",
+                            name(p),
+                            away_marker(state, p, &group.id, year, week)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
         }
     }
     lines.join("\n")
 }
 
-/// One group in detail: rotation order, this week, next turn, rooms, weights.
+/// One group in detail: this week, what's coming, members, rooms, weights.
 pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String {
     let (year, week) = current_iso_week();
-    let mut header = format!("🏢 **{}**", group.name);
-    header.push_str(&format!(" · cleaned {}", group.rhythm.describe()));
+    let mut header = format!("🏢 **{}** · {}", group.name, group.rhythm.describe());
     if !group.is_active {
         header.push_str(" · 🚫 disabled");
     }
@@ -262,56 +238,80 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String 
     }
     let mut lines = vec![header];
 
-    let queue = resolver::reconcile_queue(state, group);
-    if queue.is_empty() {
-        lines.push("No members yet.".into());
-    } else {
-        lines.push("Members, next unplanned turn first:".into());
-        for (i, pid) in queue.iter().enumerate() {
-            let label = state
-                .person_by_id(pid)
-                .map(|p| {
-                    format!(
-                        "{}{}",
-                        person_label(p),
-                        away_marker(state, p, &group.id, year, week)
-                    )
-                })
-                .unwrap_or_else(|| format!("unknown ({pid})"));
-            lines.push(format!("{}. {label}", i + 1));
+    let weight_of = |w: f64| {
+        if (w - 1.0).abs() > 0.01 {
+            format!(" ×{w:.1}")
+        } else {
+            String::new()
         }
+    };
+    if group.slots.iter().all(|s| s.room_names.is_empty()) && group.is_multi_slot() {
+        let slots: Vec<String> = group
+            .slots
+            .iter()
+            .map(|s| format!("{}{}", s.name, weight_of(s.weight)))
+            .collect();
+        lines.push(format!("Slots: {}", slots.join(", ")));
+    } else if group.is_multi_slot() {
+        for slot in &group.slots {
+            lines.push(format!(
+                "{}{}: {}",
+                slot.name,
+                weight_of(slot.weight),
+                slot.room_names.join(", ")
+            ));
+        }
+    } else if !group.room_names.is_empty() {
+        lines.push(group.room_names.join(", "));
     }
 
-    if state.belongs_in_weekly_plan(group, year, week) {
-        lines.push(format!("This week (week {week}):"));
+    if group.is_active && state.belongs_in_weekly_plan(group, year, week) {
+        lines.push(String::new());
+        lines.push(format!("**This week** · week {week}"));
         lines.extend(
             week_task_lines(state, group, year, week)
                 .into_iter()
                 .map(|(_, line)| line),
         );
     }
-    if !queue.is_empty() {
-        lines.push(next_assignment_summary(state, &group.id));
+    if group.is_active && !group.member_ids.is_empty() {
+        let mut upcoming = Vec::new();
+        let mut at = (year, week);
+        for _ in 0..4 {
+            at = state.next_due_week(group, add_weeks(at.0, at.1, 1));
+            upcoming.push(format!("Week {}: {}", at.1, week_people(state, group, at)));
+        }
+        lines.push(String::new());
+        lines.push("**Coming up**".into());
+        lines.extend(upcoming);
     }
 
-    if group.is_multi_slot() {
-        lines.push("Slots:".into());
-        for slot in &group.slots {
-            let rooms = if slot.room_names.is_empty() {
-                "no rooms".to_owned()
-            } else {
-                slot.room_names.join(", ")
-            };
-            let weight = if (slot.weight - 1.0).abs() > 0.01 {
-                format!(" · ×{:.1}", slot.weight)
-            } else {
-                String::new()
-            };
-            lines.push(format!("• {} · {rooms}{weight}", slot.name));
-        }
-    } else if let Some(rooms) = group.rooms_text() {
-        lines.push(rooms);
+    let members = state.members_of(group);
+    lines.push(String::new());
+    lines.push(format!("**Members** · {}", members.len()));
+    if members.is_empty() {
+        lines.push("No members yet — !member add or !join.".into());
+    } else {
+        lines.push(
+            members
+                .iter()
+                .map(|p| {
+                    let no_matrix = if p.matrix_id.is_none() {
+                        " (no Matrix)"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}{no_matrix}{}",
+                        name(p),
+                        away_marker(state, p, &group.id, year, week)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
     }
+
     let mut room_weights: Vec<String> = group
         .room_weights
         .iter()

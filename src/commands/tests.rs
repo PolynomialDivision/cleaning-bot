@@ -303,7 +303,10 @@ async fn matrix_participant_normal_flow_persists_and_rejects_duplicates() {
         .await
         .unwrap()
         .unwrap();
-    assert!(removed.contains("Removed @new:example.org"));
+    assert!(
+        removed.starts_with("✅ Removed new from 2nd Floor"),
+        "by name, no ping: {removed}"
+    );
     assert!(ctx
         .state
         .lock()
@@ -965,6 +968,10 @@ fn command_may_change_current_plan_includes_importplan() {
         ("!groups", Some("disable")),
         ("!groups", Some("enable")),
         ("!member", Some("away")),
+        // A join can freeze a not-yet-frozen current week.
+        ("!member", Some("add")),
+        ("!join", None),
+        ("!leave", None),
     ] {
         assert!(
             command_may_change_current_plan(cmd, sub),
@@ -980,7 +987,7 @@ fn command_may_change_current_plan_includes_importplan() {
         ("!swap", Some("@bob:example.org")),
         ("!groups", None),
         ("!groups", Some("2nd floor")),
-        ("!member", Some("add")),
+        ("!next", None),
         ("", None),
     ] {
         assert!(
@@ -1538,9 +1545,15 @@ async fn join_mid_cycle_keeps_the_running_cycle_and_seats_the_newcomer_in_the_ne
 
     // The reply names the actual first turn and the re-planned range.
     assert!(reply.contains("First turn: "), "{reply}");
-    assert!(reply.contains(&format!("(week {})", week(4).1)), "{reply}");
     assert!(
-        reply.contains(&format!("weeks from week {} on were re-planned", week(4).1)),
+        reply.contains(&format!("First turn: Week {} · ", week(4).1)),
+        "{reply}"
+    );
+    assert!(
+        reply.contains(&format!(
+            "Re-planned from week {} on; earlier weeks unchanged.",
+            week(4).1
+        )),
         "{reply}"
     );
 
@@ -1616,12 +1629,9 @@ async fn join_never_skips_an_existing_member_who_has_not_had_a_turn_yet() {
     assert_eq!(at(3), Some(aid), "the next cycle starts with Anna again");
     assert_eq!(at(4), Some(david_id), "David is seated in that next cycle");
     // Nothing was frozen past week 0, so no frozen week had to change.
+    assert!(reply.contains("No planned week had to change."), "{reply}");
     assert!(
-        reply.contains("Already-planned weeks are unchanged."),
-        "{reply}"
-    );
-    assert!(
-        reply.contains(&format!("(week {})", add_weeks(y, w, 4).1)),
+        reply.contains(&format!("First turn: Week {} · ", add_weeks(y, w, 4).1)),
         "{reply}"
     );
 
@@ -1722,7 +1732,7 @@ async fn several_joins_in_one_cycle_are_spread_through_the_next_cycle() {
     assert_eq!(assignee_for(&state, &group_id, ly, lw), None);
 
     assert!(
-        reply.contains(&format!("(week {})", add_weeks(y, w, 7).1)),
+        reply.contains(&format!("First turn: Week {} · ", add_weeks(y, w, 7).1)),
         "Gina's first turn is reported: {reply}"
     );
 
@@ -2028,7 +2038,7 @@ async fn removeperson_with_future_assignments_moves_everyone_after_them_up() {
     );
     assert!(
         reply.contains(&format!(
-            "from week {} on",
+            "from week {}, everyone after moves up one turn",
             add_weeks(current_iso_week().0, current_iso_week().1, 2).1
         )),
         "{reply}"
@@ -2102,7 +2112,7 @@ async fn leaving_before_their_turn_moves_the_rest_up_without_back_to_back_turns(
         assert_ne!(pair[0], pair[1], "back-to-back turns: {plan:?}");
     }
     assert!(
-        reply.contains("Their 2 upcoming turn(s) were handed on"),
+        reply.contains("2 upcoming turns handed on — from week"),
         "{reply}"
     );
     assert_plan_invariants(&state);
@@ -2201,7 +2211,7 @@ async fn leaving_reports_their_pinned_weeks_and_keeps_everyone_elses() {
     );
     assert!(
         reply.contains(&format!(
-            "⚠️ Their assigned week {} (Floor) is now",
+            "⚠️ Assigned week {} (Floor) → now",
             add_weeks(y, w, 6).1
         )),
         "his pinned week must be reported, not silently dropped: {reply}"
@@ -2313,7 +2323,7 @@ async fn the_scheduler_keeps_the_frozen_plan_rolling_without_touching_it() {
 }
 
 #[tokio::test]
-async fn myplan_lists_the_senders_next_turns_with_their_kind() {
+async fn next_lists_the_senders_turns_with_when_what_and_kind() {
     let anna = Person::new_matrix("@anna:example.org");
     let bob = Person::new_named("Bob");
     let mut group = CleaningGroup::new("Floor");
@@ -2327,6 +2337,7 @@ async fn myplan_lists_the_senders_next_turns_with_their_kind() {
     seed_materialized_weeks(&mut state, 4); // Anna, Bob, Anna, Bob
     let (y, w) = current_iso_week();
     let (py, pw) = add_weeks(y, w, 3);
+    // The paper plan puts Anna on week 3 instead of Bob.
     state
         .apply_event(DomainEvent::SlotAssigned {
             group_id: gid.clone(),
@@ -2342,62 +2353,72 @@ async fn myplan_lists_the_senders_next_turns_with_their_kind() {
         .unwrap();
     let (ctx, path, _) = test_context_with_horizon(state, 4);
     let anna_mxid = OwnedUserId::try_from("@anna:example.org").unwrap();
-
-    let reply = cmd_myplan(&ctx, &anna_mxid, &["4"]).await.unwrap().unwrap();
-    let lines: Vec<&str> = reply.lines().collect();
-    assert!(lines[0].contains("Upcoming turns for anna"), "{reply}");
     let week = |i: i64| add_weeks(y, w, i).1;
+
+    let reply = cmd_next(&ctx, &anna_mxid, &["4"]).await.unwrap().unwrap();
+    let lines: Vec<&str> = reply.lines().collect();
+    assert_eq!(lines[0], "📅 **Your next turns**", "{reply}");
     assert!(
-        lines[1].starts_with(&format!("• week {} ", week(0))),
+        lines[1].starts_with(&format!("• **Week {} · ", week(0))) && lines[1].ends_with("** · now"),
+        "the first entry says when, relative to today: {reply}"
+    );
+    assert_eq!(lines[2], format!("{}Floor", crate::view::INDENT), "{reply}");
+    assert!(
+        lines[3].starts_with(&format!("• Week {} · ", week(2))),
         "{reply}"
     );
     assert!(
-        lines[1].contains("now"),
-        "the running turn is flagged: {reply}"
-    );
-    assert!(
-        lines[2].starts_with(&format!("• week {} ", week(2))),
+        lines[5].starts_with(&format!("• Week {} · ", week(3))),
         "{reply}"
     );
+    assert_eq!(lines[6], format!("{}Floor · imported", crate::view::INDENT));
+    // Her imported week counts as her turn, so Bob (last on in week 1)
+    // comes before her again: her next is week 5, not 4 — and tentative.
     assert!(
-        lines[3].starts_with(&format!("• week {} ", week(3))) && lines[3].contains("(imported)"),
+        lines[7].starts_with(&format!("• Week {} · ", week(5))),
         "{reply}"
-    );
-    assert!(
-        lines[4].starts_with(&format!("• week {} ", week(4))) && lines[4].contains("(tentative)"),
-        "past the frozen plan: {reply}"
     );
     assert_eq!(
-        lines.len(),
-        6,
-        "four turns plus the tentative note: {reply}"
+        lines[8],
+        format!("{}Floor · tentative", crate::view::INDENT)
+    );
+    assert_eq!(
+        lines.last(),
+        Some(&"Tentative = not fixed yet; may shift if members change."),
+        "{reply}"
     );
 
-    // Anyone can look someone else up, just like !next.
-    let bob_plan = cmd_myplan(&ctx, &anna_mxid, &["Bob", "1"])
+    // Anyone can look someone else up, by display name.
+    let bob_plan = cmd_next(&ctx, &anna_mxid, &["Bob", "1"])
         .await
         .unwrap()
         .unwrap();
-    assert!(bob_plan.contains("Upcoming turns for Bob"), "{bob_plan}");
     assert!(
-        bob_plan.contains(&format!("• week {} ", week(1))),
+        bob_plan.starts_with("📅 **Next turns · Bob**"),
+        "{bob_plan}"
+    );
+    assert!(
+        bob_plan.contains(&format!("• **Week {} · ", week(1))),
         "{bob_plan}"
     );
 
     let stranger = OwnedUserId::try_from("@new:example.org").unwrap();
-    let none = cmd_myplan(&ctx, &stranger, &[]).await.unwrap().unwrap();
-    assert!(none.contains("not registered"), "{none}");
+    let none = cmd_next(&ctx, &stranger, &[]).await.unwrap().unwrap();
+    assert_eq!(
+        none,
+        "You're not on the cleaning plan yet — !join <group> to join one."
+    );
     let _ = tokio::fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn myplan_without_upcoming_turns_says_so() {
+async fn next_for_someone_in_no_group_says_so() {
     let (mut state, ..) = rotation_state();
     state.created_at = Some(Utc::now());
     state.persons.push(Person::new_named("Zoe")); // in no group
     let (ctx, path, admin) = test_context(state);
-    let reply = cmd_myplan(&ctx, &admin, &["Zoe"]).await.unwrap().unwrap();
-    assert_eq!(reply, "📅 No upcoming turns for Zoe in the next two years.");
+    let reply = cmd_next(&ctx, &admin, &["Zoe"]).await.unwrap().unwrap();
+    assert_eq!(reply, "Zoe is not in any cleaning group.");
     let _ = tokio::fs::remove_file(path).await;
 }
 
@@ -3907,15 +3928,15 @@ async fn status_lists_every_person_of_a_shared_week_with_their_own_state() {
     let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
 
     let before = cmd_status(&ctx).await.unwrap().unwrap();
-    assert!(before.contains("0 of 2 done"), "{before}");
-    assert!(before.contains("⬜ Scharni · alice"), "{before}");
-    assert!(before.contains("⬜ Colbe · bob"), "{before}");
+    assert!(before.contains("· 0/2 done"), "{before}");
+    assert!(before.contains("⬜ Scharni: alice"), "{before}");
+    assert!(before.contains("⬜ Colbe: bob"), "{before}");
 
     cmd_done(&ctx, &alice, &[]).await.unwrap().unwrap();
     let after = cmd_status(&ctx).await.unwrap().unwrap();
-    assert!(after.contains("1 of 2 done"), "{after}");
-    assert!(after.contains("✅ Scharni · alice"), "{after}");
-    assert!(after.contains("⬜ Colbe · bob"), "{after}");
+    assert!(after.contains("· 1/2 done"), "{after}");
+    assert!(after.contains("✅ Scharni: alice"), "{after}");
+    assert!(after.contains("⬜ Colbe: bob"), "{after}");
     // Status never pings: names, not Matrix IDs.
     assert!(!after.contains("@alice:example.org"), "{after}");
 
@@ -3945,9 +3966,9 @@ async fn status_shows_who_actually_cleaned_and_skips() {
     cmd_skip(&ctx, &admin, &["Floor"]).await.unwrap();
 
     let text = cmd_status(&ctx).await.unwrap().unwrap();
-    assert!(text.contains("✅ Scharni · alice (done by bob)"), "{text}");
-    assert!(text.contains("⏭️ Colbe · bob · skipped"), "{text}");
-    assert!(text.contains("2 of 2 done"), "{text}");
+    assert!(text.contains("✅ Scharni: alice · done by bob"), "{text}");
+    assert!(text.contains("⏭️ Colbe: bob · skipped"), "{text}");
+    assert!(text.contains("· 2/2 done"), "{text}");
 
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -4041,19 +4062,27 @@ async fn groups_overview_shows_every_group_with_its_members() {
 
     let text = cmd_groups(&ctx, None).await.unwrap().unwrap();
     assert!(
-        text.contains("**Floor** (3) · alice, bob, Carol (no Matrix)"),
+        text.contains("**Floor** · 3 members\nalice, bob, Carol"),
         "{text}"
     );
-    assert!(text.contains("Slots: Scharni · Colbe"), "{text}");
     assert!(
-        text.contains("🚫 **Storage** (1) · bob · disabled"),
-        "{text}"
+        text.contains("🚫 **Storage** · disabled · 1 member\nbob"),
+        "disabled groups follow, still with their members: {text}"
+    );
+    let detail = cmd_groups(&ctx, Some("floor")).await.unwrap().unwrap();
+    assert!(detail.contains("Carol (no Matrix)"), "{detail}");
+    assert!(
+        !detail.contains("@alice"),
+        "details never ping members: {detail}"
     );
 
-    let detail = cmd_groups(&ctx, Some("floor")).await.unwrap().unwrap();
     assert!(detail.contains("🏢 **Floor**"), "{detail}");
-    assert!(detail.contains("⬜ Scharni · alice"), "{detail}");
-    assert!(detail.contains("@bob:example.org"), "{detail}");
+    assert!(detail.contains("⬜ Scharni: alice"), "{detail}");
+    assert!(detail.contains("Slots: Scharni, Colbe"), "{detail}");
+    assert!(
+        !detail.contains("@bob:example.org"),
+        "looking at a group must not ping its members: {detail}"
+    );
 
     let missing = cmd_groups(&ctx, Some("Attic")).await.unwrap().unwrap();
     assert!(missing.contains("not found"), "{missing}");
@@ -4115,14 +4144,23 @@ async fn next_names_the_persons_own_turn_not_just_the_next_due_week() {
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
     let reply = cmd_next(&ctx, &bob, &[]).await.unwrap().unwrap();
-    assert!(reply.contains("next week"), "{reply}");
+    assert!(
+        reply.lines().nth(1).unwrap().ends_with("** · next week"),
+        "{reply}"
+    );
     let reply = cmd_next(&ctx, &alice, &[]).await.unwrap().unwrap();
-    assert!(reply.contains("this week"), "{reply}");
+    assert!(
+        reply.lines().nth(1).unwrap().ends_with("** · now"),
+        "{reply}"
+    );
 
     cmd_done(&ctx, &alice, &[]).await.unwrap();
     let reply = cmd_next(&ctx, &alice, &[]).await.unwrap().unwrap();
-    assert!(!reply.contains("this week"), "{reply}");
-    assert!(reply.contains("Already done: 2nd Floor"), "{reply}");
+    assert!(
+        !reply.contains("· now"),
+        "a done turn is no longer next: {reply}"
+    );
+    assert!(reply.contains("✅ Done this week: 2nd Floor"), "{reply}");
 
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -4408,14 +4446,12 @@ async fn status_shows_each_shift_with_its_own_person_state_and_whats_next() {
         text.contains("**Bathroom** · 2× per week (Mon–Wed, Thu–Sun)"),
         "{text}"
     );
-    assert!(text.contains("✅ Mon–Wed · "), "{text}");
-    assert!(text.contains("⬜ Thu–Sun · "), "{text}");
+    assert!(text.contains("✅ Mon–Wed: "), "{text}");
+    assert!(text.contains("⬜ Thu–Sun: "), "{text}");
     assert!(text.contains("**Kitchen**\n⬜ anna"), "{text}");
-    assert!(text.contains("1 of 3 done"), "{text}");
-    assert!(
-        text.contains(&format!("Next (week {}): Mon–Wed ", add_weeks(y, w, 1).1)),
-        "{text}"
-    );
+    assert!(text.contains("· 1/3 done"), "{text}");
+    assert!(text.contains("Next week: "), "{text}");
+    assert!(text.contains(" (Mon–Wed), "), "{text}");
     // The running shift is marked.
     let now_marked = text.lines().filter(|l| l.ends_with("← now")).count();
     assert!(now_marked <= 1, "{text}");
@@ -4687,22 +4723,21 @@ async fn cleaning_person_shows_a_matrix_participant_across_groups() {
         .unwrap();
     assert_eq!(by_mxid, by_name);
     let lines: Vec<&str> = by_mxid.lines().collect();
-    assert!(lines[0].contains("Upcoming turns for mia"), "{by_mxid}");
+    let indent = crate::view::INDENT;
+    assert_eq!(lines[0], "📅 **Next turns · mia**", "{by_mxid}");
+    // Both of this week's duties share one entry.
     assert!(
-        lines[1].starts_with(&format!("• week {} ", weeks[0].1))
-            && lines[1].ends_with("Floor · now ⚠️"),
+        lines[1].starts_with(&format!("• **Week {} · ", weeks[0].1))
+            && lines[1].ends_with("** · now"),
         "{by_mxid}"
     );
+    assert_eq!(lines[2], format!("{indent}Floor, Kitchen"), "{by_mxid}");
     assert!(
-        lines[2].starts_with(&format!("• week {} ", weeks[0].1))
-            && lines[2].ends_with("Kitchen · now ⚠️"),
+        lines[3].starts_with(&format!("• Week {} · ", weeks[2].1)),
         "{by_mxid}"
     );
-    assert!(
-        lines[3].starts_with(&format!("• week {} ", weeks[2].1)) && lines[3].contains("Kitchen"),
-        "{by_mxid}"
-    );
-    assert_eq!(lines.len(), 4, "{by_mxid}");
+    assert_eq!(lines[4], format!("{indent}Kitchen"), "{by_mxid}");
+    assert_eq!(lines.len(), 5, "{by_mxid}");
     let _ = tokio::fs::remove_file(path).await;
 }
 
@@ -4714,14 +4749,21 @@ async fn cleaning_person_shows_a_non_matrix_participant_with_pinned_turns() {
         .unwrap()
         .unwrap();
     let lines: Vec<&str> = reply.lines().collect();
-    assert!(lines[0].contains("Upcoming turns for Dan"), "{reply}");
+    let indent = crate::view::INDENT;
+    assert_eq!(lines[0], "📅 **Next turns · Dan**", "{reply}");
     assert!(
-        lines[1].starts_with(&format!("• week {} ", weeks[1].1)) && lines[1].ends_with("· Floor"),
+        lines[1].starts_with(&format!("• **Week {} · ", weeks[1].1))
+            && lines[1].ends_with("** · next week"),
         "his rotation turn: {reply}"
     );
+    assert_eq!(lines[2], format!("{indent}Floor"), "{reply}");
     assert!(
-        lines[2].starts_with(&format!("• week {} ", weeks[3].1))
-            && lines[2].ends_with("Kitchen (imported)"),
+        lines[3].starts_with(&format!("• Week {} · ", weeks[3].1)),
+        "{reply}"
+    );
+    assert_eq!(
+        lines[4],
+        format!("{indent}Kitchen · imported"),
         "an imported turn outside his own group: {reply}"
     );
     let _ = tokio::fs::remove_file(path).await;
@@ -4743,8 +4785,15 @@ async fn cleaning_person_reports_an_ambiguous_name_instead_of_guessing() {
         .await
         .unwrap()
         .unwrap();
-    assert!(alex.contains(&format!("• week {} ", weeks[2].1)), "{alex}");
-    assert!(alex.contains("Floor"), "{alex}");
+    assert!(alex.starts_with("📅 **Next turns · alex**"), "{alex}");
+    assert!(
+        alex.contains(&format!("• **Week {} · ", weeks[2].1)),
+        "{alex}"
+    );
+    assert!(
+        alex.ends_with(&format!("{}Floor", crate::view::INDENT)),
+        "{alex}"
+    );
     let _ = tokio::fs::remove_file(path).await;
 }
 
@@ -4755,7 +4804,7 @@ async fn cleaning_person_without_upcoming_turns_or_name_says_so() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(zoe, "📅 No upcoming turns for Zoe in the next two years.");
+    assert_eq!(zoe, "Zoe is not in any cleaning group.");
     let unknown = cmd_cleaning_person(&ctx, &viewer, &["Nobody"])
         .await
         .unwrap()
@@ -4796,19 +4845,22 @@ async fn next_finds_a_person_by_unique_display_name_or_matrix_id() {
         .unwrap()
         .unwrap();
     assert_eq!(by_name, by_mxid);
+    let lines: Vec<&str> = by_name.lines().collect();
+    assert_eq!(lines[0], "📅 **Next turns · mia**", "{by_name}");
     assert!(
-        by_name.starts_with(&format!("📅 Next turn for mia: **week {} ", weeks[0].1)),
+        lines[1].starts_with(&format!("• **Week {} · ", weeks[0].1)),
         "{by_name}"
     );
-    assert!(by_name.ends_with("· Floor, Kitchen"), "{by_name}");
+    assert_eq!(lines[2], format!("{}Floor, Kitchen", crate::view::INDENT));
 
     // A Matrix ID picks its owner even though the display name collides.
     let alex = cmd_next(&ctx, &viewer, &["@alex:example.org"])
         .await
         .unwrap()
         .unwrap();
+    assert!(alex.starts_with("📅 **Next turns · alex**"), "{alex}");
     assert!(
-        alex.starts_with(&format!("📅 Next turn for alex: **week {} ", weeks[2].1)),
+        alex.contains(&format!("• **Week {} · ", weeks[2].1)),
         "{alex}"
     );
     let _ = tokio::fs::remove_file(path).await;
@@ -4818,11 +4870,13 @@ async fn next_finds_a_person_by_unique_display_name_or_matrix_id() {
 async fn next_finds_a_non_matrix_participant_by_name() {
     let (ctx, path, viewer, weeks) = cleaning_person_ctx();
     let reply = cmd_next(&ctx, &viewer, &["dan"]).await.unwrap().unwrap();
+    let lines: Vec<&str> = reply.lines().collect();
+    assert_eq!(lines[0], "📅 **Next turns · Dan**", "{reply}");
     assert!(
-        reply.starts_with(&format!("📅 Next turn for Dan: **week {} ", weeks[1].1)),
+        lines[1].starts_with(&format!("• **Week {} · ", weeks[1].1)),
         "{reply}"
     );
-    assert!(reply.ends_with("· Floor"), "{reply}");
+    assert_eq!(lines[2], format!("{}Floor", crate::view::INDENT), "{reply}");
     let _ = tokio::fs::remove_file(path).await;
 }
 
@@ -4855,6 +4909,171 @@ async fn admin_commands_refuse_an_ambiguous_person_instead_of_picking_one() {
         serde_json::to_string(&*ctx.state.lock().await).unwrap(),
         before,
         "nothing may change on an ambiguous name"
+    );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+// ── Review follow-ups: disabled groups, reaction undo, no-ping views ─────────
+
+#[tokio::test]
+async fn a_disabled_group_stands_still_and_resumes_where_it_stopped() {
+    let (state, gid) = four_person_state(8);
+    let original = plan_names(&state, &gid, 0, 7);
+    let (ctx, path, admin) = test_context_with_horizon(state, 8);
+
+    let reply = cmd_disablegroup(&ctx, &admin, &["Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.contains("7 planned week(s) cleared"), "{reply}");
+    {
+        let state = ctx.state.lock().await;
+        // Only the running week stays; nothing is planned or rolled ahead.
+        assert_eq!(plan_names(&state, &gid, 0, 2), ["Anna", "-", "-"]);
+    }
+    crate::scheduler::roll_planning_horizon(&ctx).await.unwrap();
+    assert_eq!(
+        plan_names(&*ctx.state.lock().await, &gid, 1, 1),
+        ["-"],
+        "the rolling horizon leaves a disabled group alone"
+    );
+
+    let reply = cmd_enablegroup(&ctx, &admin, &["Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.starts_with("✅ Floor enabled."), "{reply}");
+    let state = ctx.state.lock().await;
+    assert_eq!(
+        plan_names(&state, &gid, 0, 7),
+        original,
+        "the rotation continues exactly where it stopped"
+    );
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn taking_back_a_reaction_undoes_everything_it_marked_through_the_log() {
+    let (ctx, path, _, weeks) = cleaning_person_ctx();
+    let mut state = ctx.state.lock().await;
+    let mia = state
+        .person_by_matrix_id("@mia:example.org")
+        .unwrap()
+        .id
+        .clone();
+    // mia holds Floor and Kitchen this week; one ✅ marks both.
+    let duties = markable_duties(&state, &mia, weeks[0], None);
+    assert_eq!(duties.len(), 2);
+    mark_duties_done(&mut state, &mia, &duties).unwrap();
+    let rd = crate::state::ReactionDone {
+        group_id: duties[0].group.id.clone(),
+        completed_by_id: mia.clone(),
+        iso_year: weeks[0].0,
+        iso_week: weeks[0].1,
+        marked: duties
+            .iter()
+            .map(|d| crate::state::MarkedDuty {
+                group_id: d.group.id.clone(),
+                slot_id: None,
+                shift: d.turn.shift,
+            })
+            .collect(),
+    };
+    let logged = state.event_log.len();
+
+    assert!(undo_reaction_done(&mut state, &rd).unwrap());
+    assert!(state.completions.is_empty(), "both marks are gone");
+    assert_eq!(
+        state.event_log.len(),
+        logged + 2,
+        "each undo is in the event log, so a replay agrees"
+    );
+    // Taking it back twice is harmless.
+    assert!(!undo_reaction_done(&mut state, &rd).unwrap());
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn taking_back_a_reaction_leaves_marks_by_others_alone() {
+    let (ctx, path, _, weeks) = cleaning_person_ctx();
+    let mut state = ctx.state.lock().await;
+    let mia = state
+        .person_by_matrix_id("@mia:example.org")
+        .unwrap()
+        .id
+        .clone();
+    let dan = state.find_person("Dan").unwrap().id.clone();
+    let duties = markable_duties(&state, &mia, weeks[0], None);
+    // Dan marked mia's Floor turn himself; the (legacy, group-only) record
+    // of mia's reaction must not take his mark back.
+    let floor = duties
+        .iter()
+        .find(|d| d.group.name == "Floor")
+        .unwrap()
+        .clone();
+    mark_duties_done(&mut state, &dan, std::slice::from_ref(&floor)).unwrap();
+    let rd = crate::state::ReactionDone {
+        group_id: floor.group.id.clone(),
+        completed_by_id: mia,
+        iso_year: weeks[0].0,
+        iso_week: weeks[0].1,
+        marked: Vec::new(),
+    };
+    assert!(!undo_reaction_done(&mut state, &rd).unwrap());
+    assert_eq!(state.completions.len(), 1);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn looking_at_the_plan_never_pings_anyone() {
+    let (ctx, path, _, _) = cleaning_person_ctx();
+    let text = plan_text(&*ctx.state.lock().await, 4);
+    assert!(!text.contains('@'), "{text}");
+    let content = crate::format::mentionify(&text);
+    assert!(
+        content
+            .mentions
+            .as_ref()
+            .is_none_or(|m| m.user_ids.is_empty()),
+        "{text}"
+    );
+    // Week by week, current week first with its status.
+    let (y, w) = current_iso_week();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "📅 **Next 4 weeks**");
+    assert_eq!(
+        lines[2],
+        format!("**{}** · this week", crate::view::week_label(y, w))
+    );
+    assert_eq!(lines[3], "⬜ Floor: mia");
+    assert_eq!(lines[4], "⬜ Kitchen: mia");
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn adding_by_a_matrix_persons_display_name_says_who_it_is() {
+    let (state, ..) = rotation_state();
+    let (ctx, path, admin) = test_context(state);
+    let reply = cmd_addperson(&ctx, &admin, &["alice", "2nd Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.contains("already in"), "{reply}");
+    ctx.state
+        .lock()
+        .await
+        .cleaning_groups
+        .push(CleaningGroup::new("Kitchen"));
+    let reply = cmd_addperson(&ctx, &admin, &["alice", "Kitchen"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        reply.starts_with("✅ Added @alice:example.org to Kitchen"),
+        "an existing Matrix person, not a new one without Matrix: {reply}"
     );
     let _ = tokio::fs::remove_file(path).await;
 }

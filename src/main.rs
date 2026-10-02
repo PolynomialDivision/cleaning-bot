@@ -43,9 +43,10 @@ mod schedule;
 mod scheduler;
 mod state;
 mod validate;
+mod view;
 
 use config::Config;
-use state::{GreetingChoice, GreetingInfo, ReactionDone, State};
+use state::{GreetingChoice, GreetingInfo, MarkedDuty, ReactionDone, State};
 
 /// Send the group-selection step of the greeting.
 ///
@@ -362,7 +363,7 @@ async fn main() -> Result<()> {
                         // the plan already (e.g. they rejoined) is void.
                         if info.is_linking
                             && info.for_user == sender_mxid
-                            && state.person_by_matrix_id(&sender_mxid).is_some_and(|p| p.active)
+                            && state.person_by_matrix_id(&sender_mxid).is_some_and(|p| !state.groups_for_person(&p.id).is_empty())
                         {
                             state.greeting_event_ids.remove(&reacted_to);
                             if let Err(e) = state.save(&ctx.state_path).await {
@@ -430,9 +431,20 @@ async fn main() -> Result<()> {
                                         .map(|p| p.id.clone()).unwrap_or_else(|| sender_mxid.clone());
                                     let already = state.group_by_id(&group_id)
                                         .map(|g| g.member_ids.contains(&person_id)).unwrap_or(false);
-                                    if !already {
-                                        commands::apply_group_join(&ctx, &mut state, &group_id, &person_id).ok();
-                                    }
+                                    let summary = if already {
+                                        String::new()
+                                    } else {
+                                        match commands::apply_group_join(&ctx, &mut state, &group_id, &person_id) {
+                                            Ok(replanned) => format!(
+                                                "\n{}",
+                                                commands::join_summary(&state, &group_id, &person_id, replanned)
+                                            ),
+                                            Err(e) => {
+                                                tracing::error!("Greeting join failed: {e}");
+                                                String::new()
+                                            }
+                                        }
+                                    };
                                     if let Err(e) = state.save(&ctx.state_path).await {
                                         tracing::error!("Failed to save after greeting join: {e}");
                                     }
@@ -441,7 +453,7 @@ async fn main() -> Result<()> {
 
                                     if let Some(r) = client.get_room(&ctx.room_id) {
                                         let msg = format!(
-                                            "✅ {sender_mxid} joined **{group_name}** — welcome to the cleaning crew! 🧹"
+                                            "✅ {sender_mxid} joined **{group_name}** — welcome to the cleaning crew! 🧹{summary}"
                                         );
                                         r.send(format::mentionify_rich(&msg, &r).await).await.ok();
                                     }
@@ -494,6 +506,11 @@ async fn main() -> Result<()> {
                         completed_by_id: sender_person_id.clone(),
                         iso_year: plan_year,
                         iso_week: plan_week,
+                        marked: duties.iter().map(|d| MarkedDuty {
+                            group_id: d.group.id.clone(),
+                            slot_id: d.group.slots.get(d.slot_index).map(|s| s.id.clone()),
+                            shift: d.turn.shift,
+                        }).collect(),
                     });
                     if let Err(e) = state.save(&ctx.state_path).await {
                         tracing::error!("Failed to save after plan reaction: {e}");
@@ -532,14 +549,13 @@ async fn main() -> Result<()> {
                     None => return,
                 };
 
-                let before = state.completions.len();
-                state.completions.retain(|c| {
-                    !(c.group_id == rd.group_id
-                        && c.iso_year == rd.iso_year
-                        && c.iso_week == rd.iso_week
-                        && c.completed_by_id == rd.completed_by_id)
-                });
-                let removed = state.completions.len() < before;
+                let removed = match commands::undo_reaction_done(&mut state, &rd) {
+                    Ok(changed) => changed,
+                    Err(e) => {
+                        tracing::error!("Undoing a ✅ reaction failed: {e}");
+                        false
+                    }
+                };
 
                 if let Err(e) = state.save(&ctx.state_path).await {
                     tracing::error!("Failed to save after reaction removal: {e}");
@@ -578,7 +594,7 @@ async fn main() -> Result<()> {
                     let mut state = ctx.state.lock().await;
                     // Someone rejoining who is still on the plan needs no
                     // greeting — their account is already linked.
-                    if let Some(person) = state.person_by_matrix_id(&user_id).filter(|p| p.active) {
+                    if let Some(person) = state.person_by_matrix_id(&user_id).filter(|p| !state.groups_for_person(&p.id).is_empty()) {
                         info!("{user_id} rejoined — already on the plan as {}", person.display_name);
                         return;
                     }
@@ -592,8 +608,10 @@ async fn main() -> Result<()> {
                 // Check for non-Matrix persons who might be this user.
                 let unlinked: Vec<_> = {
                     let state = ctx.state.lock().await;
+                    // Only people actually on the plan — someone removed
+                    // from every group is no one to "be".
                     state.persons.iter()
-                        .filter(|p| p.active && p.matrix_id.is_none())
+                        .filter(|p| p.matrix_id.is_none() && !state.groups_for_person(&p.id).is_empty())
                         .cloned()
                         .collect()
                 };

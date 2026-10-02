@@ -52,7 +52,8 @@ pub(crate) async fn add_matrix_participant(
     state.save(&ctx.state_path).await?;
 
     Ok(Some(format!(
-        "✅ Added {mxid} to «{group_name}».\n{summary}"
+        "✅ Added {mxid} to {}\n{summary}",
+        group_name_of(&state, &group_id)
     )))
 }
 
@@ -109,7 +110,11 @@ pub(crate) async fn remove_matrix_participant(
     let summary = departure_summary(&state, &group_id, &departure);
     state.save(&ctx.state_path).await?;
 
-    Ok(Some(format!(
-        "✅ Removed {mxid} from «{group_name}».\n{summary}"
-    )))
+    // By name: being taken off the plan is no reason for a ping.
+    let who = state
+        .person_by_id(&person_id)
+        .map(|p| p.display_name.clone())
+        .unwrap_or_else(|| mxid.to_owned());
+    let group = group_name_of(&state, &group_id);
+    Ok(Some(format!("✅ Removed {who} from {group}\n{summary}")))
 }
