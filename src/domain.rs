@@ -179,15 +179,6 @@ impl CleaningGroup {
     pub fn slot_by_id_mut(&mut self, id: &SlotId) -> Option<&mut CleaningSlot> {
         self.slots.iter_mut().find(|s| &s.id == id)
     }
-
-    /// Single-slot rooms text (for non-slotted groups or scheduler header).
-    pub fn rooms_text(&self) -> Option<String> {
-        if self.room_names.is_empty() {
-            None
-        } else {
-            Some(format!("Rooms: {}", self.room_names.join(", ")))
-        }
-    }
 }
 
 // ── CalendarToken ─────────────────────────────────────────────────────────────

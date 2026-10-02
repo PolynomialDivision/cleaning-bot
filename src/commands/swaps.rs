@@ -185,7 +185,7 @@ pub(crate) async fn cmd_acceptswap(
 
     let req = match state.swap_requests.iter().find(|r| r.id == id) {
         Some(r) => r,
-        None => return Ok(Some(format!("Swap request #{id} not found."))),
+        None => return Ok(Some(format!("❌ Swap request #{id} not found."))),
     };
     if req.target != sender_mxid {
         return Ok(Some("This swap is not addressed to you.".into()));
@@ -312,7 +312,7 @@ pub(crate) async fn cmd_rejectswap(
 
     let req = match state.swap_requests.iter().find(|r| r.id == id) {
         Some(r) => r,
-        None => return Ok(Some(format!("Swap #{id} not found."))),
+        None => return Ok(Some(format!("❌ Swap #{id} not found."))),
     };
     if req.target != sender_mxid {
         return Ok(Some("This swap is not addressed to you.".into()));

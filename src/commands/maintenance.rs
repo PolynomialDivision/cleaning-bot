@@ -18,7 +18,7 @@ pub(crate) async fn cmd_disablegroup(
     let group_id = match state.group_by_name(&name) {
         Some(g) if !g.is_active => return Ok(Some(format!("«{name}» is already disabled."))),
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{name}» not found."))),
+        None => return Ok(Some(group_not_found(&name))),
     };
     // Its rotation stands still while disabled: planned rotation weeks go
     // back to the queue, so enabling it later continues where it stopped.
@@ -52,7 +52,7 @@ pub(crate) async fn cmd_enablegroup(
     let group_id = match state.group_by_name(&name) {
         Some(g) if g.is_active => return Ok(Some(format!("«{name}» is already enabled."))),
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{name}» not found."))),
+        None => return Ok(Some(group_not_found(&name))),
     };
     state.apply_event(DomainEvent::GroupEnabled {
         group_id: group_id.clone(),
@@ -85,7 +85,7 @@ pub(crate) async fn cmd_announceweek(
     let (year, week) = current_iso_week();
     match crate::scheduler::announce_weekly_plan(ctx, room, year, week).await {
         Ok(Some(_)) => Ok(Some(format::mentionify(
-            "📋 Weekly plan announced and pinned.",
+            "🧹 Weekly plan posted and pinned.",
         ))),
         Ok(None) => Ok(Some(format::mentionify(
             "Nothing is due this week — no plan to announce.",

@@ -38,7 +38,7 @@ pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
     }
     let current = current_iso_week();
     let mut lines = vec![format!(
-        "📅 **Next {}**",
+        "📋 **Plan · next {}**",
         crate::view::plural(n, "week", "weeks")
     )];
     for i in 0..n as i64 {
@@ -83,7 +83,7 @@ pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
         }
         lines.push(String::new());
         let now = if i == 0 { " · this week" } else { "" };
-        lines.push(format!("**{}**{now}", crate::view::week_label(y, w)));
+        lines.push(format!("📅 **{}**{now}", crate::view::week_label(y, w)));
         lines.extend(week_lines);
     }
     lines.join("\n")
@@ -134,8 +134,8 @@ pub(crate) async fn cmd_pdf(
                     snapshot.assignments.retain(|a| a.group_id == gid);
                 }
                 None => {
-                    return Ok(Some(RoomMessageEventContent::text_plain(format!(
-                        "Group «{name}» not found."
+                    return Ok(Some(RoomMessageEventContent::text_plain(group_not_found(
+                        name,
                     ))))
                 }
             }
@@ -219,7 +219,7 @@ pub(crate) async fn cmd_ical(
                     Some(id) => id,
                     None => {
                         return Ok(Some(format::mentionify(&format!(
-                        "You ({sender_mxid}) are not registered. Join a group with !join <group>."
+                        "❌ You ({sender_mxid}) are not registered — !mygroups to join a group."
                     ))))
                     }
                 };
@@ -247,7 +247,7 @@ pub(crate) async fn cmd_ical(
                         Err(ambiguous) => return Ok(Some(format::mentionify(&ambiguous))),
                         Ok(None) => {
                             return Ok(Some(format::mentionify(&format!(
-                                "Person «{first}» not found."
+                                "❌ Person «{first}» not found."
                             ))))
                         }
                     };
@@ -336,7 +336,7 @@ pub(crate) async fn cmd_ical(
                 )));
             room.send(content).await.ok();
             Ok(Some(format::mentionify(&format!(
-                "📅 iCal · {weeks} Wochen · Import .ics into your calendar app.\n\
+                "📅 iCal · {weeks} weeks · Import .ics into your calendar app.\n\
                  Tip: configure [ical_server] in config.toml for live-updating feed URLs."
             ))))
         }
@@ -371,7 +371,7 @@ pub(crate) async fn cmd_icalreset(
                 Some(id) => id,
                 None => {
                     return Ok(Some(format::mentionify(&format!(
-                        "{sender_mxid} is not registered."
+                        "❌ {sender_mxid} is not registered."
                     ))))
                 }
             },
@@ -384,7 +384,7 @@ pub(crate) async fn cmd_icalreset(
                     Err(ambiguous) => return Ok(Some(format::mentionify(&ambiguous))),
                     Ok(None) => {
                         return Ok(Some(format::mentionify(&format!(
-                            "Person «{query}» not found."
+                            "❌ Person «{query}» not found."
                         ))))
                     }
                 }

@@ -22,7 +22,7 @@ pub(crate) async fn cmd_done(
         .map(|p| p.id.clone())
     else {
         return Ok(Some(
-            "You are not registered. Join a group with !join <group>.".into(),
+            "❌ You're not on the plan yet — !mygroups to join a group.".into(),
         ));
     };
 
@@ -32,7 +32,7 @@ pub(crate) async fn cmd_done(
         let name = args.join(" ");
         match state.group_by_name(&name) {
             Some(g) => Some(g.clone()),
-            None => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(group_not_found(&name))),
         }
     };
 
@@ -60,7 +60,7 @@ pub(crate) async fn cmd_done(
                 if let Some(turn) = state.current_turn(g) {
                     if state.is_turn_done(g, turn) {
                         return Ok(Some(format!(
-                            "Already done: {}",
+                            "✅ Already done: {}",
                             Duty {
                                 group: g.clone(),
                                 slot_index: 0,
@@ -77,7 +77,7 @@ pub(crate) async fn cmd_done(
                 }
             }
             [g] if !g.member_ids.contains(&sender_person_id) => {
-                return Ok(Some(format!("You are not a member of «{}».", g.name)))
+                return Ok(Some(format!("❌ You are not a member of «{}».", g.name)))
             }
             [g] if g.is_multi_slot() => {
                 return Ok(Some(format!(
@@ -102,7 +102,7 @@ pub(crate) async fn cmd_done(
     mark_duties_done(&mut state, &sender_person_id, &duties)?;
     state.save(&ctx.state_path).await?;
     let labels: Vec<String> = duties.iter().map(Duty::label).collect();
-    Ok(Some(format!("✅ Cleaned: {}", labels.join(", "))))
+    Ok(Some(format!("✨ Cleaned: {} — thanks!", labels.join(", "))))
 }
 
 // ── !stats <person> ────────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<
         let query = query.as_str();
         let person_id = match lookup_person(&state, query) {
             Ok(Some(p)) => p.id.clone(),
-            Ok(None) => return Ok(Some(format!("Person «{query}» not found."))),
+            Ok(None) => return Ok(Some(format!("❌ Person «{query}» not found."))),
             Err(ambiguous) => return Ok(Some(ambiguous)),
         };
         let ps = match analytics::person_stats(&state, &person_id) {
@@ -267,7 +267,7 @@ pub(crate) fn welcome_target(
             validate_matrix_user_id(query)?;
             Ok(query.to_owned())
         }
-        None => Err(format!("{query} is not registered.")),
+        None => Err(format!("❌ {query} is not registered.")),
     }
 }
 
@@ -283,7 +283,7 @@ pub(crate) async fn cmd_joinfloor(
     };
     let mut state = ctx.state.lock().await;
     let Some(group_id) = state.group_by_name(group_name).map(|g| g.id.clone()) else {
-        return Ok(Some(format!("Group «{group_name}» not found.")));
+        return Ok(Some(group_not_found(group_name)));
     };
     let reply = match join_group(ctx, &mut state, sender.as_str(), &group_id)? {
         Ok(summary) => format!(
@@ -306,14 +306,14 @@ pub(crate) async fn cmd_leavefloor(
     };
     let mut state = ctx.state.lock().await;
     if state.person_by_matrix_id(sender.as_str()).is_none() {
-        return Ok(Some("You are not registered in any group.".into()));
+        return Ok(Some("❌ You are not registered in any group.".into()));
     }
     let Some(group_id) = state.group_by_name(group_name).map(|g| g.id.clone()) else {
-        return Ok(Some(format!("Group «{group_name}» not found.")));
+        return Ok(Some(group_not_found(group_name)));
     };
     let reply = match leave_group(ctx, &mut state, sender.as_str(), &group_id)? {
         Ok(summary) => format!(
-            "✅ You left {}\n{summary}",
+            "👋 You left {}\n{summary}",
             group_name_of(&state, &group_id)
         ),
         Err(why) => return Ok(Some(why)),
@@ -373,12 +373,12 @@ pub(crate) fn leave_group(
         .map(|p| p.id.clone())
         .filter(|pid| state.is_member(group_id, pid))
     else {
-        return Ok(Err(format!("You are not in «{group_name}».")));
+        return Ok(Err(format!("❌ You are not in «{group_name}».")));
     };
     let open = current_open_assignments(state, group_id, &person_id);
     if !open.is_empty() {
         return Ok(Err(format!(
-            "You cannot leave «{group_name}» while your current assignment is open ({}). \
+            "❌ You cannot leave «{group_name}» while your current assignment is open ({}). \
              Complete or skip it first.",
             open.join(", ")
         )));

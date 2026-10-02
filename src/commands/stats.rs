@@ -47,7 +47,7 @@ pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Opti
     let groups: Vec<crate::domain::GroupId> = if let Some(name) = args.first() {
         match state.group_by_name(name) {
             Some(g) => vec![g.id.clone()],
-            None => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(group_not_found(name))),
         }
     } else {
         state

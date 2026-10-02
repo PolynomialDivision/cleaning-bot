@@ -22,7 +22,7 @@ pub(crate) async fn add_matrix_participant(
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(group_name) {
         Some(group) => group.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(group_name))),
     };
 
     if let Some(person) = state.person_by_matrix_id(mxid) {
@@ -78,11 +78,15 @@ pub(crate) async fn remove_matrix_participant(
     let mut state = ctx.state.lock().await;
     let person_id = match state.person_by_matrix_id(mxid) {
         Some(person) => person.id.clone(),
-        None => return Ok(Some(format!("{mxid} is not registered. No changes made."))),
+        None => {
+            return Ok(Some(format!(
+                "❌ {mxid} is not registered. No changes made."
+            )))
+        }
     };
     let group_id = match state.group_by_name(group_name) {
         Some(group) => group.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(group_name))),
     };
     if !state
         .group_by_id(&group_id)
@@ -116,5 +120,5 @@ pub(crate) async fn remove_matrix_participant(
         .map(|p| p.display_name.clone())
         .unwrap_or_else(|| mxid.to_owned());
     let group = group_name_of(&state, &group_id);
-    Ok(Some(format!("✅ Removed {who} from {group}\n{summary}")))
+    Ok(Some(format!("👋 Removed {who} from {group}\n{summary}")))
 }

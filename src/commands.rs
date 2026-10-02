@@ -355,19 +355,19 @@ const PLAN_USAGE: &str = "Usage: !plan [N] | !plan assign|unassign|skip|remind|a
 const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person> · !member welcome <person>";
 
 fn help_text() -> String {
-    r#"🧹 **Cleaning bot**
-**Your turns**
+    r#"🧹🧽 **Cleaning bot** ✨
+📅 **Your turns**
 !next [person] [N] · when you (or they) clean next
 !done [group] · mark yours done — or react ✅ on the plan
 !undo [group] · take a done mark back
 !takeover [group] [week N] · take a turn over yourself
 !swap @user [group] [week N] · ask someone to take yours
-**The plan**
+📋 **The plan**
 !status · this week, done or open
 !plan [N] · the next N weeks
 !groups [group] · groups, members, rooms
 !mygroups · join or leave groups
-**More**
+💡 **More**
 !stats [person | group] · !ical · your calendar feed
 Admins: !help admin"#
         .to_owned()

@@ -2,6 +2,14 @@
 //! duties across every message, laid out for narrow phone screens
 //! (FluffyChat, Element mobile): short lines, details on their own line,
 //! nothing that only works as a wide table.
+//!
+//! Icons: one per concept, the same in every message, at most one leading
+//! a line — and every line still reads without it.
+//!
+//! | 🧹 this week's cleaning | 📋 the plan ahead | 📅 dates, weeks |
+//! | 🔄 rotation changes, swaps | 🏠 a group | 👥 members |
+//! | 🚽 🚿 🍳 🧽 rooms (`rooms`) | ⬜ ✅ ⏭️ ❌ 🌴 a turn's state | ✨ cleaned |
+//! | 🔔 reminder | ⏰ deadline | ❌ couldn't do that · ⚠️ heads-up |
 
 use chrono::{Datelike, NaiveDate};
 
@@ -106,6 +114,39 @@ pub fn source_note(source: &AssignmentSource) -> Option<&'static str> {
     }
 }
 
+/// Rooms as one line, by kind, one icon per kind:
+/// "🚽 Scharni Toilet, Colbe Toilet · 🚿 Shower Room".
+pub fn rooms(names: &[String]) -> String {
+    let mut kinds: Vec<(&str, Vec<&str>)> = Vec::new();
+    for name in names {
+        let icon = room_icon(name);
+        match kinds.iter_mut().find(|(i, _)| *i == icon) {
+            Some((_, same)) => same.push(name),
+            None => kinds.push((icon, vec![name])),
+        }
+    }
+    kinds
+        .iter()
+        .map(|(icon, names)| format!("{icon} {}", names.join(", ")))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// What kind of room a name is, as an icon (English or German names).
+fn room_icon(name: &str) -> &'static str {
+    let name = name.to_lowercase();
+    let any = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    if any(&["toilet", "wc", "klo"]) {
+        "🚽"
+    } else if any(&["shower", "dusch"]) {
+        "🚿"
+    } else if any(&["kitchen", "küche", "kueche"]) {
+        "🍳"
+    } else {
+        "🧽"
+    }
+}
+
 /// "3 weeks", "1 week".
 pub fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -133,6 +174,20 @@ mod tests {
             user_id_link("@mia:example.org"),
             "[@mia:example.org](https://matrix.to/#/@mia:example.org)"
         );
+    }
+
+    #[test]
+    fn rooms_are_grouped_by_kind_with_one_icon_each() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            rooms(&names(&["Scharni Toilet", "Shower Room", "Colbe Toilet"])),
+            "🚽 Scharni Toilet, Colbe Toilet · 🚿 Shower Room"
+        );
+        assert_eq!(
+            rooms(&names(&["Küche", "Dusche", "Flur", "Bad"])),
+            "🍳 Küche · 🚿 Dusche · 🧽 Flur, Bad"
+        );
+        assert_eq!(rooms(&[]), "");
     }
 
     #[test]

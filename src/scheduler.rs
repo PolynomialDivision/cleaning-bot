@@ -648,9 +648,19 @@ pub(crate) fn build_weekly_plan(
     week: u32,
     due_groups: &[CleaningGroup],
 ) -> (String, Vec<String>) {
+    let all_done = due_groups.iter().all(|g| {
+        state
+            .turns_in_week(g, year, week)
+            .into_iter()
+            .all(|t| state.is_turn_done(g, t))
+    });
     let mut lines = vec![
         format!("🧹 **{}**", view::week_label(year, week)),
-        "React ✅ when your part is done.".to_owned(),
+        if all_done && !due_groups.is_empty() {
+            "✨ All done for this week — thank you!".to_owned()
+        } else {
+            "React ✅ when your part is done 🫧".to_owned()
+        },
     ];
     let mut all_mxids: Vec<String> = Vec::new();
     for group in due_groups {
@@ -673,7 +683,11 @@ pub(crate) fn build_weekly_plan(
 pub(crate) fn group_heading(group: &CleaningGroup) -> Vec<String> {
     let mut lines = vec![format!("**{}**", group.name)];
     if !group.is_multi_slot() && !group.room_names.is_empty() {
-        lines.push(format!("{}{}", view::INDENT, group.room_names.join(", ")));
+        lines.push(format!(
+            "{}{}",
+            view::INDENT,
+            view::rooms(&group.room_names)
+        ));
     }
     lines
 }
@@ -721,7 +735,7 @@ fn turn_lines(
         if let Some(slot) = group.slots.get(slot_index) {
             if !slot.room_names.is_empty() {
                 out.push((
-                    format!("{}{}", view::INDENT, slot.room_names.join(", ")),
+                    format!("{}{}", view::INDENT, view::rooms(&slot.room_names)),
                     None,
                 ));
             }
@@ -1211,13 +1225,40 @@ mod tests {
         assert_eq!(
             plan,
             format!(
-                "🧹 **{}**\nReact ✅ when your part is done.\n\n\
-                 **Hall**\n{i}Stairs, Entrance\n⬜ Bob\n\n\
-                 **Floor**\n✅ Scharni: @alice:example.org\n{i}Toilet, Shower\n⬜ Colbe: Bob",
+                "🧹 **{}**\nReact ✅ when your part is done 🫧\n\n\
+                 **Hall**\n{i}🧽 Stairs, Entrance\n⬜ Bob\n\n\
+                 **Floor**\n✅ Scharni: @alice:example.org\n{i}🚽 Toilet · 🚿 Shower\n⬜ Colbe: Bob",
                 view::week_label(year, week)
             )
         );
         assert_eq!(mxids, vec!["@alice:example.org".to_owned()]);
+
+        // Once every part is done (or excused), the plan says thanks
+        // instead of asking for reactions.
+        let hall_id = state.cleaning_groups[0].id.clone();
+        let floor_id = state.cleaning_groups[1].id.clone();
+        let colbe = state.cleaning_groups[1].slots[1].id.clone();
+        let bob_id = state.persons[1].id.clone();
+        for (group_id, slot_id, skipped) in [(hall_id, None, true), (floor_id, Some(colbe), false)]
+        {
+            state.completions.push(crate::state::Completion {
+                group_id,
+                slot_id,
+                completed_by_id: bob_id.clone(),
+                responsible_person_ids: vec![],
+                iso_year: year,
+                iso_week: week,
+                shift: 0,
+                completed_at: chrono::Utc::now(),
+                skipped,
+            });
+        }
+        let (plan, _) = build_weekly_plan(&state, year, week, &state.cleaning_groups);
+        assert_eq!(
+            plan.lines().nth(1),
+            Some("✨ All done for this week — thank you!"),
+            "{plan}"
+        );
     }
 
     // ── Startup reconciliation ────────────────────────────────────────────────

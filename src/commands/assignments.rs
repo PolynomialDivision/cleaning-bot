@@ -79,7 +79,7 @@ pub(crate) async fn cmd_assign(
         Err(ambiguous) => return Ok(Some(ambiguous)),
         Ok(None) => {
             return Ok(Some(format!(
-                "«{person_query}» is not registered. Add them with !member add first."
+                "❌ «{person_query}» is not registered. Add them with !member add first."
             )))
         }
     };
@@ -592,7 +592,7 @@ pub(crate) async fn cmd_undo(
         let name = args.join(" ");
         match state.group_by_name(&name) {
             Some(g) => vec![g.clone()],
-            None => return Ok(Some(format!("Group «{name}» not found."))),
+            None => return Ok(Some(group_not_found(&name))),
         }
     } else {
         match &sender_pid {
@@ -741,10 +741,10 @@ pub(crate) async fn cmd_next(
         Ok(Some(p)) => p.clone(),
         Ok(None) if is_self => {
             return Ok(Some(
-                "You're not on the cleaning plan yet — !join <group> to join one.".into(),
+                "You're not on the cleaning plan yet — !mygroups to join a group.".into(),
             ))
         }
-        Ok(None) => return Ok(Some(format!("{query} is not registered."))),
+        Ok(None) => return Ok(Some(format!("❌ {query} is not registered."))),
         Err(ambiguous) => return Ok(Some(ambiguous)),
     };
     Ok(Some(next_text(
@@ -812,7 +812,7 @@ pub(crate) fn next_text(
     if duties.is_empty() {
         let mut reply = if !in_a_group {
             if own {
-                "You're not in any cleaning group — !join <group> to join one.".to_owned()
+                "You're not in any cleaning group — !mygroups to join one.".to_owned()
             } else {
                 format!("{who} is not in any cleaning group.")
             }
@@ -959,7 +959,7 @@ pub(crate) async fn cmd_skip(
             .collect(),
         [name, slot @ ..] => {
             let Some(group) = state.group_by_name(name).cloned() else {
-                return Ok(Some(format!("Group «{name}» not found.")));
+                return Ok(Some(group_not_found(name)));
             };
             if slot.is_empty() {
                 vec![(group, None)]
@@ -1042,7 +1042,7 @@ pub(crate) async fn cmd_skip(
         lines.push(format!("⏭️ Skipped: {}", skipped.join(", ")));
     }
     if !already.is_empty() {
-        lines.push(format!("Already done: {}", already.join(", ")));
+        lines.push(format!("✅ Already done: {}", already.join(", ")));
     }
     if lines.is_empty() {
         lines.push("Nothing due this week.".into());
@@ -1072,7 +1072,7 @@ pub(crate) async fn cmd_remind(
                 Some(g) if g.is_active => vec![g.clone()],
                 _ => {
                     return Ok(Some(format::mentionify(&format!(
-                        "Group «{name}» not found or disabled."
+                        "❌ Group «{name}» not found or disabled."
                     ))))
                 }
             },
@@ -1084,7 +1084,7 @@ pub(crate) async fn cmd_remind(
                 .collect(),
         };
 
-        let mut lines = vec![format!("⏰ **Reminder · Week {week}**")];
+        let mut lines = vec![format!("🔔 **Reminder · Week {week}**")];
         let mut mxids: Vec<String> = Vec::new();
         let mut names: Vec<String> = Vec::new();
         for group in &groups {
@@ -1121,16 +1121,17 @@ pub(crate) async fn cmd_remind(
                     }
                     .label();
                     let rooms = match group.slots.get(slot_index) {
-                        Some(slot) if !slot.room_names.is_empty() => {
-                            format!(" · {}", slot.room_names.join(", "))
-                        }
-                        Some(_) => String::new(),
-                        None => group
-                            .rooms_text()
-                            .map(|r| format!(" · {}", r.replace('\n', " · ")))
-                            .unwrap_or_default(),
+                        Some(slot) => &slot.room_names,
+                        None => &group.room_names,
                     };
-                    lines.push(format!("**{label}** · {who}{rooms}"));
+                    lines.push(format!("⬜ **{label}** · {who}"));
+                    if !rooms.is_empty() {
+                        lines.push(format!(
+                            "{}{}",
+                            crate::view::INDENT,
+                            crate::view::rooms(rooms)
+                        ));
+                    }
                     names.push(label);
                 }
             }

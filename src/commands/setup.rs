@@ -91,7 +91,7 @@ pub(crate) async fn cmd_addperson(
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(&group_name))),
     };
     let existing = match lookup_person(&state, &name) {
         Ok(found) => found.map(|p| p.id.clone()),
@@ -155,12 +155,12 @@ pub(crate) async fn cmd_removeperson(
     let mut state = ctx.state.lock().await;
     let person_id = match lookup_person(&state, &query) {
         Ok(Some(p)) => p.id.clone(),
-        Ok(None) => return Ok(Some(format!("Person «{query}» not found."))),
+        Ok(None) => return Ok(Some(format!("❌ Person «{query}» not found."))),
         Err(ambiguous) => return Ok(Some(ambiguous)),
     };
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(&group_name))),
     };
     if !state
         .group_by_id(&group_id)
@@ -191,7 +191,7 @@ pub(crate) async fn cmd_removeperson(
         .unwrap_or(query);
     let group = group_name_of(&state, &group_id);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Removed {who} from {group}\n{summary}")))
+    Ok(Some(format!("👋 Removed {who} from {group}\n{summary}")))
 }
 
 // ── Admin: !member link <name> <@user:server> ─────────────────────────────────
@@ -445,7 +445,7 @@ pub(crate) async fn cmd_removefloor(
     let mut state = ctx.state.lock().await;
     let group = match state.group_by_name(&name) {
         Some(g) => g.clone(),
-        None => return Ok(Some(format!("Group «{name}» not found."))),
+        None => return Ok(Some(group_not_found(&name))),
     };
     let history = state
         .completions
@@ -497,7 +497,7 @@ pub(crate) async fn cmd_resetplan(
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(&group_name))),
     };
     let cleared = reset_and_rematerialize(ctx, &mut state, &group_id)?;
     let next = next_assignment_summary(&state, &group_id);
@@ -523,7 +523,7 @@ pub(crate) async fn cmd_addslot(
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(&group_name))),
     };
     if state
         .group_by_id(&group_id)
@@ -568,7 +568,7 @@ pub(crate) async fn cmd_removeslot(
                 )))
             }
         },
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(&group_name))),
     };
     state.apply_event(DomainEvent::SlotRemoved { group_id, slot_id })?;
     state.save(&ctx.state_path).await?;
@@ -598,7 +598,7 @@ pub(crate) async fn cmd_addroom(
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(&group_name))),
     };
 
     // Detect slot targeting: if args[1] matches a slot name and there are more args, route to slot.
@@ -646,7 +646,7 @@ pub(crate) async fn cmd_removeroom(
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(&group_name))),
     };
 
     let (slot_id, room_name) = {
@@ -721,7 +721,7 @@ pub(crate) async fn cmd_setroomweight(
                 }
             }
         }
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(group_name))),
     };
     // Canonicalize room name from actual stored name.
     let canonical = {
@@ -782,7 +782,7 @@ pub(crate) async fn cmd_setgroupweight(
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(group_name) {
         Some(g) => g.id.clone(),
-        None => return Ok(Some(format!("Group «{group_name}» not found."))),
+        None => return Ok(Some(group_not_found(group_name))),
     };
     state.apply_event(DomainEvent::GroupWeightSet { group_id, weight })?;
     state.save(&ctx.state_path).await?;
@@ -823,7 +823,7 @@ pub(crate) async fn cmd_absent(
     let mut state = ctx.state.lock().await;
     let person = match lookup_person(&state, &person_query) {
         Ok(Some(p)) => p.clone(),
-        Ok(None) => return Ok(Some(format!("{person_query} not found."))),
+        Ok(None) => return Ok(Some(format!("❌ {person_query} not found."))),
         Err(ambiguous) => return Ok(Some(ambiguous)),
     };
 
@@ -916,7 +916,7 @@ pub(crate) async fn cmd_back(
     let mut state = ctx.state.lock().await;
     let person_id = match lookup_person(&state, &query) {
         Ok(Some(p)) => p.id.clone(),
-        Ok(None) => return Ok(Some(format!("{query} not found."))),
+        Ok(None) => return Ok(Some(format!("❌ {query} not found."))),
         Err(ambiguous) => return Ok(Some(ambiguous)),
     };
     if !state.absences.iter().any(|a| a.person_id == person_id) {
@@ -946,7 +946,7 @@ pub(crate) async fn cmd_groups_rhythm(
     };
     let mut state = ctx.state.lock().await;
     let Some(group) = state.group_by_name(group_name).cloned() else {
-        return Ok(Some(format!("Group «{group_name}» not found.")));
+        return Ok(Some(group_not_found(group_name)));
     };
     if spec.is_empty() {
         return Ok(Some(format!(

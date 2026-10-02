@@ -447,6 +447,11 @@ pub(crate) fn first_turn_of(
 }
 
 /// The group's name as configured (whatever case the command used).
+/// The reply when a group name matches nothing.
+pub(crate) fn group_not_found(name: &str) -> String {
+    format!("❌ Group «{name}» not found — !groups lists them.")
+}
+
 pub(crate) fn group_name_of(state: &crate::state::State, group_id: &GroupId) -> String {
     state
         .group_by_id(group_id)
@@ -467,20 +472,20 @@ pub(crate) fn join_summary(
     };
     if !group.is_active {
         return format!(
-            "{} is disabled — turns start once it's enabled again.",
+            "🚫 {} is disabled — turns start once it's enabled again.",
             group.name
         );
     }
     let first = match first_turn_of(state, group_id, person_id) {
         Some(turn) => format!(
-            "First turn: {}",
+            "📅 First turn: {}",
             crate::view::turn_label(turn, &group.rhythm)
         ),
-        None => "First turn: not planned yet.".to_owned(),
+        None => "📅 First turn: not planned yet.".to_owned(),
     };
     let plan = match replanned_from {
         Some(turn) => format!(
-            "Re-planned from week {} on; earlier weeks unchanged.",
+            "🔄 Re-planned from week {} on; earlier weeks unchanged.",
             turn.week
         ),
         None => "No planned week had to change.".to_owned(),
@@ -563,10 +568,10 @@ pub(crate) fn departure_summary(
     let turns = crate::view::plural(departure.vacated.len(), "upcoming turn", "upcoming turns");
     let mut lines = vec![match departure.changed_from {
         Some(turn) => format!(
-            "{turns} handed on — from week {}, everyone after moves up one turn.",
+            "🔄 {turns} handed on — from week {}, everyone after moves up one turn.",
             turn.week
         ),
-        None => format!("{turns} handed on."),
+        None => format!("🔄 {turns} handed on."),
     }];
     let mut pinned: Vec<&crate::domain::SlotAssignment> = departure
         .vacated
@@ -735,7 +740,7 @@ pub(crate) fn resolve_group_and_slot<'r, 'a>(
 ) -> std::result::Result<(GroupId, usize, &'r [&'a str]), String> {
     let group = state
         .group_by_name(group_name)
-        .ok_or_else(|| format!("Group «{group_name}» not found."))?;
+        .ok_or_else(|| group_not_found(group_name))?;
     if group.is_multi_slot() {
         match rest.first().and_then(|s| {
             group

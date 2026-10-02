@@ -108,7 +108,7 @@ pub(crate) fn next_week_line(
     } else {
         format!("Week {}", next.1)
     };
-    Some(format!("{when}: {people}"))
+    Some(format!("📅 {when}: {people}"))
 }
 
 // ── !status ───────────────────────────────────────────────────────────────────
@@ -152,8 +152,13 @@ pub(crate) fn status_text(state: &State, year: i32, week: u32) -> String {
         body.extend(next_week_line(state, group, (year, week)));
     }
 
+    let all_done = if total > 0 && done == total {
+        " ✨"
+    } else {
+        ""
+    };
     let mut lines = vec![format!(
-        "📋 **{}** · {done}/{total} done",
+        "🧹 **{}** · {done}/{total} done{all_done}",
         crate::view::week_label(year, week)
     )];
     lines.extend(body);
@@ -175,7 +180,7 @@ pub(crate) async fn cmd_groups(
         None => groups_text(&state),
         Some(name) => match state.group_by_name(name) {
             Some(group) => group_detail_text(&state, group),
-            None => format!("Group «{name}» not found. !groups lists all groups."),
+            None => group_not_found(name),
         },
     }))
 }
@@ -186,7 +191,7 @@ pub(crate) fn groups_text(state: &State) -> String {
         return "No cleaning groups configured yet.".into();
     }
     let (year, week) = current_iso_week();
-    let mut lines = vec!["🏢 **Groups** · !groups <name> for details".to_owned()];
+    let mut lines = vec!["🏠 **Groups** · !groups <name> for details".to_owned()];
     // Active groups first; disabled ones follow, marked 🚫 but still with
     // their members.
     let ordered = state
@@ -229,7 +234,7 @@ pub(crate) fn groups_text(state: &State) -> String {
 /// One group in detail: this week, what's coming, members, rooms, weights.
 pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String {
     let (year, week) = current_iso_week();
-    let mut header = format!("🏢 **{}** · {}", group.name, group.rhythm.describe());
+    let mut header = format!("🏠 **{}** · {}", group.name, group.rhythm.describe());
     if !group.is_active {
         header.push_str(" · 🚫 disabled");
     }
@@ -258,16 +263,16 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String 
                 "{}{}: {}",
                 slot.name,
                 weight_of(slot.weight),
-                slot.room_names.join(", ")
+                crate::view::rooms(&slot.room_names)
             ));
         }
     } else if !group.room_names.is_empty() {
-        lines.push(group.room_names.join(", "));
+        lines.push(crate::view::rooms(&group.room_names));
     }
 
     if group.is_active && state.belongs_in_weekly_plan(group, year, week) {
         lines.push(String::new());
-        lines.push(format!("**This week** · week {week}"));
+        lines.push(format!("🧹 **This week** · week {week}"));
         lines.extend(
             week_task_lines(state, group, year, week)
                 .into_iter()
@@ -282,15 +287,15 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String 
             upcoming.push(format!("Week {}: {}", at.1, week_people(state, group, at)));
         }
         lines.push(String::new());
-        lines.push("**Coming up**".into());
+        lines.push("🔄 **Coming up**".into());
         lines.extend(upcoming);
     }
 
     let members = state.members_of(group);
     lines.push(String::new());
-    lines.push(format!("**Members** · {}", members.len()));
+    lines.push(format!("👥 **Members** · {}", members.len()));
     if members.is_empty() {
-        lines.push("No members yet — !member add or !join.".into());
+        lines.push("No members yet — !member add or !mygroups.".into());
     } else {
         lines.push(
             members
@@ -398,6 +403,6 @@ fn group_completion_lines(state: &State) -> String {
     if lines.is_empty() {
         String::new()
     } else {
-        format!("🏢 **Groups**\n{}", lines.join("\n"))
+        format!("🏠 **Groups**\n{}", lines.join("\n"))
     }
 }

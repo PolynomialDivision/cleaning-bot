@@ -304,7 +304,7 @@ async fn matrix_participant_normal_flow_persists_and_rejects_duplicates() {
         .unwrap()
         .unwrap();
     assert!(
-        removed.starts_with("✅ Removed new from 2nd Floor"),
+        removed.starts_with("👋 Removed new from 2nd Floor"),
         "by name, no ping: {removed}"
     );
     assert!(ctx
@@ -2406,7 +2406,7 @@ async fn next_lists_the_senders_turns_with_when_what_and_kind() {
     let none = cmd_next(&ctx, &stranger, &[]).await.unwrap().unwrap();
     assert_eq!(
         none,
-        "You're not on the cleaning plan yet — !join <group> to join one."
+        "You're not on the cleaning plan yet — !mygroups to join a group."
     );
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -3968,7 +3968,7 @@ async fn status_shows_who_actually_cleaned_and_skips() {
     let text = names_only(&cmd_status(&ctx).await.unwrap().unwrap());
     assert!(text.contains("✅ Scharni: alice · done by bob"), "{text}");
     assert!(text.contains("⏭️ Colbe: bob · skipped"), "{text}");
-    assert!(text.contains("· 2/2 done"), "{text}");
+    assert!(text.contains("· 2/2 done ✨"), "{text}");
 
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -4046,7 +4046,10 @@ async fn bare_done_only_marks_what_is_open_for_the_sender() {
     }
 
     let reply = cmd_done(&ctx, &stranger, &[]).await.unwrap().unwrap();
-    assert!(reply.contains("not registered"), "{reply}");
+    assert!(
+        reply.starts_with("❌ You're not on the plan yet — !mygroups"),
+        "{reply}"
+    );
 
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -4076,7 +4079,7 @@ async fn groups_overview_shows_every_group_with_its_members() {
         "details never ping members: {detail}"
     );
 
-    assert!(detail.contains("🏢 **Floor**"), "{detail}");
+    assert!(detail.contains("🏠 **Floor**"), "{detail}");
     assert!(detail.contains("⬜ Scharni: alice"), "{detail}");
     assert!(detail.contains("Slots: Scharni, Colbe"), "{detail}");
     assert!(
@@ -4817,7 +4820,7 @@ async fn cleaning_person_without_upcoming_turns_or_name_says_so() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(unknown, "Nobody is not registered.");
+    assert_eq!(unknown, "❌ Nobody is not registered.");
     let usage = cmd_cleaning_person(&ctx, &viewer, &[])
         .await
         .unwrap()
@@ -5069,10 +5072,10 @@ async fn the_plan_shows_user_pills_but_pings_nobody() {
     // Week by week, current week first with its status.
     let (y, w) = current_iso_week();
     let lines: Vec<&str> = text.body.lines().collect();
-    assert_eq!(lines[0], "📅 Next 4 weeks");
+    assert_eq!(lines[0], "📋 Plan · next 4 weeks");
     assert_eq!(
         lines[2],
-        format!("{} · this week", crate::view::week_label(y, w))
+        format!("📅 {} · this week", crate::view::week_label(y, w))
     );
     assert_eq!(lines[3], "⬜ Floor: mia");
     assert_eq!(lines[4], "⬜ Kitchen: mia");
@@ -5239,8 +5242,9 @@ async fn a_new_user_is_welcomed_once_with_every_active_group_to_tap() {
     let selector = new_selector(&state, MIA, true);
     assert_eq!(
         selector.rendered,
-        "👋 Welcome, @mia:example.org! I'm the cleaning bot: I keep track of whose turn \
-         it is and remind you when it's yours.\n\
+        "👋 Welcome, @mia:example.org!\n\
+         🧹 I'm the cleaning bot: I keep track of whose turn it is and remind you when \
+         it's yours.\n\
          \n\
          Tap a number to join or leave a group:\n\
          1️⃣ 2nd Floor\n\
@@ -5308,7 +5312,7 @@ async fn tapping_a_number_joins_and_taking_it_back_leaves() {
         .unwrap();
     assert!(
         joined.starts_with(
-            "✅ [mia](https://matrix.to/#/@mia:example.org) joined **2nd Floor**\nFirst turn: "
+            "✅ [mia](https://matrix.to/#/@mia:example.org) joined **2nd Floor**\n📅 First turn: "
         ),
         "{joined}"
     );
@@ -5487,7 +5491,7 @@ async fn leaving_with_this_weeks_turn_open_is_refused_and_its_undo_does_nothing(
         .unwrap()
         .unwrap();
     assert!(
-        refused.starts_with("You cannot leave «2nd Floor»"),
+        refused.starts_with("❌ You cannot leave «2nd Floor»"),
         "{refused}"
     );
     assert!(is_in(&state, &mxid, "2nd Floor"));

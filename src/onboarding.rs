@@ -70,8 +70,9 @@ pub fn new_selector(state: &State, user_id: &str, welcome: bool) -> GroupSelecto
 /// The selector as it should read now:
 ///
 /// ```text
-/// 👋 Welcome, @mia! I'm the cleaning bot: I keep track of whose turn it
-/// is and remind you when it's yours.
+/// 👋 Welcome, @mia!
+/// 🧹 I'm the cleaning bot: I keep track of whose turn it is and remind
+/// you when it's yours.
 ///
 /// Tap a number to join or leave a group:
 /// 1️⃣ ✅ **2nd Floor**
@@ -84,11 +85,12 @@ pub fn selector_text(state: &State, selector: &GroupSelector) -> String {
     let mut lines = Vec::new();
     let tap_line = if selector.welcome {
         // The welcome is addressed to them: a real mention.
-        lines.push(format!(
-            "👋 Welcome, {}! I'm the cleaning bot: I keep track of whose turn it is \
-             and remind you when it's yours.",
-            selector.user_id
-        ));
+        lines.push(format!("👋 Welcome, {}!", selector.user_id));
+        lines.push(
+            "🧹 I'm the cleaning bot: I keep track of whose turn it is and remind you \
+             when it's yours."
+                .into(),
+        );
         lines.push(String::new());
         "Tap a number to join or leave a group:".to_owned()
     } else {
