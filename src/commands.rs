@@ -141,6 +141,7 @@ pub async fn handle(
             return cmd_pdf(ctx, sender, room, rest, event_id, thread_root).await
         }
         ("!mygroups", _) => return cmd_mygroups(ctx, sender, room).await,
+        ("!member", Some("welcome")) => return cmd_member_welcome(ctx, sender, room, rest).await,
         ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, room, rest).await,
         ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
         ("!member", Some("link")) => {
@@ -337,7 +338,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
         ("!plan", Some("remind" | "reset")) => with_sub(args[0], joined(rest)),
         ("!member", Some("add" | "remove")) => with_sub(args[0], person_then_group(state, rest)),
         ("!member", Some("away")) => with_sub(args[0], person_then_number(rest)),
-        ("!member", Some("back")) => with_sub(args[0], joined(rest)),
+        ("!member", Some("back" | "welcome")) => with_sub(args[0], joined(rest)),
         ("!member", Some("link")) => match rest.split_last() {
             Some((mxid, head)) if !head.is_empty() => {
                 vec![args[0].to_owned(), head.join(" "), mxid.to_string()]
@@ -351,7 +352,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
 // ── help ─────────────────────────────────────────────────────────────────────
 
 const PLAN_USAGE: &str = "Usage: !plan [N] | !plan assign|unassign|skip|remind|announce|pdf|reset|import … (see !help admin)";
-const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person>";
+const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person> · !member welcome <person>";
 
 fn help_text() -> String {
     r#"🧹 **Cleaning bot**
@@ -379,6 +380,7 @@ fn admin_help_text() -> String {
 !member add <@user:server | name> <group> · name = person without Matrix
 !member remove <@user:server | name> <group>
 !member link <name> <@user:server> · connect a name-only person to Matrix
+!member welcome <person> · send them the welcome and group list again
 !member away <person> [weeks] · skip in new rotation picks (default 4)
 !member back <person>
 

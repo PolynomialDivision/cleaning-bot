@@ -210,6 +210,67 @@ pub(crate) async fn cmd_mygroups(
     Ok(None)
 }
 
+// ── !member welcome <person> ─────────────────────────────────────────────
+
+/// `!member welcome <name | @user:server>` (admin) — the full welcome with
+/// the group list for someone, in the cleaning room, even if they've had
+/// it before. It replaces their previous list, like `!mygroups`.
+pub(crate) async fn cmd_member_welcome(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+    args: &[&str],
+) -> Result<Option<RoomMessageEventContent>> {
+    require_admin(ctx, sender)?;
+    let target = {
+        let mut state = ctx.state.lock().await;
+        match welcome_target(&state, &args.join(" ")) {
+            Ok(mxid) => {
+                crate::onboarding::claim_welcome(&mut state, &mxid);
+                state.save(&ctx.state_path).await?;
+                mxid
+            }
+            Err(why) => return Ok(Some(format::mentionify(&why))),
+        }
+    };
+    let Some(cleaning_room) = room.client().get_room(&ctx.room_id) else {
+        return Ok(Some(format::mentionify("❌ I'm not in the cleaning room.")));
+    };
+    crate::onboarding::post_selector(ctx, &cleaning_room, &target, true).await?;
+    // In the room the welcome speaks for itself; a direct chat gets word.
+    Ok((room.room_id() != ctx.room_id).then(|| {
+        format::intentional(format::mentionify(&format!(
+            "✅ Welcome sent to {}.",
+            crate::view::user_id_link(&target)
+        )))
+    }))
+}
+
+/// Whom `!member welcome <query>` is for: a known person with Matrix, or
+/// any valid Matrix ID (someone who isn't on the plan yet). `Err` is the
+/// reply when there's nobody to send it to.
+pub(crate) fn welcome_target(
+    state: &crate::state::State,
+    query: &str,
+) -> std::result::Result<String, String> {
+    if query.is_empty() {
+        return Err("Usage: !member welcome <name | @user:server>".into());
+    }
+    match lookup_person(state, query)? {
+        Some(person) => person.matrix_id.clone().ok_or_else(|| {
+            format!(
+                "{} has no Matrix account — link one first (!member link).",
+                person.display_name
+            )
+        }),
+        None if query.starts_with('@') => {
+            validate_matrix_user_id(query)?;
+            Ok(query.to_owned())
+        }
+        None => Err(format!("{query} is not registered.")),
+    }
+}
+
 // ── !join <group> / !leave <group> ──────────────────────────────────────
 
 pub(crate) async fn cmd_joinfloor(

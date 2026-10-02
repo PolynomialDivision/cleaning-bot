@@ -5569,3 +5569,40 @@ async fn people_who_used_the_bot_before_count_as_welcomed() {
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }
+
+#[tokio::test]
+async fn an_admin_can_send_someone_the_welcome_again() {
+    let (ctx, path, _, _) = cleaning_person_ctx();
+    let mut state = ctx.state.lock().await;
+    // By name or Matrix ID — also someone who had it already.
+    state.greeted_users.insert("@mia:example.org".into());
+    assert_eq!(
+        welcome_target(&state, "Mia").as_deref(),
+        Ok("@mia:example.org")
+    );
+    assert_eq!(
+        welcome_target(&state, "@mia:example.org").as_deref(),
+        Ok("@mia:example.org")
+    );
+    // Someone not on the plan yet, by Matrix ID only.
+    assert_eq!(
+        welcome_target(&state, "@new:example.org").as_deref(),
+        Ok("@new:example.org")
+    );
+    assert!(welcome_target(&state, "Nobody")
+        .unwrap_err()
+        .contains("not registered"));
+    assert!(welcome_target(&state, "@bad")
+        .unwrap_err()
+        .contains("not a valid"));
+    // Without Matrix there's nobody to welcome; an ambiguous name asks.
+    assert!(welcome_target(&state, "Dan")
+        .unwrap_err()
+        .contains("no Matrix account"));
+    assert!(welcome_target(&state, "Alex")
+        .unwrap_err()
+        .contains("matches 2 people"));
+    assert!(welcome_target(&state, "").unwrap_err().starts_with("Usage"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
