@@ -1,4 +1,4 @@
-//! Assignments: !plan assign, !plan unassign, !plan import, !takeover, !undo, !next, !plan skip, !plan remind.
+//! Assignments: !plan assign, !plan unassign, !plan import, !takeover, !undo, !next, !myplan, !plan skip, !plan remind.
 
 use super::*;
 
@@ -74,9 +74,10 @@ pub(crate) async fn cmd_assign(
         return Ok(Some(usage.into()));
     }
     let person_query = rest.join(" ");
-    let person = match state.find_person(&person_query) {
-        Some(p) => p.clone(),
-        None => {
+    let person = match lookup_person(&state, &person_query) {
+        Ok(Some(p)) => p.clone(),
+        Err(ambiguous) => return Ok(Some(ambiguous)),
+        Ok(None) => {
             return Ok(Some(format!(
                 "«{person_query}» is not registered. Add them with !member add first."
             )))
@@ -288,11 +289,18 @@ pub(crate) async fn cmd_importplan(
             errors.push(format!("«{raw}»: unexpected extra text after the person."));
             continue;
         }
-        let Some(person) = state.find_person(person_query) else {
-            errors.push(format!(
-                "«{raw}»: «{person_query}» is not registered. Use !member add first."
-            ));
-            continue;
+        let person = match lookup_person(&state, person_query) {
+            Ok(Some(person)) => person,
+            Ok(None) => {
+                errors.push(format!(
+                    "«{raw}»: «{person_query}» is not registered. Use !member add first."
+                ));
+                continue;
+            }
+            Err(ambiguous) => {
+                errors.push(format!("«{raw}»: {ambiguous}"));
+                continue;
+            }
         };
         let turn = match single_turn(&state, group, (year, week), day) {
             Ok(turn) => turn,
@@ -724,9 +732,10 @@ pub(crate) async fn cmd_next(
     } else {
         args.join(" ")
     };
-    let person = match state.find_person(&query) {
-        Some(p) => p.clone(),
-        None => return Ok(Some(format!("{query} is not registered."))),
+    let person = match lookup_person(&state, &query) {
+        Ok(Some(p)) => p.clone(),
+        Ok(None) => return Ok(Some(format!("{query} is not registered."))),
+        Err(ambiguous) => return Ok(Some(ambiguous)),
     };
     let groups: Vec<CleaningGroup> = state
         .groups_for_person(&person.id)
@@ -805,6 +814,151 @@ pub(crate) async fn cmd_next(
         reply.push_str(&format!("\nAlready done: {} ✅", done_now.join(", ")));
     }
     Ok(Some(reply))
+}
+
+// ── !myplan [person] [N] · !cleaning person <person> [N] ─────────────────────────────────────────────────────
+//
+// The person's next N open turns (default 5) across every active group —
+// including turns they hold in a group they're not a member of (a takeover,
+// a swap) — frozen plan first, rotation preview beyond it. Like `!next`,
+// anyone may look anyone up: the plan itself is public via `!plan`.
+
+const MYPLAN_DEFAULT: usize = 5;
+const MYPLAN_MAX: usize = 20;
+
+pub(crate) async fn cmd_myplan(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    let state = ctx.state.lock().await;
+    let (query, count) = match args {
+        [] => (sender.as_str().to_owned(), MYPLAN_DEFAULT),
+        [n] if n.parse::<usize>().is_ok() => (sender.as_str().to_owned(), n.parse().unwrap()),
+        [who, n] if n.parse::<usize>().is_ok() => (who.to_string(), n.parse().unwrap()),
+        _ => (args.join(" "), MYPLAN_DEFAULT),
+    };
+    let count = count.clamp(1, MYPLAN_MAX);
+    let person = match lookup_person(&state, &query) {
+        Ok(Some(p)) => p.clone(),
+        Ok(None) if query == sender.as_str() => {
+            return Ok(Some(
+                "You are not registered yet — join a group with !join <group>.".into(),
+            ))
+        }
+        Ok(None) => return Ok(Some(format!("{query} is not registered."))),
+        Err(ambiguous) => return Ok(Some(ambiguous)),
+    };
+
+    let duties = upcoming_duties(&state, &person.id, count);
+    if duties.is_empty() {
+        return Ok(Some(format!(
+            "📅 No upcoming turns for {} in the next two years.",
+            person.display_name
+        )));
+    }
+    let today = crate::state::today();
+    let mut lines = vec![format!("📅 **Upcoming turns for {}**", person.display_name)];
+    let mut any_tentative = false;
+    for duty in &duties {
+        let (start, end) = duty.turn.dates(&duty.group.rhythm);
+        let mut dates = crate::rhythm::date_range(start, end);
+        if duty.turn.year != current_iso_week().0 {
+            dates.push_str(&format!(" {}", duty.turn.year));
+        }
+        let mut line = format!("• week {} · {dates} · {}", duty.turn.week, duty.label());
+        if start <= today {
+            line.push_str(" · now ⚠️");
+        }
+        match state.slot_assignments.iter().find(|a| {
+            a.group_id == duty.group.id
+                && a.slot_index == duty.slot_index
+                && (a.iso_year, a.iso_week, a.shift)
+                    == (duty.turn.year, duty.turn.week, duty.turn.shift)
+        }) {
+            Some(a) if a.source != AssignmentSource::RoundRobin => {
+                line.push_str(&format!(" ({})", source_label(&a.source)));
+            }
+            Some(_) => {}
+            None => {
+                any_tentative = true;
+                line.push_str(" (tentative)");
+            }
+        }
+        lines.push(line);
+    }
+    if any_tentative {
+        lines
+            .push("_tentative = beyond the fixed plan; can still shift if members change._".into());
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+/// `!cleaning person <name | @user:server> [N]` — `!myplan` for someone else,
+/// spelled the way the rest of the command set names a subject first.
+pub(crate) async fn cmd_cleaning_person(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    if args.is_empty() {
+        return Ok(Some(
+            "Usage: !cleaning person <name | @user:server> [N]".into(),
+        ));
+    }
+    cmd_myplan(ctx, sender, args).await
+}
+
+/// `person_id`'s next `count` open turns (not done, not over), across every
+/// active group, in date order.
+pub(crate) fn upcoming_duties(
+    state: &crate::state::State,
+    person_id: &PersonId,
+    count: usize,
+) -> Vec<Duty> {
+    let current = current_iso_week();
+    let horizon = add_weeks(current.0, current.1, 104);
+    let mut duties: Vec<Duty> = Vec::new();
+    for group in state.cleaning_groups.iter().filter(|g| g.is_active) {
+        // Members can hold turns anywhere; non-members only via a stored
+        // takeover/swap/assignment, so skip previewing groups they're not in.
+        let member = group.member_ids.contains(person_id);
+        let held_frozen = state
+            .slot_assignments
+            .iter()
+            .any(|a| a.group_id == group.id && a.person_id.as_ref() == Some(person_id));
+        if !member && !held_frozen {
+            continue;
+        }
+        let mut found = 0;
+        for turn in state.turns_between(group, current, horizon) {
+            if found >= count {
+                break;
+            }
+            if state.turn_over(group, turn) {
+                continue;
+            }
+            for slot_index in state.held_slots(group, person_id, turn) {
+                if !state.is_turn_slot_done(group, slot_index, turn) {
+                    duties.push(Duty {
+                        group: group.clone(),
+                        slot_index,
+                        turn,
+                    });
+                    found += 1;
+                }
+            }
+        }
+    }
+    duties.sort_by_key(|d| {
+        (
+            d.turn.dates(&d.group.rhythm).0,
+            d.group.name.clone(),
+            d.slot_index,
+        )
+    });
+    duties.truncate(count);
+    duties
 }
 
 // ── Admin: !plan skip [group [slot]] [on <day>] ───────────────────────────────

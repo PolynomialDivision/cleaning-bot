@@ -29,8 +29,9 @@
 //! `reconcile_queue` keeps the queue in sync with `member_ids`: it drops
 //! anyone no longer a member and appends anyone missing. It is also the only
 //! "migration" a pre-queue `state.json` needs — see its docs below.
-//! `commands::apply_group_join` / `apply_group_departure` call it too, to
-//! insert a joiner at the front of the queue or drop a leaver from it.
+//! `commands::apply_group_join` / `apply_group_departure` call it too: a
+//! join re-plans everything from the next cycle on (`cycle_anchor`,
+//! `next_cycle_start`, `spread_newcomers`), a leave drops the leaver.
 
 use std::collections::HashSet;
 
@@ -248,6 +249,68 @@ pub fn rewind_queue(
     front.retain(|pid| queue.contains(pid));
     front.extend(rest);
     front
+}
+
+/// The member every rotation cycle starts with: of the current members, the
+/// one whose first frozen turn in the group comes earliest — the head of the
+/// original rotation. Later joiners never displace them, so cycle boundaries
+/// stay put as the group grows. `None` while nobody has a turn yet.
+pub fn cycle_anchor(state: &State, group: &CleaningGroup) -> Option<PersonId> {
+    state
+        .slot_assignments
+        .iter()
+        .filter(|a| a.group_id == group.id)
+        .filter_map(|a| {
+            let pid = a
+                .person_id
+                .as_ref()
+                .filter(|p| group.member_ids.contains(p))?;
+            Some(((a.iso_year, a.iso_week, a.shift, a.slot_index), pid))
+        })
+        .min_by_key(|(key, _)| *key)
+        .map(|(_, pid)| pid.clone())
+}
+
+/// Where the next rotation cycle starts: the first frozen turn after week
+/// `after` held by `anchor` (see `cycle_anchor`). `None` if the anchor has
+/// no frozen turn that far out yet.
+pub fn next_cycle_start(
+    state: &State,
+    group: &CleaningGroup,
+    anchor: &PersonId,
+    after: (i32, u32),
+) -> Option<Turn> {
+    state
+        .slot_assignments
+        .iter()
+        .filter(|a| {
+            a.group_id == group.id
+                && (a.iso_year, a.iso_week) > after
+                && a.person_id.as_ref() == Some(anchor)
+        })
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+        .min()
+}
+
+/// One cycle's turn order with `newcomers` seated into `old` (which starts
+/// with the cycle's anchor): newcomer `i` follows `old[i·n/k]`, so with one
+/// newcomer they come right after the anchor and several are spread evenly
+/// through the cycle — only ever side by side when they outnumber `old`.
+pub fn spread_newcomers(old: &[PersonId], newcomers: &[PersonId]) -> Vec<PersonId> {
+    let (n, k) = (old.len(), newcomers.len());
+    if n == 0 {
+        return newcomers.to_vec();
+    }
+    let mut order = Vec::with_capacity(n + k);
+    let mut next = 0;
+    for (i, pid) in old.iter().enumerate() {
+        order.push(pid.clone());
+        while next < k && next * n / k == i {
+            order.push(newcomers[next].clone());
+            next += 1;
+        }
+    }
+    order
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -828,5 +891,60 @@ mod tests {
             .map(|a| (a.iso_week, a.person_id.clone()))
             .collect();
         assert_eq!(assignments_after_first_pass, assignments_after_replay);
+    }
+
+    fn ids(names: &[&str]) -> Vec<PersonId> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn spread_newcomers_follows_the_anchor_and_keeps_old_order() {
+        let old = ids(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+        assert_eq!(spread_newcomers(&old, &[]), old);
+        assert_eq!(
+            spread_newcomers(&old, &ids(&["X"])),
+            ids(&["a", "X", "b", "c", "d", "e", "f", "g", "h", "i", "j"])
+        );
+        assert_eq!(
+            spread_newcomers(&old, &ids(&["X", "Y"])),
+            ids(&["a", "X", "b", "c", "d", "e", "f", "Y", "g", "h", "i", "j"])
+        );
+        assert_eq!(
+            spread_newcomers(&old, &ids(&["X", "Y", "Z"])),
+            ids(&["a", "X", "b", "c", "d", "Y", "e", "f", "g", "Z", "h", "i", "j"])
+        );
+    }
+
+    #[test]
+    fn spread_newcomers_only_bunches_up_when_they_outnumber_the_rest() {
+        assert_eq!(
+            spread_newcomers(&ids(&["a", "b"]), &ids(&["X", "Y", "Z"])),
+            ids(&["a", "X", "Y", "b", "Z"])
+        );
+        assert_eq!(spread_newcomers(&[], &ids(&["X", "Y"])), ids(&["X", "Y"]));
+    }
+
+    #[test]
+    fn cycle_anchor_is_the_member_with_the_earliest_turn() {
+        let (mut st, id1, id2) = two_person_state();
+        assert_eq!(cycle_anchor(&st, &st.cleaning_groups[0]), None);
+        for ev in materialize(&st, 4) {
+            st.apply_event(ev).unwrap();
+        }
+        let group = st.cleaning_groups[0].clone();
+        assert_eq!(cycle_anchor(&st, &group), Some(id1.clone()));
+        let (y, w) = current_iso_week();
+        assert_eq!(
+            next_cycle_start(&st, &group, &id1, (y, w)),
+            Some(Turn::new(add_weeks(y, w, 2).0, add_weeks(y, w, 2).1, 0))
+        );
+
+        // Once the anchor leaves, the next-earliest member takes over.
+        st.apply_event(DomainEvent::PersonLeftGroup {
+            person_id: id1,
+            group_id: group.id.clone(),
+        })
+        .unwrap();
+        assert_eq!(cycle_anchor(&st, &st.cleaning_groups[0]), Some(id2));
     }
 }

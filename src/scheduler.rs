@@ -52,6 +52,23 @@ pub async fn run(ctx: BotContext, client: Client) {
     }
 }
 
+/// Keep every group's frozen plan `materialize_weeks` deep as time passes —
+/// the same additive fill startup does, so how far ahead the plan is fixed
+/// no longer depends on when the bot last restarted. Never changes a turn
+/// that is already frozen.
+pub(crate) async fn roll_planning_horizon(ctx: &BotContext) -> anyhow::Result<()> {
+    let mut state = ctx.state.lock().await;
+    let events =
+        crate::resolver::materialize(&state, ctx.config.schedule.materialize_weeks as usize);
+    if events.is_empty() {
+        return Ok(());
+    }
+    for ev in events {
+        state.apply_event(ev)?;
+    }
+    state.save(&ctx.state_path).await
+}
+
 /// Edit the pinned weekly plan message to reflect the current completion state.
 /// No-op if no plan has been sent for this week yet, or if the rendered
 /// content already matches what was last sent (avoids a pointless Matrix edit).
@@ -144,6 +161,8 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     let (remind_h, remind_m) = parse_hhmm(&ctx.config.schedule.reminder_time);
     let after_hour = (local_now.hour() as u8, local_now.minute() as u8) >= (remind_h, remind_m);
     let (year, week) = current_iso_week();
+
+    roll_planning_horizon(ctx).await?;
 
     let room = match client.get_room(&ctx.room_id) {
         Some(r) => r,

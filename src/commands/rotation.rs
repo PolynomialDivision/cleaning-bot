@@ -47,13 +47,12 @@ pub(crate) async fn add_matrix_participant(
         .expect("validated Matrix person must exist")
         .id
         .clone();
-    apply_group_join(ctx, &mut state, &group_id, &person_id)?;
-    let next = next_assignment_summary(&state, &group_id);
+    let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
+    let summary = join_summary(&state, &group_id, &person_id, replanned_from);
     state.save(&ctx.state_path).await?;
 
     Ok(Some(format!(
-        "✅ Added {mxid} to «{group_name}».\n\
-         Takes effect from the next open week; already-planned weeks are unchanged.\n{next}"
+        "✅ Added {mxid} to «{group_name}».\n{summary}"
     )))
 }
 
@@ -106,13 +105,11 @@ pub(crate) async fn remove_matrix_participant(
         person_id: person_id.clone(),
         group_id: group_id.clone(),
     })?;
-    let refilled = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
-    let next = next_assignment_summary(&state, &group_id);
+    let departure = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
+    let summary = departure_summary(&state, &group_id, &departure);
     state.save(&ctx.state_path).await?;
 
     Ok(Some(format!(
-        "✅ Removed {mxid} from «{group_name}».\n\
-         Current, completed, and other members' future assignments were preserved. \
-         Refilled {refilled} vacated week(s).\n{next}"
+        "✅ Removed {mxid} from «{group_name}».\n{summary}"
     )))
 }

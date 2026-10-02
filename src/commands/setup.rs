@@ -93,8 +93,12 @@ pub(crate) async fn cmd_addperson(
         Some(g) => g.id.clone(),
         None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    let person_id = if let Some(person) = state.find_person(&name) {
-        person.id.clone()
+    let existing = match lookup_person(&state, &name) {
+        Ok(found) => found.map(|p| p.id.clone()),
+        Err(ambiguous) => return Ok(Some(ambiguous)),
+    };
+    let person_id = if let Some(id) = existing {
+        id
     } else {
         state.apply_event(DomainEvent::PersonCreated {
             person_id: Uuid::new_v4().to_string(),
@@ -116,12 +120,11 @@ pub(crate) async fn cmd_addperson(
             "{name} is already in «{group_name}». No changes made."
         )));
     }
-    apply_group_join(ctx, &mut state, &group_id, &person_id)?;
-    let next = next_assignment_summary(&state, &group_id);
+    let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
+    let summary = join_summary(&state, &group_id, &person_id, replanned_from);
     state.save(&ctx.state_path).await?;
     Ok(Some(format!(
-        "✅ Added {name} (no Matrix) to «{group_name}».\n\
-         Takes effect from the next open week; already-planned weeks are unchanged.\n{next}"
+        "✅ Added {name} (no Matrix) to «{group_name}».\n{summary}"
     )))
 }
 
@@ -142,9 +145,10 @@ pub(crate) async fn cmd_removeperson(
         }
     };
     let mut state = ctx.state.lock().await;
-    let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
-        Some(id) => id,
-        None => return Ok(Some(format!("Person «{query}» not found."))),
+    let person_id = match lookup_person(&state, &query) {
+        Ok(Some(p)) => p.id.clone(),
+        Ok(None) => return Ok(Some(format!("Person «{query}» not found."))),
+        Err(ambiguous) => return Ok(Some(ambiguous)),
     };
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
@@ -171,13 +175,11 @@ pub(crate) async fn cmd_removeperson(
         person_id: person_id.clone(),
         group_id: group_id.clone(),
     })?;
-    let refilled = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
-    let next = next_assignment_summary(&state, &group_id);
+    let departure = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
+    let summary = departure_summary(&state, &group_id, &departure);
     state.save(&ctx.state_path).await?;
     Ok(Some(format!(
-        "✅ Removed {query} from «{group_name}».\n\
-         Current, completed, and other members' future assignments were preserved. \
-         Refilled {refilled} vacated week(s).\n{next}"
+        "✅ Removed {query} from «{group_name}».\n{summary}"
     )))
 }
 
@@ -485,10 +487,15 @@ pub(crate) async fn cmd_resetplan(
         Some(g) => g.id.clone(),
         None => return Ok(Some(format!("Group «{group_name}» not found."))),
     };
-    reset_and_rematerialize(ctx, &mut state, &group_id)?;
+    let cleared = reset_and_rematerialize(ctx, &mut state, &group_id)?;
     let next = next_assignment_summary(&state, &group_id);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Plan reset for «{group_name}». {next}")))
+    let mut reply = format!("✅ Plan reset for «{group_name}». {next}");
+    if let Some(note) = discarded_pins_note(&cleared) {
+        reply.push('\n');
+        reply.push_str(&note);
+    }
+    Ok(Some(reply))
 }
 
 pub(crate) async fn cmd_addslot(
@@ -802,9 +809,10 @@ pub(crate) async fn cmd_absent(
     };
 
     let mut state = ctx.state.lock().await;
-    let person = match state.find_person(&person_query).cloned() {
-        Some(p) => p,
-        None => return Ok(Some(format!("{person_query} not found."))),
+    let person = match lookup_person(&state, &person_query) {
+        Ok(Some(p)) => p.clone(),
+        Ok(None) => return Ok(Some(format!("{person_query} not found."))),
+        Err(ambiguous) => return Ok(Some(ambiguous)),
     };
 
     // Parse optional weeks (last numeric arg).
@@ -894,9 +902,10 @@ pub(crate) async fn cmd_back(
         None => return Ok(Some("Usage: !member back <person>".into())),
     };
     let mut state = ctx.state.lock().await;
-    let person_id = match state.find_person(&query).map(|p| p.id.clone()) {
-        Some(id) => id,
-        None => return Ok(Some(format!("{query} not found."))),
+    let person_id = match lookup_person(&state, &query) {
+        Ok(Some(p)) => p.id.clone(),
+        Ok(None) => return Ok(Some(format!("{query} not found."))),
+        Err(ambiguous) => return Ok(Some(ambiguous)),
     };
     if !state.absences.iter().any(|a| a.person_id == person_id) {
         return Ok(Some(format!("{query} has no active absence.")));

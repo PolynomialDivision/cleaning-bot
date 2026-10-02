@@ -791,6 +791,23 @@ impl State {
             .iter()
             .find(|p| p.id == query || p.matches(query))
     }
+    /// Everyone `query` could mean: the one person whose id or Matrix ID it
+    /// is, or else every person with that display name (case-insensitive) —
+    /// several when names collide, so callers can ask instead of guessing.
+    pub fn find_persons(&self, query: &str) -> Vec<&Person> {
+        let exact: Vec<&Person> = self
+            .persons
+            .iter()
+            .filter(|p| p.id == query || p.matrix_id.as_deref() == Some(query))
+            .collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+        self.persons
+            .iter()
+            .filter(|p| p.display_name.eq_ignore_ascii_case(query))
+            .collect()
+    }
     pub fn group_by_name(&self, name: &str) -> Option<&CleaningGroup> {
         self.cleaning_groups
             .iter()

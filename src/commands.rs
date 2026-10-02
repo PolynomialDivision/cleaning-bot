@@ -155,6 +155,8 @@ pub async fn handle(
         ("!undo", _) => cmd_undo(ctx, sender, &args).await,
         ("!groups", None) => cmd_groups(ctx, None).await,
         ("!next", _) => cmd_next(ctx, sender, &args).await,
+        ("!myplan" | "!mycleaning", _) => cmd_myplan(ctx, sender, &args).await,
+        ("!cleaning", Some("person")) => cmd_cleaning_person(ctx, sender, rest).await,
         ("!takeover", _) => cmd_takeover(ctx, sender, &args).await,
         ("!swap", Some("accept")) => cmd_acceptswap(ctx, sender, rest).await,
         ("!swap", Some("reject")) => cmd_rejectswap(ctx, sender, rest).await,
@@ -270,6 +272,8 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
     let rest = args.get(1..).unwrap_or_default();
     match (cmd, sub.as_deref()) {
         ("!done" | "!undo" | "!next" | "!join" | "!leave", _) => joined(args),
+        ("!myplan" | "!mycleaning", _) => person_then_number(args),
+        ("!cleaning", Some("person")) => with_sub(args[0], person_then_number(rest)),
         ("!takeover", _) => group_first(state, args, 0),
         ("!swap", Some("accept" | "reject")) => owned(args),
         ("!swap", Some(_)) => {
@@ -350,6 +354,7 @@ fn help_text() -> String {
 !groups · all groups and their members
 !plan [N] · the next N weeks (default 6)
 !next [person] · when is your next turn?
+!myplan [N] · your next turns · !cleaning person <name | @user> [N] · someone else's
 !takeover [group] [slot] [week N] [on <day>] · take a turn over yourself
 !swap @user [group] [slot] [week N] [on <day>] · ask someone to swap · !swap accept|reject <id>
 !join <group> · !leave <group>
@@ -402,7 +407,9 @@ fn renamed_command_hint(cmd: &str) -> Option<String> {
     let new = match cmd {
         "!cleanplan" => "!plan [N]",
         "!areas" | "!listgroups" | "!floors" => "!groups",
-        "!cleaning" => "!groups (list) or !member add|remove (changes)",
+        "!cleaning" => {
+            "!cleaning person <name> (their turns), !groups (list) or !member add|remove (changes)"
+        }
         "!joingroup" => "!join <group>",
         "!leavegroup" => "!leave <group>",
         "!icalreset" => "!ical reset",

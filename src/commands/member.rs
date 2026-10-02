@@ -115,9 +115,10 @@ pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<
     if !args.is_empty() {
         let query = args.join(" ");
         let query = query.as_str();
-        let person_id = match state.find_person(query).map(|p| p.id.clone()) {
-            Some(id) => id,
-            None => return Ok(Some(format!("Person «{query}» not found."))),
+        let person_id = match lookup_person(&state, query) {
+            Ok(Some(p)) => p.id.clone(),
+            Ok(None) => return Ok(Some(format!("Person «{query}» not found."))),
+            Err(ambiguous) => return Ok(Some(ambiguous)),
         };
         let ps = match analytics::person_stats(&state, &person_id) {
             Some(s) => s,
@@ -219,9 +220,10 @@ pub(crate) async fn cmd_joinfloor(
     {
         return Ok(Some(format!("You are already in «{group_name}».")));
     }
-    apply_group_join(ctx, &mut state, &group_id, &person_id)?;
+    let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
+    let summary = join_summary(&state, &group_id, &person_id, replanned_from);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Joined «{group_name}».")))
+    Ok(Some(format!("✅ Joined «{group_name}».\n{summary}")))
 }
 
 // ── !leave <group> ───────────────────────────────────────────────────────
@@ -265,7 +267,8 @@ pub(crate) async fn cmd_leavefloor(
         person_id: person_id.clone(),
         group_id: group_id.clone(),
     })?;
-    apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
+    let departure = apply_group_departure(ctx, &mut state, &person_id, &group_id)?;
+    let summary = departure_summary(&state, &group_id, &departure);
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!("✅ Left «{group_name}».")))
+    Ok(Some(format!("✅ Left «{group_name}».\n{summary}")))
 }

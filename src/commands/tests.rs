@@ -68,7 +68,7 @@ fn removing_future_assignments_is_targeted_and_keeps_current_week() {
 
     let removed = remove_future_assignments_for_person(&mut state, &first_id, &group_id);
 
-    assert_eq!(removed, 1);
+    assert_eq!(removed.len(), 1);
     assert!(state.slot_assignments.iter().any(|assignment| {
         assignment.iso_year == year
             && assignment.iso_week == week
@@ -1478,19 +1478,19 @@ async fn unassign_requires_admin() {
 
 // ── Rotation-queue regression tests ──────────────────────────────────────
 //
-// These exercise the core promise of the queue-based rotation: a join or
-// leave must never change an already-frozen future week that isn't
-// actually theirs.
+// These exercise the core promise of the queue-based rotation: a leave
+// never changes an already-frozen future week that isn't the leaver's, and
+// a join never changes the running cycle — it only re-plans from the next
+// cycle on, to seat the newcomer there.
 
 #[tokio::test]
-async fn join_after_five_materialized_weeks_leaves_them_untouched_and_seats_the_newcomer_next() {
+async fn join_mid_cycle_keeps_the_running_cycle_and_seats_the_newcomer_in_the_next() {
     let (mut state, group_id, aid, bid, cid) = three_person_state();
     seed_materialized_weeks(&mut state, 5);
     let (y, w) = current_iso_week();
-    let weeks: Vec<(i32, u32)> = (0..5).map(|i| add_weeks(y, w, i)).collect();
-    let before: Vec<Option<PersonId>> = weeks
-        .iter()
-        .map(|&(y, w)| assignee_for(&state, &group_id, y, w))
+    let week = |i: i64| add_weeks(y, w, i);
+    let before: Vec<Option<PersonId>> = (0..5)
+        .map(|i| assignee_for(&state, &group_id, week(i).0, week(i).1))
         .collect();
     assert_eq!(
         before,
@@ -1514,38 +1514,35 @@ async fn join_after_five_materialized_weeks_leaves_them_untouched_and_seats_the_
     let state = ctx.state.lock().await;
     let david_id = state.find_person("David").unwrap().id.clone();
 
-    // The 5 already-planned weeks are byte-for-byte unchanged.
-    for (i, &(y, w)) in weeks.iter().enumerate() {
+    // The running cycle (Anna, Bob, Carla) is untouched.
+    for i in 0..3 {
+        let (y, w) = week(i);
         assert_eq!(
             assignee_for(&state, &group_id, y, w),
-            before[i],
-            "week index {i} must not change"
+            before[i as usize],
+            "week index {i} is in the running cycle and must not change"
         );
     }
-    // David's first real turn is the very next open week — ahead of
-    // Carla's would-be second lap, not after a full extra lap. The join
-    // deliberately only extends the frozen horizon by one due-cycle (so
-    // a single early joiner can't claim the whole configured horizon —
-    // see `group_horizon_weeks_ahead`), so this is the one new frozen week.
-    let (y5, w5) = add_weeks(y, w, 5);
-    assert_eq!(assignee_for(&state, &group_id, y5, w5), Some(david_id));
+    // The next cycle still starts with Anna, and David is in it right
+    // away — not at the end of the frozen horizon.
+    let at = |i: i64| assignee_for(&state, &group_id, week(i).0, week(i).1);
+    assert_eq!(at(3), Some(aid.clone()), "the cycle start stays put");
+    assert_eq!(at(4), Some(david_id.clone()), "David's first turn");
+    // The horizon isn't extended past what was already frozen…
+    assert_eq!(at(5), None, "not frozen yet");
+    // …but the rotation continues with the rest of the cycle.
+    let preview = |i: i64| preview_assignee_for(&state, &group_id, week(i).0, week(i).1);
+    assert_eq!(preview(5), Some(bid));
+    assert_eq!(preview(6), Some(cid));
+    assert_eq!(preview(7), Some(aid));
 
-    // Weeks 6 and 7 aren't frozen yet, but the *eventual* rotation still
-    // continues the same queue correctly, previewed on demand.
-    let (y6, w6) = add_weeks(y, w, 6);
-    assert_eq!(
-        assignee_for(&state, &group_id, y6, w6),
-        None,
-        "not yet frozen"
+    // The reply names the actual first turn and the re-planned range.
+    assert!(reply.contains("First turn: "), "{reply}");
+    assert!(reply.contains(&format!("(week {})", week(4).1)), "{reply}");
+    assert!(
+        reply.contains(&format!("weeks from week {} on were re-planned", week(4).1)),
+        "{reply}"
     );
-    assert_eq!(preview_assignee_for(&state, &group_id, y6, w6), Some(cid));
-    let (y7, w7) = add_weeks(y, w, 7);
-    assert_eq!(
-        assignee_for(&state, &group_id, y7, w7),
-        None,
-        "not yet frozen"
-    );
-    assert_eq!(preview_assignee_for(&state, &group_id, y7, w7), Some(aid));
 
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
@@ -1595,58 +1592,279 @@ async fn multiple_joins_in_sequence_respect_arrival_order() {
 #[tokio::test]
 async fn join_never_skips_an_existing_member_who_has_not_had_a_turn_yet() {
     // Only the current week has ever been materialized (Anna). Bob and
-    // Carla are already queued but have zero turns. David joining must
-    // not cut in front of either of them — head-insertion would.
-    let (mut state, group_id, aid, ..) = three_person_state();
+    // Carla are already queued but have zero turns — they still belong to
+    // the running cycle, so David must come after both of them.
+    let (mut state, group_id, aid, bid, cid) = three_person_state();
     seed_materialized_weeks(&mut state, 1);
     let (ctx, path, admin) = test_context_with_horizon(state, 8);
-    let bob_id = ctx
-        .state
-        .lock()
-        .await
-        .find_person("Bob")
-        .unwrap()
-        .id
-        .clone();
 
-    cmd_addperson(&ctx, &admin, &["David", "Floor"])
+    let reply = cmd_addperson(&ctx, &admin, &["David", "Floor"])
         .await
+        .unwrap()
         .unwrap();
 
     let state = ctx.state.lock().await;
     let david_id = state.find_person("David").unwrap().id.clone();
-    let carla_id = state.find_person("Carla").unwrap().id.clone();
-
-    // The one newly-frozen week (the join only extends the horizon by
-    // one due-cycle) goes to Bob, not to the newcomer.
     let (y, w) = current_iso_week();
-    let (y1, w1) = add_weeks(y, w, 1);
-    assert_eq!(
-        assignee_for(&state, &group_id, y1, w1),
-        Some(bob_id),
-        "must not skip Bob's first turn"
+    let at = |i: i64| {
+        let (y, w) = add_weeks(y, w, i);
+        assignee_for(&state, &group_id, y, w)
+    };
+    assert_eq!(at(0), Some(aid.clone()), "the active week is untouched");
+    assert_eq!(at(1), Some(bid), "must not skip Bob's first turn");
+    assert_eq!(at(2), Some(cid), "must not skip Carla's first turn");
+    assert_eq!(at(3), Some(aid), "the next cycle starts with Anna again");
+    assert_eq!(at(4), Some(david_id), "David is seated in that next cycle");
+    // Nothing was frozen past week 0, so no frozen week had to change.
+    assert!(
+        reply.contains("Already-planned weeks are unchanged."),
+        "{reply}"
+    );
+    assert!(
+        reply.contains(&format!("(week {})", add_weeks(y, w, 4).1)),
+        "{reply}"
     );
 
-    // Beyond that, Carla (also still waiting for her first turn) goes
-    // next, and only then David — never before either of them, even
-    // though the join inserted him ahead of Anna, who already had hers.
-    let (y2, w2) = add_weeks(y, w, 2);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+/// Five-member group two weeks into a cycle: Anna and Bob had their turns
+/// in the past two weeks, Carla's is the active week, and `weeks_ahead`
+/// due weeks from the current one are frozen by plain round robin.
+fn mid_cycle_state(weeks_ahead: usize) -> (State, GroupId, Vec<PersonId>) {
+    let names = ["Anna", "Bob", "Carla", "Dora", "Emil"];
+    let persons: Vec<Person> = names.iter().map(|n| Person::new_named(n)).collect();
+    let ids: Vec<PersonId> = persons.iter().map(|p| p.id.clone()).collect();
+    let mut group = CleaningGroup::new("Floor");
+    let gid = group.id.clone();
+    group.member_ids = ids.clone();
+    // Anna and Bob just had theirs, so Carla is up next.
+    group.rotation_queue = [2, 3, 4, 0, 1].iter().map(|&i| ids[i].clone()).collect();
+    let mut state = State::default();
+    state.created_at = Some(Utc::now());
+    state.persons = persons;
+    state.cleaning_groups.push(group);
+    let (y, w) = current_iso_week();
+    for (back, who) in [(2, 0), (1, 1)] {
+        let (py, pw) = add_weeks(y, w, -back);
+        state.slot_assignments.push(SlotAssignment {
+            group_id: gid.clone(),
+            slot_index: 0,
+            iso_year: py,
+            iso_week: pw,
+            shift: 0,
+            person_id: Some(ids[who].clone()),
+            source: Default::default(),
+        });
+    }
+    seed_materialized_weeks(&mut state, weeks_ahead);
+    (state, gid, ids)
+}
+
+/// Assignee per week from `from` to `to` (inclusive, offsets from the
+/// current week), as display names — readable in assertion messages and
+/// comparable across states whose newcomers got different random ids.
+fn plan_names(state: &State, group_id: &GroupId, from: i64, to: i64) -> Vec<String> {
+    let (y, w) = current_iso_week();
+    (from..=to)
+        .map(|i| {
+            let (y, w) = add_weeks(y, w, i);
+            assignee_for(state, group_id, y, w)
+                .and_then(|pid| state.person_by_id(&pid))
+                .map(|p| p.display_name.clone())
+                .unwrap_or_else(|| "-".into())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn several_joins_in_one_cycle_are_spread_through_the_next_cycle() {
+    let (state, group_id, _) = mid_cycle_state(12);
     assert_eq!(
-        preview_assignee_for(&state, &group_id, y2, w2),
-        Some(carla_id),
-        "Carla is also still waiting for her first turn"
+        plan_names(&state, &group_id, -2, 11),
+        [
+            "Anna", "Bob", "Carla", "Dora", "Emil", // running cycle
+            "Anna", "Bob", "Carla", "Dora", "Emil", "Anna", "Bob", "Carla", "Dora",
+        ],
+        "sanity check on the pre-seeded plan"
     );
-    let (y3, w3) = add_weeks(y, w, 3);
+    let (ctx, path, admin) = test_context_with_horizon(state, 12);
+
+    cmd_addperson(&ctx, &admin, &["Finn", "Floor"])
+        .await
+        .unwrap();
+    let reply = cmd_addperson(&ctx, &admin, &["Gina", "Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+
+    let state = ctx.state.lock().await;
+    let plan = plan_names(&state, &group_id, -2, 11);
     assert_eq!(
-        preview_assignee_for(&state, &group_id, y3, w3),
-        Some(david_id),
-        "David gets his first turn only after Bob and Carla have had theirs"
+        plan,
+        [
+            "Anna", "Bob", "Carla", "Dora", "Emil", // running cycle, unchanged
+            "Anna", "Finn", "Bob", "Carla", "Gina", "Dora", "Emil", // next cycle
+            "Anna", "Finn", // and on
+        ],
     );
-    let (y4, w4) = add_weeks(y, w, 4);
+    // Every member — old and new — has exactly one turn in the next cycle.
+    let next_cycle: HashSet<&String> = plan[5..12].iter().collect();
+    assert_eq!(next_cycle.len(), 7, "{plan:?}");
+    // The two newcomers are not seated side by side.
+    let finn = plan[5..12].iter().position(|n| n == "Finn").unwrap();
+    let gina = plan[5..12].iter().position(|n| n == "Gina").unwrap();
+    assert!(gina.abs_diff(finn) > 1, "{plan:?}");
+    // The frozen horizon is exactly as deep as before.
+    let (y, w) = current_iso_week();
+    let (ly, lw) = add_weeks(y, w, 12);
+    assert_eq!(assignee_for(&state, &group_id, ly, lw), None);
+
+    assert!(
+        reply.contains(&format!("(week {})", add_weeks(y, w, 7).1)),
+        "Gina's first turn is reported: {reply}"
+    );
+
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn joining_one_by_one_plans_the_same_as_spreading_both_at_once() {
+    // Finn joins, and Gina only later in the same cycle — the second join
+    // re-seats Finn too, so the outcome doesn't depend on that timing.
+    let (state, group_id, ids) = mid_cycle_state(12);
+    let (ctx, path, admin) = test_context_with_horizon(state, 12);
+    cmd_addperson(&ctx, &admin, &["Finn", "Floor"])
+        .await
+        .unwrap();
+    let after_finn = plan_names(&*ctx.state.lock().await, &group_id, -2, 11);
     assert_eq!(
-        preview_assignee_for(&state, &group_id, y4, w4),
-        Some(aid),
-        "Anna, who already had a turn, repeats after David"
+        after_finn[5..12],
+        ["Anna", "Finn", "Bob", "Carla", "Dora", "Emil", "Anna"],
+        "one newcomer follows the cycle's first turn"
+    );
+    cmd_addperson(&ctx, &admin, &["Gina", "Floor"])
+        .await
+        .unwrap();
+
+    let state = ctx.state.lock().await;
+    let finn = state.find_person("Finn").unwrap().id.clone();
+    let gina = state.find_person("Gina").unwrap().id.clone();
+    let group = state.group_by_id(&group_id).unwrap();
+    let mut expected = resolver::spread_newcomers(&ids, &[finn, gina]);
+    // Two full cycles are frozen through week 11; the queue continues the
+    // second one after its first two turns.
+    expected.rotate_left(2);
+    assert_eq!(group.rotation_queue, expected);
+
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn join_replanning_is_deterministic_and_a_restart_changes_nothing() {
+    let run = || async {
+        let (state, group_id, _) = mid_cycle_state(12);
+        let (ctx, path, admin) = test_context_with_horizon(state, 12);
+        cmd_addperson(&ctx, &admin, &["Finn", "Floor"])
+            .await
+            .unwrap();
+        cmd_addperson(&ctx, &admin, &["Gina", "Floor"])
+            .await
+            .unwrap();
+        let state = ctx.state.lock().await.clone();
+        let _ = tokio::fs::remove_file(path).await;
+        (state, group_id)
+    };
+    let (first, gid1) = run().await;
+    let (second, gid2) = run().await;
+    assert_eq!(
+        plan_names(&first, &gid1, -2, 11),
+        plan_names(&second, &gid2, -2, 11),
+        "the same situation must always produce the same plan"
+    );
+
+    // A restart only runs the additive materialize: same horizon, no change.
+    let mut restarted = first.clone();
+    let events = resolver::materialize(&restarted, 12);
+    assert!(events.is_empty(), "restart must not re-plan: {events:?}");
+    for ev in events {
+        restarted.apply_event(ev).unwrap();
+    }
+    assert_eq!(
+        serde_json::to_string(&restarted.slot_assignments).unwrap(),
+        serde_json::to_string(&first.slot_assignments).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn join_replanning_leaves_history_completions_and_manual_weeks_alone() {
+    let (mut state, group_id, ids) = mid_cycle_state(12);
+    let (y, w) = current_iso_week();
+    // Bob's past week is done, and an admin pinned Emil to week 8.
+    let (by, bw) = add_weeks(y, w, -1);
+    state
+        .apply_event(DomainEvent::CleaningCompleted {
+            group_id: group_id.clone(),
+            slot_id: None,
+            person_id: ids[1].clone(),
+            responsible_person_ids: vec![ids[1].clone()],
+            iso_year: by,
+            iso_week: bw,
+            shift: 0,
+        })
+        .unwrap();
+    let (my, mw) = add_weeks(y, w, 8);
+    state
+        .apply_event(DomainEvent::SlotAssigned {
+            group_id: group_id.clone(),
+            slot_index: 0,
+            iso_year: my,
+            iso_week: mw,
+            shift: 0,
+            person_id: Some(ids[4].clone()),
+            source: AssignmentSource::Assign,
+            actor_id: Some("@admin:example.org".into()),
+            previous_person_id: Some(ids[3].clone()),
+        })
+        .unwrap();
+    let history_before: Vec<SlotAssignment> = state
+        .slot_assignments
+        .iter()
+        .filter(|a| (a.iso_year, a.iso_week) <= (y, w))
+        .cloned()
+        .collect();
+    let completions_before = serde_json::to_string(&state.completions).unwrap();
+    let (ctx, path, admin) = test_context_with_horizon(state, 12);
+
+    cmd_addperson(&ctx, &admin, &["Finn", "Floor"])
+        .await
+        .unwrap();
+
+    let state = ctx.state.lock().await;
+    for a in &history_before {
+        assert!(
+            state.slot_assignments.contains(a),
+            "past/current assignment changed: {a:?}"
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&state.completions).unwrap(),
+        completions_before
+    );
+    let pinned = state
+        .slot_assignments
+        .iter()
+        .find(|a| a.group_id == group_id && (a.iso_year, a.iso_week) == (my, mw))
+        .unwrap();
+    assert_eq!(pinned.person_id.as_ref(), Some(&ids[4]), "admin pin kept");
+    assert_eq!(pinned.source, AssignmentSource::Assign);
+    assert_eq!(
+        plan_names(&state, &group_id, 3, 4),
+        ["Anna", "Finn"],
+        "Finn still joins the next cycle"
     );
 
     drop(state);
@@ -1789,8 +2007,8 @@ async fn leavefloor_is_blocked_while_the_current_assignment_is_open() {
 }
 
 #[tokio::test]
-async fn removeperson_with_future_assignments_only_refills_their_own_gaps() {
-    let (mut state, group_id, aid, bid, cid) = three_person_state();
+async fn removeperson_with_future_assignments_moves_everyone_after_them_up() {
+    let (mut state, group_id, ..) = three_person_state();
     seed_materialized_weeks(&mut state, 5);
     let (ctx, path, admin) = test_context_with_horizon(state, 8);
 
@@ -1801,36 +2019,385 @@ async fn removeperson_with_future_assignments_only_refills_their_own_gaps() {
     assert!(reply.contains("Removed Carla"), "{reply}");
 
     let state = ctx.state.lock().await;
-    let (y, w) = current_iso_week();
-    // Weeks that were never Carla's are byte-for-byte unchanged.
-    assert_eq!(assignee_for(&state, &group_id, y, w), Some(aid.clone()));
-    let (y1, w1) = add_weeks(y, w, 1);
-    assert_eq!(assignee_for(&state, &group_id, y1, w1), Some(bid.clone()));
-    let (y3, w3) = add_weeks(y, w, 3);
+    // Weeks before Carla's first one stay; from there the two remaining
+    // members alternate instead of Anna inheriting week 2 right before
+    // her own week 3.
     assert_eq!(
-        assignee_for(&state, &group_id, y3, w3),
-        Some(aid),
-        "week 3 was already Anna's, unrelated to Carla"
+        plan_names(&state, &group_id, 0, 4),
+        ["Anna", "Bob", "Anna", "Bob", "Anna"]
     );
-    let (y4, w4) = add_weeks(y, w, 4);
-    assert_eq!(
-        assignee_for(&state, &group_id, y4, w4),
-        Some(bid),
-        "week 4 was already Bob's, unrelated to Carla"
-    );
-    // Carla's own vacated week (index 2) was refilled from the queue,
-    // not left empty and not reassigned to whoever Carla displaced.
-    let (y2, w2) = add_weeks(y, w, 2);
     assert!(
-        assignee_for(&state, &group_id, y2, w2).is_some(),
-        "Carla's gap must be refilled"
-    );
-    assert_ne!(
-        assignee_for(&state, &group_id, y2, w2),
-        Some(cid),
-        "not Carla — she left"
+        reply.contains(&format!(
+            "from week {} on",
+            add_weeks(current_iso_week().0, current_iso_week().1, 2).1
+        )),
+        "{reply}"
     );
     drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+/// Four-member group (Anna, Bob, Carla, Dora) with `weeks` weeks frozen
+/// from the current one: Anna, Bob, Carla, Dora, Anna, …
+fn four_person_state(weeks: usize) -> (State, GroupId) {
+    let (mut state, gid, ..) = three_person_state();
+    let dora = Person::new_named("Dora");
+    state.cleaning_groups[0].member_ids.push(dora.id.clone());
+    state.persons.push(dora);
+    seed_materialized_weeks(&mut state, weeks);
+    (state, gid)
+}
+
+/// Invariants every plan must keep: one assignment per (group, slot, turn),
+/// and no future plain-rotation turn for someone who isn't a member.
+fn assert_plan_invariants(state: &State) {
+    let mut keys = HashSet::new();
+    for a in &state.slot_assignments {
+        assert!(
+            keys.insert((
+                a.group_id.clone(),
+                a.slot_index,
+                a.iso_year,
+                a.iso_week,
+                a.shift
+            )),
+            "duplicate assignment: {a:?}"
+        );
+    }
+    let current = current_iso_week();
+    for a in &state.slot_assignments {
+        if (a.iso_year, a.iso_week) > current && a.source == AssignmentSource::RoundRobin {
+            if let Some(pid) = &a.person_id {
+                let group = state.group_by_id(&a.group_id).unwrap();
+                assert!(
+                    group.member_ids.contains(pid),
+                    "non-member {pid} still in future rotation: {a:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn leaving_before_their_turn_moves_the_rest_up_without_back_to_back_turns() {
+    let (state, gid) = four_person_state(8);
+    assert_eq!(
+        plan_names(&state, &gid, 0, 7),
+        ["Anna", "Bob", "Carla", "Dora", "Anna", "Bob", "Carla", "Dora"]
+    );
+    let (ctx, path, admin) = test_context_with_horizon(state, 8);
+    let reply = cmd_removeperson(&ctx, &admin, &["Bob", "Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+
+    let state = ctx.state.lock().await;
+    let plan = plan_names(&state, &gid, 0, 7);
+    assert_eq!(
+        plan,
+        ["Anna", "Carla", "Dora", "Anna", "Carla", "Dora", "Anna", "Carla"],
+        "the current week stays; everyone after Bob moves up one turn"
+    );
+    for pair in plan.windows(2) {
+        assert_ne!(pair[0], pair[1], "back-to-back turns: {plan:?}");
+    }
+    assert!(
+        reply.contains("Their 2 upcoming turn(s) were handed on"),
+        "{reply}"
+    );
+    assert_plan_invariants(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn leaving_after_their_turn_keeps_it_and_the_rest_of_the_round() {
+    let (mut state, gid) = four_person_state(8);
+    // Anna's turn is this week, and she's done it.
+    let anna = state.find_person("Anna").unwrap().id.clone();
+    let (y, w) = current_iso_week();
+    state
+        .apply_event(DomainEvent::CleaningCompleted {
+            group_id: gid.clone(),
+            slot_id: None,
+            person_id: anna.clone(),
+            responsible_person_ids: vec![anna.clone()],
+            iso_year: y,
+            iso_week: w,
+            shift: 0,
+        })
+        .unwrap();
+    let completions = serde_json::to_string(&state.completions).unwrap();
+    let (ctx, path, admin) = test_context_with_horizon(state, 8);
+    cmd_removeperson(&ctx, &admin, &["Anna", "Floor"])
+        .await
+        .unwrap();
+
+    let state = ctx.state.lock().await;
+    assert_eq!(
+        plan_names(&state, &gid, 0, 7),
+        ["Anna", "Bob", "Carla", "Dora", "Bob", "Carla", "Dora", "Bob"],
+        "her done week and everything before her next turn stay"
+    );
+    assert_eq!(
+        serde_json::to_string(&state.completions).unwrap(),
+        completions
+    );
+    assert_plan_invariants(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn leaving_reports_their_pinned_weeks_and_keeps_everyone_elses() {
+    let (mut state, gid) = four_person_state(8);
+    let id = |state: &State, n: &str| state.find_person(n).unwrap().id.clone();
+    let (bob, dora) = (id(&state, "Bob"), id(&state, "Dora"));
+    let (y, w) = current_iso_week();
+    let pin = |state: &mut State, offset: i64, who: &PersonId, source: AssignmentSource| {
+        let (py, pw) = add_weeks(y, w, offset);
+        state
+            .apply_event(DomainEvent::SlotAssigned {
+                group_id: gid.clone(),
+                slot_index: 0,
+                iso_year: py,
+                iso_week: pw,
+                shift: 0,
+                person_id: Some(who.clone()),
+                source,
+                actor_id: None,
+                previous_person_id: None,
+            })
+            .unwrap();
+    };
+    // An admin put Bob on week 6; Dora's week 3 came from the paper plan.
+    pin(&mut state, 6, &bob, AssignmentSource::Assign);
+    pin(&mut state, 3, &dora, AssignmentSource::Import);
+    let (ctx, path, admin) = test_context_with_horizon(state, 8);
+    let reply = cmd_removeperson(&ctx, &admin, &["Bob", "Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+
+    let state = ctx.state.lock().await;
+    let (py, pw) = add_weeks(y, w, 3);
+    let dora_pin = state
+        .slot_assignments
+        .iter()
+        .find(|a| a.group_id == gid && (a.iso_year, a.iso_week) == (py, pw))
+        .unwrap();
+    assert_eq!(
+        dora_pin.person_id.as_ref(),
+        Some(&dora),
+        "others' pins stay"
+    );
+    assert_eq!(dora_pin.source, AssignmentSource::Import);
+    assert!(
+        !state
+            .slot_assignments
+            .iter()
+            .any(|a| a.person_id.as_ref() == Some(&bob) && (a.iso_year, a.iso_week) > (y, w)),
+        "Bob holds nothing in the future"
+    );
+    assert!(
+        reply.contains(&format!(
+            "⚠️ Their assigned week {} (Floor) is now",
+            add_weeks(y, w, 6).1
+        )),
+        "his pinned week must be reported, not silently dropped: {reply}"
+    );
+    assert_plan_invariants(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn joining_and_leaving_again_restores_the_original_plan() {
+    let (state, group_id, _) = mid_cycle_state(12);
+    let original = plan_names(&state, &group_id, -2, 11);
+    let (ctx, path, admin) = test_context_with_horizon(state, 12);
+    cmd_addperson(&ctx, &admin, &["Finn", "Floor"])
+        .await
+        .unwrap();
+    cmd_removeperson(&ctx, &admin, &["Finn", "Floor"])
+        .await
+        .unwrap();
+    let state = ctx.state.lock().await;
+    assert_eq!(plan_names(&state, &group_id, -2, 11), original);
+    assert_plan_invariants(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn a_join_and_a_leave_plan_the_same_in_either_order() {
+    let run = |join_first: bool| async move {
+        let (state, group_id, _) = mid_cycle_state(12);
+        let (ctx, path, admin) = test_context_with_horizon(state, 12);
+        for step in if join_first {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            if step {
+                cmd_addperson(&ctx, &admin, &["Finn", "Floor"])
+                    .await
+                    .unwrap();
+            } else {
+                cmd_removeperson(&ctx, &admin, &["Dora", "Floor"])
+                    .await
+                    .unwrap();
+            }
+        }
+        let state = ctx.state.lock().await.clone();
+        assert_plan_invariants(&state);
+        let _ = tokio::fs::remove_file(path).await;
+        plan_names(&state, &group_id, -2, 11)
+    };
+    assert_eq!(run(true).await, run(false).await);
+}
+
+#[tokio::test]
+async fn plan_reset_names_the_pinned_weeks_it_discards() {
+    let (mut state, gid) = four_person_state(8);
+    let dora = state.find_person("Dora").unwrap().id.clone();
+    let (y, w) = current_iso_week();
+    let (py, pw) = add_weeks(y, w, 2);
+    state
+        .apply_event(DomainEvent::SlotAssigned {
+            group_id: gid.clone(),
+            slot_index: 0,
+            iso_year: py,
+            iso_week: pw,
+            shift: 0,
+            person_id: Some(dora),
+            source: AssignmentSource::Import,
+            actor_id: None,
+            previous_person_id: None,
+        })
+        .unwrap();
+    let (ctx, path, admin) = test_context_with_horizon(state, 8);
+    let reply = cmd_resetplan(&ctx, &admin, &["Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        reply.contains(&format!(
+            "Discarded 1 pinned week(s), now plain rotation: {pw} (imported)"
+        )),
+        "{reply}"
+    );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn the_scheduler_keeps_the_frozen_plan_rolling_without_touching_it() {
+    let (state, gid) = four_person_state(3);
+    let before = state.slot_assignments.clone();
+    let (ctx, path, _) = test_context_with_horizon(state, 6);
+    crate::scheduler::roll_planning_horizon(&ctx).await.unwrap();
+    let state = ctx.state.lock().await;
+    for a in &before {
+        assert!(
+            state.slot_assignments.contains(a),
+            "frozen turn changed: {a:?}"
+        );
+    }
+    assert_eq!(
+        plan_names(&state, &gid, 0, 6),
+        ["Anna", "Bob", "Carla", "Dora", "Anna", "Bob", "-"],
+        "filled up to the configured six weeks, no further"
+    );
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn myplan_lists_the_senders_next_turns_with_their_kind() {
+    let anna = Person::new_matrix("@anna:example.org");
+    let bob = Person::new_named("Bob");
+    let mut group = CleaningGroup::new("Floor");
+    let gid = group.id.clone();
+    group.member_ids = vec![anna.id.clone(), bob.id.clone()];
+    let mut state = State::default();
+    state.created_at = Some(Utc::now());
+    let anna_id = anna.id.clone();
+    state.persons = vec![anna, bob];
+    state.cleaning_groups.push(group);
+    seed_materialized_weeks(&mut state, 4); // Anna, Bob, Anna, Bob
+    let (y, w) = current_iso_week();
+    let (py, pw) = add_weeks(y, w, 3);
+    state
+        .apply_event(DomainEvent::SlotAssigned {
+            group_id: gid.clone(),
+            slot_index: 0,
+            iso_year: py,
+            iso_week: pw,
+            shift: 0,
+            person_id: Some(anna_id),
+            source: AssignmentSource::Import,
+            actor_id: None,
+            previous_person_id: None,
+        })
+        .unwrap();
+    let (ctx, path, _) = test_context_with_horizon(state, 4);
+    let anna_mxid = OwnedUserId::try_from("@anna:example.org").unwrap();
+
+    let reply = cmd_myplan(&ctx, &anna_mxid, &["4"]).await.unwrap().unwrap();
+    let lines: Vec<&str> = reply.lines().collect();
+    assert!(lines[0].contains("Upcoming turns for anna"), "{reply}");
+    let week = |i: i64| add_weeks(y, w, i).1;
+    assert!(
+        lines[1].starts_with(&format!("• week {} ", week(0))),
+        "{reply}"
+    );
+    assert!(
+        lines[1].contains("now"),
+        "the running turn is flagged: {reply}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("• week {} ", week(2))),
+        "{reply}"
+    );
+    assert!(
+        lines[3].starts_with(&format!("• week {} ", week(3))) && lines[3].contains("(imported)"),
+        "{reply}"
+    );
+    assert!(
+        lines[4].starts_with(&format!("• week {} ", week(4))) && lines[4].contains("(tentative)"),
+        "past the frozen plan: {reply}"
+    );
+    assert_eq!(
+        lines.len(),
+        6,
+        "four turns plus the tentative note: {reply}"
+    );
+
+    // Anyone can look someone else up, just like !next.
+    let bob_plan = cmd_myplan(&ctx, &anna_mxid, &["Bob", "1"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bob_plan.contains("Upcoming turns for Bob"), "{bob_plan}");
+    assert!(
+        bob_plan.contains(&format!("• week {} ", week(1))),
+        "{bob_plan}"
+    );
+
+    let stranger = OwnedUserId::try_from("@new:example.org").unwrap();
+    let none = cmd_myplan(&ctx, &stranger, &[]).await.unwrap().unwrap();
+    assert!(none.contains("not registered"), "{none}");
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn myplan_without_upcoming_turns_says_so() {
+    let (mut state, ..) = rotation_state();
+    state.created_at = Some(Utc::now());
+    state.persons.push(Person::new_named("Zoe")); // in no group
+    let (ctx, path, admin) = test_context(state);
+    let reply = cmd_myplan(&ctx, &admin, &["Zoe"]).await.unwrap().unwrap();
+    assert_eq!(reply, "📅 No upcoming turns for Zoe in the next two years.");
     let _ = tokio::fs::remove_file(path).await;
 }
 
@@ -4060,4 +4627,234 @@ fn stats_count_turns_so_a_twice_weekly_group_owes_twice_the_duties() {
         "{}",
         model.assignments_per_year
     );
+}
+
+// ── !cleaning person ──────────────────────────────────────────────────────
+
+/// Two groups: Floor (mia, Dan, alex) and Kitchen (mia, Alex), four weeks
+/// frozen from the current one, plus Dan holding an imported Kitchen week
+/// although he isn't a Kitchen member. `alex` (Matrix) and `Alex` (no
+/// Matrix) share a display name; Zoe is in no group at all.
+fn cleaning_person_ctx() -> (BotContext, PathBuf, OwnedUserId, Vec<(i32, u32)>) {
+    let mia = Person::new_matrix("@mia:example.org");
+    let dan = Person::new_named("Dan");
+    let alex_m = Person::new_matrix("@alex:example.org");
+    let alex_n = Person::new_named("Alex");
+    let zoe = Person::new_named("Zoe");
+    let mut floor = CleaningGroup::new("Floor");
+    floor.member_ids = vec![mia.id.clone(), dan.id.clone(), alex_m.id.clone()];
+    let mut kitchen = CleaningGroup::new("Kitchen");
+    let kitchen_id = kitchen.id.clone();
+    kitchen.member_ids = vec![mia.id.clone(), alex_n.id.clone()];
+    let mut state = State::default();
+    state.created_at = Some(Utc::now());
+    let dan_id = dan.id.clone();
+    state.persons = vec![mia, dan, alex_m, alex_n, zoe];
+    state.cleaning_groups = vec![floor, kitchen];
+    // Floor: mia, Dan, alex, mia · Kitchen: mia, Alex, mia, Alex
+    seed_materialized_weeks(&mut state, 4);
+    let (y, w) = current_iso_week();
+    let weeks: Vec<(i32, u32)> = (0..6).map(|i| add_weeks(y, w, i)).collect();
+    state
+        .apply_event(DomainEvent::SlotAssigned {
+            group_id: kitchen_id,
+            slot_index: 0,
+            iso_year: weeks[3].0,
+            iso_week: weeks[3].1,
+            shift: 0,
+            person_id: Some(dan_id),
+            source: AssignmentSource::Import,
+            actor_id: None,
+            previous_person_id: None,
+        })
+        .unwrap();
+    let (ctx, path, _) = test_context_with_horizon(state, 4);
+    let viewer = OwnedUserId::try_from("@someone:example.org").unwrap();
+    (ctx, path, viewer, weeks)
+}
+
+#[tokio::test]
+async fn cleaning_person_shows_a_matrix_participant_across_groups() {
+    let (ctx, path, viewer, weeks) = cleaning_person_ctx();
+    // No admin needed; full Matrix ID and display name find the same person.
+    let by_mxid = cmd_cleaning_person(&ctx, &viewer, &["@mia:example.org", "3"])
+        .await
+        .unwrap()
+        .unwrap();
+    let by_name = cmd_cleaning_person(&ctx, &viewer, &["MIA", "3"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_mxid, by_name);
+    let lines: Vec<&str> = by_mxid.lines().collect();
+    assert!(lines[0].contains("Upcoming turns for mia"), "{by_mxid}");
+    assert!(
+        lines[1].starts_with(&format!("• week {} ", weeks[0].1))
+            && lines[1].ends_with("Floor · now ⚠️"),
+        "{by_mxid}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("• week {} ", weeks[0].1))
+            && lines[2].ends_with("Kitchen · now ⚠️"),
+        "{by_mxid}"
+    );
+    assert!(
+        lines[3].starts_with(&format!("• week {} ", weeks[2].1)) && lines[3].contains("Kitchen"),
+        "{by_mxid}"
+    );
+    assert_eq!(lines.len(), 4, "{by_mxid}");
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn cleaning_person_shows_a_non_matrix_participant_with_pinned_turns() {
+    let (ctx, path, viewer, weeks) = cleaning_person_ctx();
+    let reply = cmd_cleaning_person(&ctx, &viewer, &["dan", "2"])
+        .await
+        .unwrap()
+        .unwrap();
+    let lines: Vec<&str> = reply.lines().collect();
+    assert!(lines[0].contains("Upcoming turns for Dan"), "{reply}");
+    assert!(
+        lines[1].starts_with(&format!("• week {} ", weeks[1].1)) && lines[1].ends_with("· Floor"),
+        "his rotation turn: {reply}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("• week {} ", weeks[3].1))
+            && lines[2].ends_with("Kitchen (imported)"),
+        "an imported turn outside his own group: {reply}"
+    );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn cleaning_person_reports_an_ambiguous_name_instead_of_guessing() {
+    let (ctx, path, viewer, weeks) = cleaning_person_ctx();
+    let reply = cmd_cleaning_person(&ctx, &viewer, &["Alex"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reply,
+        "«Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix) — use the Matrix ID instead."
+    );
+    // The Matrix ID settles it.
+    let alex = cmd_cleaning_person(&ctx, &viewer, &["@alex:example.org", "1"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(alex.contains(&format!("• week {} ", weeks[2].1)), "{alex}");
+    assert!(alex.contains("Floor"), "{alex}");
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn cleaning_person_without_upcoming_turns_or_name_says_so() {
+    let (ctx, path, viewer, _) = cleaning_person_ctx();
+    let zoe = cmd_cleaning_person(&ctx, &viewer, &["Zoe"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(zoe, "📅 No upcoming turns for Zoe in the next two years.");
+    let unknown = cmd_cleaning_person(&ctx, &viewer, &["Nobody"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unknown, "Nobody is not registered.");
+    let usage = cmd_cleaning_person(&ctx, &viewer, &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(usage.starts_with("Usage: !cleaning person"), "{usage}");
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn cleaning_person_takes_multi_word_names_without_quotes() {
+    assert_eq!(
+        crate::commands::normalize_args(
+            &State::default(),
+            "!cleaning",
+            &["person", "Mary", "Ann", "2"]
+        ),
+        ["person", "Mary Ann", "2"]
+    );
+    assert_eq!(
+        crate::commands::normalize_args(&State::default(), "!cleaning", &["person", "Mary", "Ann"]),
+        ["person", "Mary Ann"]
+    );
+}
+
+// ── Person lookup: ambiguity is reported, never guessed ──────────────────────
+
+#[tokio::test]
+async fn next_finds_a_person_by_unique_display_name_or_matrix_id() {
+    let (ctx, path, viewer, weeks) = cleaning_person_ctx();
+    let by_name = cmd_next(&ctx, &viewer, &["Mia"]).await.unwrap().unwrap();
+    let by_mxid = cmd_next(&ctx, &viewer, &["@mia:example.org"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_name, by_mxid);
+    assert!(
+        by_name.starts_with(&format!("📅 Next turn for mia: **week {} ", weeks[0].1)),
+        "{by_name}"
+    );
+    assert!(by_name.ends_with("· Floor, Kitchen"), "{by_name}");
+
+    // A Matrix ID picks its owner even though the display name collides.
+    let alex = cmd_next(&ctx, &viewer, &["@alex:example.org"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        alex.starts_with(&format!("📅 Next turn for alex: **week {} ", weeks[2].1)),
+        "{alex}"
+    );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn next_finds_a_non_matrix_participant_by_name() {
+    let (ctx, path, viewer, weeks) = cleaning_person_ctx();
+    let reply = cmd_next(&ctx, &viewer, &["dan"]).await.unwrap().unwrap();
+    assert!(
+        reply.starts_with(&format!("📅 Next turn for Dan: **week {} ", weeks[1].1)),
+        "{reply}"
+    );
+    assert!(reply.ends_with("· Floor"), "{reply}");
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn next_reports_an_ambiguous_display_name() {
+    let (ctx, path, viewer, _) = cleaning_person_ctx();
+    let reply = cmd_next(&ctx, &viewer, &["Alex"]).await.unwrap().unwrap();
+    assert_eq!(
+        reply,
+        "«Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix) — use the Matrix ID instead."
+    );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn admin_commands_refuse_an_ambiguous_person_instead_of_picking_one() {
+    let (ctx, path, _, _) = cleaning_person_ctx();
+    let admin = OwnedUserId::try_from("@admin:example.org").unwrap();
+    let before = serde_json::to_string(&*ctx.state.lock().await).unwrap();
+    for reply in [
+        cmd_assign(&ctx, &admin, &["Floor", "Alex"]).await,
+        cmd_removeperson(&ctx, &admin, &["Alex", "Kitchen"]).await,
+        cmd_absent(&ctx, &admin, &["Alex"]).await,
+        cmd_stats(&ctx, &["Alex"]).await,
+    ] {
+        let reply = reply.unwrap().unwrap();
+        assert!(reply.starts_with("«Alex» matches 2 people"), "{reply}");
+    }
+    assert_eq!(
+        serde_json::to_string(&*ctx.state.lock().await).unwrap(),
+        before,
+        "nothing may change on an ambiguous name"
+    );
+    let _ = tokio::fs::remove_file(path).await;
 }

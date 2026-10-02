@@ -104,12 +104,11 @@ pub struct CleaningGroup {
     pub member_ids: Vec<PersonId>,
     /// Persisted round-robin turn queue: front = who gets the next
     /// not-yet-frozen due week. `resolver::materialize` pops one member per
-    /// slot per due week and pushes them back to the tail. Joining inserts a
-    /// member at the front (their turn comes next, after whatever is already
-    /// frozen — not immediately, not after everyone else's next lap); leaving
-    /// simply drops them. This is what makes membership changes leave
-    /// already-frozen future weeks alone instead of reshuffling everyone via
-    /// a stateless `index % member_count` formula.
+    /// slot per due week and pushes them back to the tail. Joining re-seats
+    /// the queue from the next rotation cycle on, with newcomers spread
+    /// through that cycle (see `commands::apply_group_join`); leaving simply
+    /// drops them. Either way the running cycle stays as it was instead of
+    /// reshuffling everyone via a stateless `index % member_count` formula.
     /// `#[serde(default)]` so existing `state.json` files upgrade seamlessly —
     /// `resolver::reconcile_queue` self-heals/seeds it on first use.
     #[serde(default)]

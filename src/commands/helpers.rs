@@ -124,8 +124,8 @@ pub(crate) fn reset_and_rematerialize(
     ctx: &BotContext,
     state: &mut crate::state::State,
     group_id: &str,
-) -> anyhow::Result<usize> {
-    let cleared = drop_future_assignments(state, group_id).len();
+) -> anyhow::Result<Vec<crate::domain::SlotAssignment>> {
+    let cleared = drop_future_assignments(state, group_id);
     if let Some(group) = state.group_by_id(&group_id.to_owned()).cloned() {
         state.apply_event(DomainEvent::RotationQueueSet {
             group_id: group_id.to_owned(),
@@ -138,6 +138,28 @@ pub(crate) fn reset_and_rematerialize(
     let cycles = ctx.config.schedule.materialize_weeks as usize;
     materialize_group_and_apply(state, &group_id.to_owned(), cycles)?;
     Ok(cleared)
+}
+
+/// "Discarded 3 pinned week(s): 41 (imported), 42 (imported), 50 (assigned)."
+/// — or nothing when only plain rotation weeks were cleared.
+pub(crate) fn discarded_pins_note(cleared: &[crate::domain::SlotAssignment]) -> Option<String> {
+    let mut pinned: Vec<&crate::domain::SlotAssignment> = cleared
+        .iter()
+        .filter(|a| a.person_id.is_some() && a.source != AssignmentSource::RoundRobin)
+        .collect();
+    if pinned.is_empty() {
+        return None;
+    }
+    pinned.sort_by_key(|a| (a.iso_year, a.iso_week, a.shift, a.slot_index));
+    let weeks: Vec<String> = pinned
+        .iter()
+        .map(|a| format!("{} ({})", a.iso_week, source_label(&a.source)))
+        .collect();
+    Some(format!(
+        "⚠️ Discarded {} pinned week(s), now plain rotation: {}.",
+        pinned.len(),
+        weeks.join(", ")
+    ))
 }
 
 /// Remove and return the group's assignments after the current week.
@@ -186,30 +208,36 @@ pub(crate) fn apply_rhythm_change(
     materialize_group_and_apply(state, group_id, cycles)
 }
 
-/// Insert `person_id` into `group_id`'s rotation queue and fill in any
-/// newly-reachable future weeks.
+/// Add `person_id` to `group_id` and fold them into the group's *next*
+/// rotation cycle, re-planning the already-frozen weeks from there on.
+/// Returns the first frozen turn whose assignee changed (`None` if none
+/// had to).
 ///
 /// Must be called with `state` already locked and `person_id` already a
 /// registered `Person`, BEFORE `PersonJoinedGroup` is applied (this function
-/// applies it). Never touches an already-frozen week: the active week is
-/// explicitly frozen first (using the *pre-join* queue) so nobody's current
-/// task changes because someone else just joined, and everything already
-/// materialized beyond that stays exactly as it was.
+/// applies it).
 ///
-/// Insertion point: right after the last currently-queued member who
-/// hasn't had a single turn yet (any `SlotAssignment` in this group), and
-/// right before the first one who has. A newcomer must never skip someone
-/// who is still waiting for their *first* turn — but if everyone already
-/// queued has had at least one, the newcomer belongs at the very front,
-/// ahead of anyone about to start a repeat lap. When nobody queued has had
-/// a turn yet (a brand-new group being set up), this is equivalent to
-/// appending at the back, so founding members keep their natural join order.
+/// What stays exactly as it was: everything up to and including the active
+/// week (frozen first, with the *pre-join* queue), the rest of the cycle
+/// that's currently running, and any later week that isn't a plain
+/// round-robin pick (`!plan assign`, takeovers, swaps, imports) or is
+/// already done/skipped.
+///
+/// A cycle starts whenever the group's anchor (`resolver::cycle_anchor`,
+/// the head of the original rotation) is due again. From that turn on, the
+/// round-robin weeks are dropped, their draws rewound onto the queue, and
+/// the next cycle is re-seated with every newcomer — this joiner plus anyone
+/// who joined earlier and hasn't had a turn before that boundary — spread
+/// through it by `resolver::spread_newcomers`. Then the same horizon is
+/// filled again (extended only if the joiner would otherwise have no
+/// frozen turn yet). No randomness: the same state always yields the same
+/// plan, and a restart's additive materialize leaves it alone.
 pub(crate) fn apply_group_join(
     ctx: &BotContext,
     state: &mut crate::state::State,
     group_id: &GroupId,
     person_id: &PersonId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Turn>> {
     let rotation_was_empty = state
         .group_by_id(group_id)
         .is_some_and(|g| g.member_ids.is_empty());
@@ -217,26 +245,6 @@ pub(crate) fn apply_group_join(
     // Freeze the active week (if not already frozen) using the OLD queue,
     // before the newcomer can possibly be picked for a week already underway.
     freeze_schedule_before_join(ctx, state, group_id)?;
-
-    if let Some(group) = state.group_by_id(group_id).cloned() {
-        let mut queue = resolver::reconcile_queue(state, &group);
-        queue.retain(|id| id != person_id);
-        let has_had_a_turn = |pid: &PersonId| {
-            state
-                .slot_assignments
-                .iter()
-                .any(|a| a.group_id == *group_id && a.person_id.as_deref() == Some(pid.as_str()))
-        };
-        let insert_at = queue
-            .iter()
-            .rposition(|pid| !has_had_a_turn(pid))
-            .map_or(0, |i| i + 1);
-        queue.insert(insert_at, person_id.clone());
-        state.apply_event(DomainEvent::RotationQueueSet {
-            group_id: group_id.clone(),
-            queue,
-        })?;
-    }
 
     state.apply_event(DomainEvent::PersonJoinedGroup {
         person_id: person_id.clone(),
@@ -249,62 +257,329 @@ pub(crate) fn apply_group_join(
         keep_active_week_unassigned_for_first_member(ctx, state, group_id)?;
     }
 
-    // Reveal exactly one more due-cycle than is already frozen (capped at
-    // the configured horizon) — enough that the joiner's own turn becomes
-    // visible soon, without a single early member's join greedily claiming
-    // the *entire* configured horizon before anyone else has a chance to
-    // join. (Deeper horizons still get filled by bot startup or !plan reset.)
-    let materialize_weeks = ctx.config.schedule.materialize_weeks as usize;
-    let horizon = group_horizon_weeks_ahead(state, group_id);
-    let cycles_ahead = (horizon + 1).min(materialize_weeks.max(horizon));
-    materialize_group_and_apply(state, group_id, cycles_ahead)
+    replan_from_next_cycle(state, group_id, person_id)
 }
 
-/// Drop `person_id` from `group_id`'s rotation queue, clear their future
-/// (not-yet-past, not-current) frozen assignments, and refill the resulting
-/// gaps from the remaining queue. Other members' already-frozen weeks are
-/// never touched.
+/// The re-planning half of `apply_group_join` (see there).
+fn replan_from_next_cycle(
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+    joiner: &PersonId,
+) -> anyhow::Result<Option<Turn>> {
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(None);
+    };
+    let current = current_iso_week();
+    let horizon = group_horizon_weeks_ahead(state, group_id);
+
+    let anchor = resolver::cycle_anchor(state, &group);
+    let boundary = anchor
+        .as_ref()
+        .and_then(|a| resolver::next_cycle_start(state, &group, a, current));
+    let dropped = match boundary {
+        Some(from) => take_replannable_assignments(state, &group, from),
+        None => Vec::new(),
+    };
+    let queue = resolver::rewind_queue(&resolver::reconcile_queue(state, &group), &dropped);
+
+    // Whatever is queued ahead of the anchor still finishes the running
+    // cycle (only when the anchor's next turn isn't frozen yet); the next
+    // cycle starts at the anchor.
+    let split = anchor
+        .as_ref()
+        .and_then(|a| queue.iter().position(|pid| pid == a))
+        .unwrap_or(0);
+    let (running, next_cycle) = queue.split_at(split);
+    let had_turn_before_boundary = |pid: &PersonId| {
+        state.slot_assignments.iter().any(|a| {
+            a.group_id == group.id
+                && a.person_id.as_ref() == Some(pid)
+                && boundary.is_none_or(|b| Turn::new(a.iso_year, a.iso_week, a.shift) < b)
+        })
+    };
+    let (newcomers, old): (Vec<PersonId>, Vec<PersonId>) = next_cycle
+        .iter()
+        .cloned()
+        .partition(|pid| pid == joiner || !had_turn_before_boundary(pid));
+    let mut queue = running.to_vec();
+    queue.extend(resolver::spread_newcomers(&old, &newcomers));
+    state.apply_event(DomainEvent::RotationQueueSet {
+        group_id: group_id.clone(),
+        queue,
+    })?;
+
+    // Refill the horizon the group already had; reach further only as far
+    // as it takes to give the joiner a frozen turn.
+    let max_cycles = horizon + 2 * (group.member_ids.len() + 1);
+    let mut cycles = horizon;
+    loop {
+        refill_replanned(state, group_id, cycles, &dropped)?;
+        if first_turn_of(state, group_id, joiner).is_some() || cycles >= max_cycles {
+            break;
+        }
+        cycles += 1;
+    }
+    Ok(first_changed_turn(state, &dropped))
+}
+
+/// Materialize `group_id` for `cycles` due weeks after a re-plan dropped
+/// `replaced`, recording who held each refilled turn before (audit only).
+fn refill_replanned(
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+    cycles: usize,
+    replaced: &[crate::domain::SlotAssignment],
+) -> anyhow::Result<()> {
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(());
+    };
+    for mut ev in resolver::materialize_group(state, &group, cycles) {
+        if let DomainEvent::SlotAssigned {
+            slot_index,
+            iso_year,
+            iso_week,
+            shift,
+            previous_person_id,
+            ..
+        } = &mut ev
+        {
+            *previous_person_id = replaced
+                .iter()
+                .find(|a| {
+                    (a.slot_index, a.iso_year, a.iso_week, a.shift)
+                        == (*slot_index, *iso_year, *iso_week, *shift)
+                })
+                .and_then(|a| a.person_id.clone());
+        }
+        state.apply_event(ev)?;
+    }
+    Ok(())
+}
+
+/// The first of the `replaced` turns whose assignee is different now — the
+/// first dropped turn may be redrawn identically (or not be redrawn at all).
+fn first_changed_turn(
+    state: &crate::state::State,
+    replaced: &[crate::domain::SlotAssignment],
+) -> Option<Turn> {
+    replaced
+        .iter()
+        .filter(|old| {
+            !state.slot_assignments.iter().any(|a| {
+                a.group_id == old.group_id
+                    && (a.slot_index, a.iso_year, a.iso_week, a.shift)
+                        == (old.slot_index, old.iso_year, old.iso_week, old.shift)
+                    && a.person_id == old.person_id
+            })
+        })
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+        .min()
+}
+
+/// Remove and return the group's round-robin assignments from turn `from`
+/// on — the ones a re-plan may redraw. Admin/self-service/imported weeks
+/// and anything already done or skipped stay where they are.
+fn take_replannable_assignments(
+    state: &mut crate::state::State,
+    group: &CleaningGroup,
+    from: Turn,
+) -> Vec<crate::domain::SlotAssignment> {
+    let (taken, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut state.slot_assignments)
+        .into_iter()
+        .partition(|a| {
+            let turn = Turn::new(a.iso_year, a.iso_week, a.shift);
+            a.group_id == group.id
+                && turn >= from
+                && a.source == AssignmentSource::RoundRobin
+                && state.completion_for(group, a.slot_index, turn).is_none()
+        });
+    state.slot_assignments = keep;
+    taken
+}
+
+/// `person_id`'s first frozen turn in `group_id` after the current week.
+pub(crate) fn first_turn_of(
+    state: &crate::state::State,
+    group_id: &GroupId,
+    person_id: &PersonId,
+) -> Option<Turn> {
+    let current = current_iso_week();
+    state
+        .slot_assignments
+        .iter()
+        .filter(|a| {
+            a.group_id == *group_id
+                && a.person_id.as_ref() == Some(person_id)
+                && (a.iso_year, a.iso_week) > current
+        })
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+        .min()
+}
+
+/// Confirmation lines for a join: the newcomer's first scheduled turn and
+/// what happened to the plan around it.
+pub(crate) fn join_summary(
+    state: &crate::state::State,
+    group_id: &GroupId,
+    person_id: &PersonId,
+    replanned_from: Option<Turn>,
+) -> String {
+    let Some(group) = state.group_by_id(group_id) else {
+        return String::new();
+    };
+    let first = match first_turn_of(state, group_id, person_id) {
+        Some(turn) => format!(
+            "First turn: {} (week {}).",
+            turn.period_label(&group.rhythm),
+            turn.week
+        ),
+        None => "First turn: not planned yet.".to_owned(),
+    };
+    let plan = match replanned_from {
+        Some(turn) => format!(
+            "The running round is unchanged; weeks from week {} on were re-planned to include them.",
+            turn.week
+        ),
+        None => "Already-planned weeks are unchanged.".to_owned(),
+    };
+    format!("{first}\n{plan}")
+}
+
+/// What a departure did to the plan, for the confirmation message.
+#[derive(Default)]
+pub(crate) struct Departure {
+    /// The leaver's future turns, all handed on to others.
+    pub(crate) vacated: Vec<crate::domain::SlotAssignment>,
+    /// The first turn whose assignee changed.
+    pub(crate) changed_from: Option<Turn>,
+}
+
+/// Take `person_id` (already removed via `PersonLeftGroup`) out of
+/// `group_id`'s plan from the current week on.
 ///
 /// Must be called with `state` already locked, AFTER `PersonLeftGroup` is
-/// applied (so `reconcile_queue` naturally drops the leaver). Returns the
-/// number of future assignments that were cleared and refilled.
+/// applied (so `reconcile_queue` naturally drops the leaver).
+///
+/// Everything up to and including the current week stays as it was (an open
+/// duty this week blocks leaving in the first place), and so does every turn
+/// before the leaver's first future one. From that turn on the plain
+/// round-robin weeks are redrawn from the rewound queue without the leaver:
+/// everyone after them simply moves up one turn per vacated turn, the
+/// mirror image of `apply_group_join`. Other members' pinned weeks
+/// (`!plan assign`, takeovers, swaps, imports) and anything already done stay;
+/// the leaver's own pinned weeks are refilled too and reported back via
+/// `Departure::vacated`, never dropped silently.
 pub(crate) fn apply_group_departure(
     _ctx: &BotContext,
     state: &mut crate::state::State,
     person_id: &PersonId,
     group_id: &GroupId,
-) -> anyhow::Result<usize> {
-    let removed = remove_future_assignments_for_person(state, person_id, group_id);
-
-    if let Some(group) = state.group_by_id(group_id).cloned() {
-        let queue = resolver::reconcile_queue(state, &group);
-        state.apply_event(DomainEvent::RotationQueueSet {
-            group_id: group_id.clone(),
-            queue,
-        })?;
-    }
+) -> anyhow::Result<Departure> {
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(Departure::default());
+    };
+    let horizon = group_horizon_weeks_ahead(state, group_id);
+    let vacated = remove_future_assignments_for_person(state, person_id, group_id);
+    let mut replaced = match vacated
+        .iter()
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+        .min()
+    {
+        Some(from) => take_replannable_assignments(state, &group, from),
+        None => Vec::new(),
+    };
+    let queue = resolver::rewind_queue(&resolver::reconcile_queue(state, &group), &replaced);
+    state.apply_event(DomainEvent::RotationQueueSet {
+        group_id: group_id.clone(),
+        queue,
+    })?;
 
     // Refill within whatever horizon this group already had — a leave
     // creates gaps, it never needs to extend the horizon further out.
-    let horizon = group_horizon_weeks_ahead(state, group_id);
-    materialize_group_and_apply(state, group_id, horizon)?;
-    Ok(removed)
+    replaced.extend(vacated.iter().cloned());
+    refill_replanned(state, group_id, horizon, &replaced)?;
+    Ok(Departure {
+        changed_from: first_changed_turn(state, &replaced),
+        vacated,
+    })
 }
 
+/// Confirmation lines for a departure: what happened to the leaver's
+/// upcoming turns, naming each pinned one and who holds it now.
+pub(crate) fn departure_summary(
+    state: &crate::state::State,
+    group_id: &GroupId,
+    departure: &Departure,
+) -> String {
+    let Some(group) = state.group_by_id(group_id) else {
+        return String::new();
+    };
+    if departure.vacated.is_empty() {
+        return "They had no upcoming turns; the plan is unchanged.".to_owned();
+    }
+    let n = departure.vacated.len();
+    let mut lines = vec![match departure.changed_from {
+        Some(turn) => format!(
+            "Their {n} upcoming turn(s) were handed on: from week {} on, everyone after them moves up.",
+            turn.week
+        ),
+        None => format!("Their {n} upcoming turn(s) were handed on."),
+    }];
+    let mut pinned: Vec<&crate::domain::SlotAssignment> = departure
+        .vacated
+        .iter()
+        .filter(|a| a.source != AssignmentSource::RoundRobin)
+        .collect();
+    pinned.sort_by_key(|a| (a.iso_year, a.iso_week, a.shift, a.slot_index));
+    for a in pinned {
+        let turn = Turn::new(a.iso_year, a.iso_week, a.shift);
+        let now = state
+            .slot_assignee(group, a.slot_index, turn)
+            .map(|p| p.display_name.clone())
+            .unwrap_or_else(|| "nobody".into());
+        let duty = Duty {
+            group: group.clone(),
+            slot_index: a.slot_index,
+            turn,
+        };
+        lines.push(format!(
+            "⚠️ Their {} week {} ({}) is now {now} — re-assign it if that was arranged differently.",
+            source_label(&a.source),
+            turn.week,
+            duty.label(),
+        ));
+    }
+    lines.join("\n")
+}
+
+/// How a pinned assignment came about, for messages.
+pub(crate) fn source_label(source: &AssignmentSource) -> &'static str {
+    match source {
+        AssignmentSource::RoundRobin => "rotation",
+        AssignmentSource::Manual | AssignmentSource::Assign => "assigned",
+        AssignmentSource::Takeover => "taken-over",
+        AssignmentSource::Swap => "swapped",
+        AssignmentSource::Import => "imported",
+    }
+}
+
+/// Remove and return `person_id`'s assignments in `group_id` after the
+/// current week, whatever their source.
 pub(crate) fn remove_future_assignments_for_person(
     state: &mut crate::state::State,
     person_id: &str,
     group_id: &str,
-) -> usize {
-    let (cur_y, cur_w) = current_iso_week();
-    let before = state.slot_assignments.len();
-    state.slot_assignments.retain(|a| {
-        a.group_id != group_id
-            || a.person_id.as_deref() != Some(person_id)
-            || a.iso_year < cur_y
-            || (a.iso_year == cur_y && a.iso_week <= cur_w)
-    });
-    before - state.slot_assignments.len()
+) -> Vec<crate::domain::SlotAssignment> {
+    let current = current_iso_week();
+    let (removed, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut state.slot_assignments)
+        .into_iter()
+        .partition(|a| {
+            a.group_id == group_id
+                && a.person_id.as_deref() == Some(person_id)
+                && (a.iso_year, a.iso_week) > current
+        });
+    state.slot_assignments = keep;
+    removed
 }
 
 /// Which turn a command means: `week <1-53>` and/or `on <weekday>`,
@@ -664,6 +939,28 @@ pub(crate) fn current_open_assignments(
                 })
         })
         .collect()
+}
+
+/// Resolve a person argument (see `State::find_persons`): `Ok(None)` when
+/// nobody matches — callers word that themselves — and an error message
+/// listing the candidates when a display name is ambiguous, rather than
+/// silently picking one of them.
+pub(crate) fn lookup_person<'a>(
+    state: &'a crate::state::State,
+    query: &str,
+) -> std::result::Result<Option<&'a Person>, String> {
+    match state.find_persons(query).as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one)),
+        several => {
+            let who: Vec<String> = several.iter().map(|p| person_label(p)).collect();
+            Err(format!(
+                "«{query}» matches {} people: {} — use the Matrix ID instead.",
+                several.len(),
+                who.join(", ")
+            ))
+        }
+    }
 }
 
 pub(crate) fn person_label(person: &Person) -> String {

@@ -275,9 +275,10 @@ pub(crate) async fn cmd_ical(
                             "❌ Admin permission required to generate iCal for others.",
                         )));
                     }
-                    let person = match state.find_person(first).cloned() {
-                        Some(p) => p,
-                        None => {
+                    let person = match lookup_person(&state, first) {
+                        Ok(Some(p)) => p.clone(),
+                        Err(ambiguous) => return Ok(Some(format::mentionify(&ambiguous))),
+                        Ok(None) => {
                             return Ok(Some(format::mentionify(&format!(
                                 "Person «{first}» not found."
                             ))))
@@ -411,9 +412,10 @@ pub(crate) async fn cmd_icalreset(
                 if !is_admin {
                     return Ok(Some(format::mentionify("❌ Admin permission required.")));
                 }
-                match state.find_person(query).map(|p| p.id.clone()) {
-                    Some(id) => id,
-                    None => {
+                match lookup_person(&state, query) {
+                    Ok(Some(p)) => p.id.clone(),
+                    Err(ambiguous) => return Ok(Some(format::mentionify(&ambiguous))),
+                    Ok(None) => {
                         return Ok(Some(format::mentionify(&format!(
                             "Person «{query}» not found."
                         ))))
