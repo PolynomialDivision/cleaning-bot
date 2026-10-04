@@ -156,6 +156,7 @@ fn test_context(state: State) -> (BotContext, PathBuf, OwnedUserId) {
     let admin = OwnedUserId::try_from("@admin:example.org").unwrap();
     let path = std::env::temp_dir().join(format!("cleaning-bot-test-{}.json", Uuid::new_v4()));
     let ctx = BotContext {
+        operations: Arc::new(Mutex::new(())),
         state: Arc::new(Mutex::new(state)),
         state_path: path.clone(),
         config: Arc::new(config),
@@ -193,6 +194,7 @@ fn test_context_with_horizon(
     let admin = OwnedUserId::try_from("@admin:example.org").unwrap();
     let path = std::env::temp_dir().join(format!("cleaning-bot-test-{}.json", Uuid::new_v4()));
     let ctx = BotContext {
+        operations: Arc::new(Mutex::new(())),
         state: Arc::new(Mutex::new(state)),
         state_path: path.clone(),
         config: Arc::new(config),
@@ -3968,7 +3970,8 @@ async fn status_shows_who_actually_cleaned_and_skips() {
     let text = names_only(&cmd_status(&ctx).await.unwrap().unwrap());
     assert!(text.contains("✅ Scharni: alice · done by bob"), "{text}");
     assert!(text.contains("⏭️ Colbe: bob · skipped"), "{text}");
-    assert!(text.contains("· 2/2 done ✨"), "{text}");
+    // The skipped turn needs no cleaning, so it doesn't count either way.
+    assert!(text.contains("· 1/1 done ✨"), "{text}");
 
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -4111,7 +4114,8 @@ fn old_command_names_point_to_their_replacement() {
 fn help_is_short_and_admin_help_is_separate() {
     let help = help_text();
     assert!(help.lines().count() <= 16, "{help}");
-    assert!(help.contains("!groups"));
+    assert!(help.contains("!mygroups"));
+    assert!(more_help_text().contains("!groups"));
     assert!(!help.contains("!plan assign"));
     assert!(admin_help_text().contains("!plan assign"));
 }
@@ -4363,6 +4367,7 @@ fn kitchen_and_bathroom() -> (State, CleaningGroup, CleaningGroup, Vec<PersonId>
     bathroom.rhythm = crate::rhythm::Rhythm {
         every_weeks: Some(1),
         shift_starts: crate::rhythm::Rhythm::times_per_week(2),
+        ..Default::default()
     };
     state.cleaning_groups = vec![kitchen.clone(), bathroom.clone()];
     for ev in resolver::materialize(&state, 4) {
@@ -4560,7 +4565,7 @@ async fn changing_the_rhythm_replans_later_weeks_without_costing_anyone_a_turn()
         .unwrap()
         .unwrap();
     assert!(
-        reply.contains("now cleaned 2× per week (Mon–Wed, Thu–Sun)"),
+        reply.contains("will be cleaned 2× per week (Mon–Tue, Thu–Fri) from next week"),
         "{reply}"
     );
 
@@ -4608,7 +4613,7 @@ async fn changing_the_rhythm_replans_later_weeks_without_costing_anyone_a_turn()
 fn rhythm_specs_parse() {
     let weekly = crate::rhythm::Rhythm::weekly();
     let r = parse_rhythm(&weekly, &["2x"]).unwrap();
-    assert_eq!(r.describe(), "2× per week (Mon–Wed, Thu–Sun)");
+    assert_eq!(r.describe(), "2× per week (Mon–Tue, Thu–Fri)");
     let r = parse_rhythm(&weekly, &["thu"]).unwrap();
     assert_eq!(r.describe(), "2× per week (Mon–Wed, Thu–Sun)");
     let r = parse_rhythm(&weekly, &["every", "2", "weeks"]).unwrap();
@@ -5073,10 +5078,7 @@ async fn the_plan_shows_user_pills_but_pings_nobody() {
     let (y, w) = current_iso_week();
     let lines: Vec<&str> = text.body.lines().collect();
     assert_eq!(lines[0], "📋 Plan · next 4 weeks");
-    assert_eq!(
-        lines[2],
-        format!("📅 {} · this week", crate::view::week_label(y, w))
-    );
+    assert_eq!(lines[2], format!("📅 {}", crate::view::week_label(y, w)));
     assert_eq!(lines[3], "⬜ Floor: mia");
     assert_eq!(lines[4], "⬜ Kitchen: mia");
     let _ = tokio::fs::remove_file(path).await;
@@ -5250,7 +5252,8 @@ async fn a_new_user_is_welcomed_once_with_every_active_group_to_tap() {
          1️⃣ 2nd Floor\n\
          2️⃣ Kitchen\n\
          \n\
-         !mygroups brings this back anytime."
+         🗓 Your calendar: send !ical to me in a private chat\n\
+         !mygroups reopens this · !join / !leave · !help"
     );
     // The disabled Attic isn't offered; looking creates nobody.
     assert_eq!(selector.group_ids.len(), 2);
@@ -5310,12 +5313,7 @@ async fn tapping_a_number_joins_and_taking_it_back_leaves() {
     let joined = onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣")
         .unwrap()
         .unwrap();
-    assert!(
-        joined.starts_with(
-            "✅ [mia](https://matrix.to/#/@mia:example.org) joined **2nd Floor**\n📅 First turn: "
-        ),
-        "{joined}"
-    );
+    assert!(joined.starts_with("✅ Joined **2nd Floor**"), "{joined}");
     assert!(is_in(&state, MIA, "2nd Floor"));
     assert_eq!(state.persons.len(), people + 1);
     let shown = selector_text(&state, &state.group_selectors[&id]);
@@ -5324,10 +5322,7 @@ async fn tapping_a_number_joins_and_taking_it_back_leaves() {
 
     let (selector, left) = onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
     assert_eq!(selector, id);
-    assert!(
-        left.starts_with("👋 [mia](https://matrix.to/#/@mia:example.org) left **2nd Floor**\n"),
-        "{left}"
-    );
+    assert!(left.starts_with("👋 Left **2nd Floor**"), "{left}");
     assert!(!is_in(&state, MIA, "2nd Floor"));
     // Their person stays (history may point at it) — and is reused.
     assert_eq!(state.persons.len(), people + 1);
@@ -5360,10 +5355,10 @@ async fn tapping_a_group_youre_in_leaves_it_and_taking_it_back_rejoins() {
     let left = onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "2️⃣")
         .unwrap()
         .unwrap();
-    assert!(left.contains(" left **Kitchen**"), "{left}");
+    assert!(left.contains("Left **Kitchen**"), "{left}");
     assert!(!is_in(&state, MIA, "Kitchen"));
     let (_, back) = onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
-    assert!(back.contains(" joined **Kitchen**"), "{back}");
+    assert!(back.contains("Joined **Kitchen**"), "{back}");
     assert!(is_in(&state, MIA, "Kitchen"));
     assert_consistent(&state);
     drop(state);
@@ -5607,6 +5602,740 @@ async fn an_admin_can_send_someone_the_welcome_again() {
         .unwrap_err()
         .contains("matches 2 people"));
     assert!(welcome_target(&state, "").unwrap_err().starts_with("Usage"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn explicit_windows_have_gaps_and_reject_overlaps() {
+    let weekly = crate::rhythm::Rhythm::weekly();
+    let twice = parse_rhythm(&weekly, &["2x"]).unwrap();
+    assert_eq!(
+        twice.shifts(),
+        [
+            crate::rhythm::Shift { start: 0, end: 1 },
+            crate::rhythm::Shift { start: 3, end: 4 }
+        ]
+    );
+    assert!(!twice.contains_weekday(2));
+    assert!(!twice.contains_weekday(6));
+    assert_eq!(
+        twice.shifts(),
+        parse_rhythm(&weekly, &["mon-tue", "thu-fri"])
+            .unwrap()
+            .shifts()
+    );
+    assert!(parse_rhythm(&weekly, &["mon-thu", "thu-fri"]).is_err());
+    assert!(parse_rhythm(&weekly, &["thu-mon"]).is_err());
+    let daily = parse_rhythm(&twice, &["daily"]).unwrap();
+    assert_eq!(daily.shift_count(), 7);
+    assert!(daily.shift_ends.is_empty());
+    let legacy: crate::rhythm::Rhythm =
+        serde_json::from_str(r#"{"every_weeks":1,"shift_starts":[0,3]}"#).unwrap();
+    assert_eq!(legacy.describe(), "2× per week (Mon–Wed, Thu–Sun)");
+}
+
+#[tokio::test]
+async fn rhythm_change_preserves_history_and_protected_imports_atomically() {
+    let (mut state, group, _, _) = rotation_state();
+    seed_materialized_weeks(&mut state, 4);
+    let current = current_iso_week();
+    let next = add_weeks(current.0, current.1, 1);
+    let a = state
+        .slot_assignments
+        .iter_mut()
+        .find(|a| (a.iso_year, a.iso_week) == next)
+        .unwrap();
+    a.source = AssignmentSource::Import;
+    let before = serde_json::to_value(&state).unwrap();
+    let (ctx, path, admin) = test_context(state);
+    let name = ctx
+        .state
+        .lock()
+        .await
+        .group_by_id(&group)
+        .unwrap()
+        .name
+        .clone();
+    let reply = cmd_groups_rhythm(&ctx, &admin, &[&name, "2x"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.contains("protected assignment"), "{reply}");
+    assert_eq!(
+        serde_json::to_value(&*ctx.state.lock().await).unwrap(),
+        before
+    );
+    {
+        let mut state = ctx.state.lock().await;
+        state
+            .slot_assignments
+            .iter_mut()
+            .for_each(|a| a.source = AssignmentSource::RoundRobin);
+    }
+    cmd_groups_rhythm(&ctx, &admin, &[&name, "2x"])
+        .await
+        .unwrap();
+    let state = ctx.state.lock().await;
+    let group = state.group_by_id(&group).unwrap();
+    assert_eq!(
+        group.rhythm.for_week(current.0, current.1).describe(),
+        "weekly"
+    );
+    assert_eq!(
+        group.rhythm.for_week(next.0, next.1).describe(),
+        "2× per week (Mon–Tue, Thu–Fri)"
+    );
+    let historical = crate::schedule::build_schedule_from(&state, current, 2);
+    assert_eq!(
+        (historical.assignments[0].end - historical.assignments[0].start).num_days(),
+        6
+    );
+    assert_eq!(
+        (historical.assignments[1].end - historical.assignments[1].start).num_days(),
+        1
+    );
+    let restored: State = serde_json::from_str(&serde_json::to_string(&*state).unwrap()).unwrap();
+    assert!(resolver::materialize(&restored, 4).is_empty());
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn selector_old_undo_cannot_reverse_a_later_explicit_join() {
+    let (ctx, path, _) = selector_world();
+    let mut state = ctx.state.lock().await;
+    let id = open_selector(&mut state, MIA, true);
+    onboarding::tap(&ctx, &mut state, &id, "$old", MIA, "1️⃣").unwrap();
+    let gid = state.group_by_name("2nd Floor").unwrap().id.clone();
+    leave_group(&ctx, &mut state, MIA, &gid).unwrap().unwrap();
+    join_group(&ctx, &mut state, MIA, &gid).unwrap().unwrap();
+    assert!(onboarding::untap(&ctx, &mut state, "$old")
+        .unwrap()
+        .is_none());
+    assert!(is_in(&state, MIA, "2nd Floor"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn dm_command_policy_cannot_reach_other_people_or_admin_mutations() {
+    for (cmd, args) in [
+        ("!next", vec!["@other:x"]),
+        ("!ical", vec!["@other:x"]),
+        ("!ical", vec!["reset", "@other:x"]),
+        ("!plan", vec!["assign", "Kitchen", "Someone"]),
+        ("!validate", vec![]),
+        ("!member", vec!["add"]),
+        ("!swap", vec!["@other:x"]),
+    ] {
+        assert!(!private_command_allowed(cmd, &args), "{cmd} {args:?}");
+    }
+    for cmd in [
+        "!next",
+        "!plan",
+        "!mygroups",
+        "!help",
+        "!ical",
+        "!done",
+        "!undo",
+    ] {
+        assert!(private_command_allowed(cmd, &[]));
+    }
+    // The PDF is public in the cleaning room anyway.
+    assert!(private_command_allowed("!plan", &["pdf", "history", "4"]));
+}
+
+#[tokio::test]
+async fn ui_bookkeeping_does_not_change_calendar_revision() {
+    let (state, _, _, _) = rotation_state();
+    let (ctx, path, _) = test_context(state);
+    let mut state = ctx.state.lock().await;
+    state.save(&path).await.unwrap();
+    let timestamp = state.last_modified;
+    state.greeted_users.insert(MIA.into());
+    state.save(&path).await.unwrap();
+    assert_eq!(state.last_modified, timestamp);
+    state.persons[0].display_name = "New name".into();
+    state.save(&path).await.unwrap();
+    assert_ne!(state.last_modified, timestamp);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[test]
+fn shared_snapshot_keeps_completion_author_dates_windows_and_imports_in_exports() {
+    let (mut state, kitchen, bathroom, ids) = kitchen_and_bathroom();
+    let (y, w) = current_iso_week();
+    let at = chrono::DateTime::parse_from_rfc3339("2026-09-30T16:42:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    state.completions.push(crate::state::Completion {
+        group_id: bathroom.id.clone(),
+        slot_id: None,
+        completed_by_id: ids[2].clone(),
+        responsible_person_ids: vec![ids[0].clone()],
+        iso_year: y,
+        iso_week: w,
+        shift: 0,
+        completed_at: at,
+        skipped: false,
+    });
+    state.completions.push(crate::state::Completion {
+        group_id: kitchen.id.clone(),
+        slot_id: None,
+        completed_by_id: ids[0].clone(),
+        responsible_person_ids: vec![],
+        iso_year: y,
+        iso_week: w,
+        shift: 0,
+        completed_at: at,
+        skipped: true,
+    });
+    for a in state
+        .slot_assignments
+        .iter_mut()
+        .filter(|a| a.group_id == bathroom.id && a.iso_year == y && a.iso_week == w)
+    {
+        a.source = AssignmentSource::Import;
+    }
+    let snapshot = crate::schedule::build_schedule_from(&state, (y, w), 1);
+    let duty = snapshot
+        .assignments
+        .iter()
+        .find(|a| a.group_id == bathroom.id && a.shift == 0)
+        .unwrap();
+    let matrix = duty.matrix_line(true, false);
+    assert!(
+        matrix.contains("✅") && matrix.contains("done by cleo") && matrix.contains("imported"),
+        "{matrix}"
+    );
+    let tex = crate::pdf::render_tex(&snapshot);
+    assert!(
+        tex.contains("Done by cleo") && tex.contains("imported") && tex.contains("30 Sep 2026")
+    );
+    let ics = crate::ical::render_ics(&snapshot, &ids[0]);
+    assert!(!ics.contains("STATUS:COMPLETED"));
+    assert!(ics.contains("STATUS:CANCELLED"));
+    assert!(ics.replace("\r\n ", "").contains("Done by cleo"));
+    assert!(ics.contains("DTEND;VALUE=DATE:"));
+    assert_eq!(snapshot.assignments.len(), 3);
+}
+
+#[test]
+fn split_rotation_is_balanced_unique_and_restart_stable_for_many_house_sizes() {
+    for members in 2..=16 {
+        let mut state = State::default();
+        state.created_at = Some(Utc::now());
+        let mut group = CleaningGroup::new("Bathroom");
+        group.rhythm = parse_rhythm(&group.rhythm, &["2x"]).unwrap();
+        for i in 0..members {
+            let p = Person::new_named(&format!("Person {i}"));
+            group.member_ids.push(p.id.clone());
+            state.persons.push(p);
+        }
+        state.cleaning_groups.push(group);
+        for event in resolver::materialize(&state, 52) {
+            state.apply_event(event).unwrap();
+        }
+        let mut counts = std::collections::HashMap::new();
+        let mut week_people = std::collections::HashSet::new();
+        for a in &state.slot_assignments {
+            let pid = a.person_id.as_ref().unwrap();
+            *counts.entry(pid).or_insert(0usize) += 1;
+            assert!(week_people.insert((a.iso_year, a.iso_week, pid)));
+        }
+        assert!(counts.values().max().unwrap() - counts.values().min().unwrap() <= 1);
+        let restored: State =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(resolver::materialize(&restored, 52).is_empty());
+    }
+}
+
+#[test]
+fn import_rejects_nonexistent_iso_week_53() {
+    assert!(parse_iso_week_token("2025-W53").is_none());
+    assert!(parse_iso_week_token("2026-W53").is_some());
+}
+
+#[tokio::test]
+async fn command_replay_guard_is_saved_with_domain_mutation() {
+    let (state, _, _, _) = rotation_state();
+    let (ctx, path, _) = test_context(state);
+    let mut state = ctx.state.lock().await;
+    state.active_command = Some("$command:0".into());
+    state
+        .apply_event(DomainEvent::PersonCreated {
+            person_id: "new".into(),
+            display_name: "New".into(),
+            matrix_id: None,
+        })
+        .unwrap();
+    state.save(&path).await.unwrap();
+    let restored = State::load(&path).await.unwrap();
+    assert!(restored.processed_commands.contains("$command:0"));
+    assert!(restored.person_by_id(&"new".into()).is_some());
+    assert!(restored.active_command.is_none());
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn calendar_revocation_is_own_only_except_for_explicit_admins() {
+    let (mut state, _, alice, _) = rotation_state();
+    let mxid = OwnedUserId::try_from("@participant:example.org").unwrap();
+    state
+        .persons
+        .iter_mut()
+        .find(|p| p.id == alice)
+        .unwrap()
+        .matrix_id = Some(mxid.to_string());
+    let token = crate::private::calendar_token(&mut state, &alice);
+    let (ctx, path, admin) = test_context(state);
+    assert!(cmd_icalrevoke(&ctx, &mxid, &["Bob"]).await.is_err());
+    assert!(ctx
+        .state
+        .lock()
+        .await
+        .calendar_tokens
+        .iter()
+        .any(|t| !t.revoked));
+    cmd_icalrevoke(&ctx, &admin, &[mxid.as_str()])
+        .await
+        .unwrap();
+    let state = ctx.state.lock().await;
+    assert!(state
+        .calendar_tokens
+        .iter()
+        .all(|t| t.revoked && t.raw_token.is_none()));
+    assert!(!serde_json::to_string(&*state).unwrap().contains(&token));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+// ── Rhythm versions ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_pending_rhythm_change_can_be_replaced_before_it_starts() {
+    let (mut state, group, _, _) = rotation_state();
+    state.created_at = Some(Utc::now());
+    seed_materialized_weeks(&mut state, 4);
+    let (ctx, path, admin) = test_context(state);
+    let current = current_iso_week();
+    let next = add_weeks(current.0, current.1, 1);
+
+    cmd_groups_rhythm(&ctx, &admin, &["2nd Floor", "2x"])
+        .await
+        .unwrap();
+    // Replaces the pending 2x (parts combine, so `weekly` first).
+    let reply = cmd_groups_rhythm(&ctx, &admin, &["2nd Floor", "weekly", "every", "2"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        reply.contains("will be cleaned every 2 weeks from next week"),
+        "{reply}"
+    );
+    {
+        let state = ctx.state.lock().await;
+        let rhythm = &state.group_by_id(&group).unwrap().rhythm;
+        // The 2x never took effect, so it left no version behind.
+        assert_eq!(rhythm.previous.len(), 1, "{:?}", rhythm.previous);
+        assert!(rhythm.previous.iter().all(|r| r.previous.is_empty()));
+        assert_eq!(rhythm.for_week(current.0, current.1).describe(), "weekly");
+        assert_eq!(rhythm.for_week(next.0, next.1).describe(), "every 2 weeks");
+    }
+    // Both show: what holds now, and what comes.
+    let shown = cmd_groups_rhythm(&ctx, &admin, &["2nd Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        shown.starts_with(&format!(
+            "«2nd Floor» is cleaned weekly · from week {}: every 2 weeks.",
+            next.1
+        )),
+        "{shown}"
+    );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn rhythm_versions_stack_and_every_week_keeps_its_own() {
+    let (mut state, group, _, _) = rotation_state();
+    let current = current_iso_week();
+    let weeks_ago = |n: i64| add_weeks(current.0, current.1, -n);
+    let monday = |(y, w): (i32, u32)| crate::rhythm::week_monday(y, w);
+    state.created_at = Some(
+        monday(weeks_ago(6))
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc(),
+    );
+    // Twice a week in the old Mon–Wed / Thu–Sun windows since three weeks
+    // ago; weekly before that.
+    state.cleaning_groups[0].rhythm = crate::rhythm::Rhythm {
+        every_weeks: Some(1),
+        shift_starts: vec![0, 3],
+        effective_from: Some(monday(weeks_ago(3))),
+        previous: vec![crate::rhythm::Rhythm::weekly()],
+        ..Default::default()
+    };
+    seed_materialized_weeks(&mut state, 4);
+    let (ctx, path, admin) = test_context(state);
+
+    let reply = cmd_groups_rhythm(&ctx, &admin, &["2nd Floor", "every", "2"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.starts_with('✅'), "{reply}");
+    let state = ctx.state.lock().await;
+    let rhythm = &state.group_by_id(&group).unwrap().rhythm;
+    assert_eq!(rhythm.previous.len(), 2, "{:?}", rhythm.previous);
+    let at = |(y, w): (i32, u32)| rhythm.for_week(y, w).describe();
+    assert_eq!(at(weeks_ago(4)), "weekly");
+    assert_eq!(at(weeks_ago(3)), "2× per week (Mon–Wed, Thu–Sun)");
+    assert_eq!(at(current), "2× per week (Mon–Wed, Thu–Sun)");
+    let next = add_weeks(current.0, current.1, 1);
+    // Only the frequency changed: the stored windows stay as they were.
+    assert_eq!(
+        at(next),
+        "2× per due week, every 2 weeks (Mon–Wed, Thu–Sun)"
+    );
+    // Past turns keep their dates: three weeks ago, shift 1 was Thu–Sun.
+    let (y, w) = weeks_ago(3);
+    let (start, end) = Turn::new(y, w, 1).dates(rhythm);
+    assert_eq!((start - monday((y, w))).num_days(), 3);
+    assert_eq!((end - start).num_days(), 3);
+    // From next week: every second week, counted from the tracking start.
+    let group = state.group_by_id(&group).unwrap();
+    let after = add_weeks(next.0, next.1, 1);
+    assert_ne!(
+        state.is_due_week(group, next.0, next.1),
+        state.is_due_week(group, after.0, after.1)
+    );
+    // A restart reads the same versions and plans nothing new.
+    let restored: State = serde_json::from_str(&serde_json::to_string(&*state).unwrap()).unwrap();
+    assert_eq!(
+        restored.group_by_id(&group.id).unwrap().rhythm,
+        group.rhythm
+    );
+    assert!(resolver::materialize(&restored, 4).is_empty());
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn a_rhythm_change_keeps_imports_whose_dates_stay_the_same() {
+    let (mut state, group, alice, _) = rotation_state();
+    state.created_at = Some(Utc::now());
+    seed_materialized_weeks(&mut state, 4);
+    let current = current_iso_week();
+    // Due under `every 2` too, counted from this week (the tracking start).
+    let kept = add_weeks(current.0, current.1, 2);
+    let import = state
+        .slot_assignments
+        .iter_mut()
+        .find(|a| (a.iso_year, a.iso_week) == kept)
+        .unwrap();
+    import.source = AssignmentSource::Import;
+    import.person_id = Some(alice.clone());
+    let (ctx, path, admin) = test_context(state);
+
+    let reply = cmd_groups_rhythm(&ctx, &admin, &["2nd Floor", "every", "2"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.starts_with('✅'), "{reply}");
+    let state = ctx.state.lock().await;
+    let at = |week: (i32, u32)| {
+        state
+            .slot_assignments
+            .iter()
+            .filter(|a| a.group_id == group && (a.iso_year, a.iso_week) == week)
+            .collect::<Vec<_>>()
+    };
+    let import = at(kept);
+    assert_eq!(import.len(), 1);
+    assert_eq!(import[0].source, AssignmentSource::Import);
+    assert_eq!(import[0].person_id.as_ref(), Some(&alice));
+    // The week in between isn't cleaned any more.
+    assert!(at(add_weeks(current.0, current.1, 1)).is_empty());
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+// ── Reactions taken back ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn the_bot_clearing_a_tap_is_no_undo_and_the_number_works_again() {
+    let (ctx, path, _) = selector_world();
+    let room = ctx.room_id.clone();
+    let mut state = ctx.state.lock().await;
+    let id = open_selector(&mut state, MIA, true);
+
+    onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(is_in(&state, MIA, "2nd Floor"));
+    // The bot redacts the consumed reaction; that isn't Mia taking it back.
+    // (`main` drops the bot's own redactions before they get this far.)
+    assert_eq!(
+        crate::reactions::redaction(&ctx, &mut state, &room, "@cleaningbot:example.org", "$r1"),
+        crate::reactions::Redaction::Refused
+    );
+    assert!(is_in(&state, MIA, "2nd Floor"));
+    // The same number, tapped again, toggles back.
+    let left = onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(left.starts_with("👋 Left **2nd Floor**"), "{left}");
+    let shown = selector_text(&state, &state.group_selectors[&id]);
+    assert!(
+        shown.contains("2️⃣ Kitchen\n👋 Left **2nd Floor**"),
+        "{shown}"
+    );
+    // Delivered again after a restart, neither tap counts twice.
+    *state = serde_json::from_str(&serde_json::to_string(&*state).unwrap()).unwrap();
+    for reaction in ["$r1", "$r2"] {
+        assert!(onboarding::tap(&ctx, &mut state, &id, reaction, MIA, "1️⃣")
+            .unwrap()
+            .is_none());
+    }
+    assert!(!is_in(&state, MIA, "2nd Floor"));
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn a_tap_only_its_owner_takes_back_and_one_taken_back_early_never_counts() {
+    use crate::reactions::{redaction, Redaction};
+    let (ctx, path, admin) = selector_world();
+    let room = ctx.room_id.clone();
+    let mut state = ctx.state.lock().await;
+    let id = open_selector(&mut state, MIA, true);
+
+    // The redaction arrives before its reaction: the reaction doesn't count.
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, MIA, "$early"),
+        Redaction::Noted
+    );
+    assert!(onboarding::tap(&ctx, &mut state, &id, "$early", MIA, "1️⃣")
+        .unwrap()
+        .is_none());
+    assert!(!is_in(&state, MIA, "2nd Floor"));
+
+    onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    // Not someone else's to take back, nor from another room.
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, "@alice:example.org", "$r1"),
+        Redaction::Refused
+    );
+    let elsewhere = OwnedRoomId::try_from("!dm:example.org").unwrap();
+    assert_eq!(
+        redaction(&ctx, &mut state, &elsewhere, MIA, "$r1"),
+        Redaction::Refused
+    );
+    assert!(is_in(&state, MIA, "2nd Floor"));
+    // Mia's own: undone — once.
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, MIA, "$r1"),
+        Redaction::TapUndone
+    );
+    assert!(!is_in(&state, MIA, "2nd Floor"));
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, MIA, "$r1"),
+        Redaction::Noted
+    );
+
+    // A tap's confirmation goes stale once membership changes otherwise.
+    onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "2️⃣")
+        .unwrap()
+        .unwrap();
+    let shown = selector_text(&state, &state.group_selectors[&id]);
+    assert!(shown.contains("✅ Joined **Kitchen**"), "{shown}");
+    drop(state);
+    cmd_member_remove(&ctx, &admin, &[MIA, "Kitchen"])
+        .await
+        .unwrap();
+    let state = ctx.state.lock().await;
+    let shown = selector_text(&state, &state.group_selectors[&id]);
+    assert!(!shown.contains("Joined"), "{shown}");
+    assert!(shown.contains("2️⃣ Kitchen\n"), "{shown}");
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn an_old_done_reaction_never_takes_back_a_newer_done_mark() {
+    use crate::reactions::{plan_done, redaction, PlanDone, Redaction};
+    let (state, group_id, _alice_id, _bob_id) = two_slot_week();
+    let (ctx, path, _admin) = test_context(state);
+    let room = ctx.room_id.clone();
+    let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
+    let (year, week) = current_iso_week();
+    let done = |state: &State| {
+        let group = state.group_by_id(&group_id).unwrap();
+        state.is_turn_slot_done(group, 0, Turn::new(year, week, 0))
+    };
+
+    let mut state = ctx.state.lock().await;
+    let marked = plan_done(&mut state, "$d1", alice.as_str(), (year, week)).unwrap();
+    assert_eq!(marked, PlanDone::Marked);
+    assert!(done(&state));
+    // Delivered again: counts once. Bob can't take it back.
+    let again = plan_done(&mut state, "$d1", alice.as_str(), (year, week)).unwrap();
+    assert_eq!(again, PlanDone::Seen);
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, "@bob:example.org", "$d1"),
+        Redaction::Refused
+    );
+    assert!(done(&state));
+
+    // The mark is replaced behind the reaction's back (undone, done again):
+    // taking the old ✅ back leaves the new mark alone.
+    let slot_id = Some("s0".to_owned());
+    state
+        .apply_event(DomainEvent::CleaningUndone {
+            group_id: group_id.clone(),
+            iso_year: year,
+            iso_week: week,
+            slot_id: slot_id.clone(),
+            shift: Some(0),
+        })
+        .unwrap();
+    let alice_id = state
+        .person_by_matrix_id(alice.as_str())
+        .unwrap()
+        .id
+        .clone();
+    state
+        .apply_event(DomainEvent::CleaningCompleted {
+            group_id: group_id.clone(),
+            slot_id,
+            person_id: alice_id,
+            responsible_person_ids: vec![],
+            iso_year: year,
+            iso_week: week,
+            shift: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, alice.as_str(), "$d1"),
+        Redaction::Noted
+    );
+    assert!(done(&state));
+    drop(state);
+
+    // Reaction → taken back → !done → the old redaction and reaction again.
+    cmd_undo(&ctx, &alice, &[]).await.unwrap();
+    let mut state = ctx.state.lock().await;
+    let marked = plan_done(&mut state, "$d2", alice.as_str(), (year, week)).unwrap();
+    assert_eq!(marked, PlanDone::Marked);
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, alice.as_str(), "$d2"),
+        Redaction::DoneUndone { year, week }
+    );
+    assert!(!done(&state));
+    drop(state);
+    cmd_done(&ctx, &alice, &[]).await.unwrap();
+    let mut state = ctx.state.lock().await;
+    assert_eq!(
+        redaction(&ctx, &mut state, &room, alice.as_str(), "$d2"),
+        Redaction::Noted
+    );
+    let late = plan_done(&mut state, "$d2", alice.as_str(), (year, week)).unwrap();
+    assert_eq!(late, PlanDone::Seen);
+    assert!(done(&state));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+// ── Previews ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_preview_shows_what_is_later_planned_and_changes_nothing() {
+    let (mut state, _floor, alice, bob) = rotation_state();
+    let carol = Person::new_matrix("@carol:example.org");
+    let carol_id = carol.id.clone();
+    state.persons.push(carol);
+    let mut bath = CleaningGroup::new("Bath");
+    bath.member_ids = vec![alice.clone(), bob.clone(), carol_id.clone()];
+    bath.rhythm = crate::commands::parse_rhythm(&bath.rhythm, &["2x"]).unwrap();
+    state.cleaning_groups.push(bath);
+    let mut cellar = CleaningGroup::new("Cellar");
+    cellar.member_ids = vec![bob.clone(), carol_id.clone()];
+    cellar.rhythm.every_weeks = Some(3);
+    state.cleaning_groups.push(cellar);
+    state.created_at = Some(Utc::now());
+    // Partly planned already, as in a running house.
+    seed_materialized_weeks(&mut state, 2);
+
+    let before = serde_json::to_string(&state).unwrap();
+    let preview = build_schedule(&state, 12);
+    let (year, week) = current_iso_week();
+    let _ = plan_text(&state, 12);
+    let _ = status_text(&state, year, week);
+    let _ = crate::ical::render_ics(&preview, &alice);
+    let _ = crate::pdf::render_tex(&preview);
+    let id = format!("$selector-{MIA}");
+    let selector = onboarding::new_selector(&state, MIA, true);
+    let _ = selector_text(&state, &selector);
+    let _ = id;
+    assert_eq!(serde_json::to_string(&state).unwrap(), before);
+
+    // Planning those weeks for real gives exactly the preview.
+    seed_materialized_weeks(&mut state, 12);
+    let planned = build_schedule(&state, 12);
+    let key = |s: &crate::schedule::ScheduleSnapshot| {
+        s.assignments
+            .iter()
+            .map(|a| {
+                (
+                    a.group_name.clone(),
+                    a.iso_week,
+                    a.shift,
+                    a.slot_index,
+                    a.assignee.as_ref().map(|p| p.id.clone()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(preview.assignments.len() > 12);
+    assert_eq!(key(&preview), key(&planned));
+}
+
+#[tokio::test]
+async fn linking_a_name_to_someone_with_a_calendar_keeps_their_feed() {
+    let (mut state, _floor, _alice, _bob) = rotation_state();
+    state.persons.push(Person::new_named("Mia"));
+    // Mia asked for her calendar before an admin linked her name.
+    let stub = Person::new_matrix(MIA);
+    let stub_id = stub.id.clone();
+    state.persons.push(stub);
+    let token = crate::private::calendar_token(&mut state, &stub_id);
+    let (ctx, path, _) = test_context(state);
+
+    let reply = apply_linkmatrix(&ctx, "Mia", MIA, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.starts_with("✅"), "{reply}");
+    let mut state = ctx.state.lock().await;
+    let mia = state.person_by_matrix_id(MIA).unwrap().id.clone();
+    assert_ne!(mia, stub_id);
+    let feed = state
+        .calendar_tokens
+        .iter()
+        .find(|t| crate::domain::verify_calendar_token(&token, &t.token_hash))
+        .unwrap();
+    assert_eq!(feed.person_id, mia);
+    // …and `!ical` shows her the very same link.
+    assert_eq!(crate::private::calendar_token(&mut state, &mia), token);
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }

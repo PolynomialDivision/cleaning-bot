@@ -209,10 +209,20 @@ fn group_section(
 
             // Responsible.
             s.push_str(&tex_esc(a.assignee_name()));
+            if let Some(by) = &a.completed_by {
+                if !a.is_skipped && by != a.assignee_name() {
+                    s.push_str(&format!("\\newline{{\\tiny Done by {}}}", tex_esc(by)));
+                }
+            }
+            if let Some(source) = crate::view::source_note(&a.source) {
+                s.push_str(&format!("\\newline{{\\tiny {}}}", tex_esc(source)));
+            }
             s.push_str(" & ");
 
             // ✓ cell: show checkmark when done, leave empty when pending.
-            if a.is_completed {
+            if a.is_skipped {
+                s.push_str("--");
+            } else if a.is_completed {
                 s.push_str("$\\checkmark$");
             }
             s.push_str(" & ");
@@ -240,7 +250,7 @@ fn group_section(
     // Legend.
     s.push_str(
         "{\\fontsize{6.5}{8}\\selectfont\\hfill \
-         $\\checkmark$ = done}\n",
+         $\\checkmark$ = done; -- = skipped}\n",
     );
 
     s
@@ -278,6 +288,32 @@ fn tex_esc(s: &str) -> String {
             // Unicode dashes: map to LaTeX ligatures (pdfLaTeX drops raw U+2013/U+2014).
             '\u{2013}' => out.push_str("--"),  // en dash
             '\u{2014}' => out.push_str("---"), // em dash
+            // The T1 font encoding agrees with Latin-1 on accented letters,
+            // but not on these: as raw characters, XeTeX (tectonic) prints
+            // the T1 glyph in that slot — "2×" came out as "2Œ", "ß" as "SS".
+            // Anything else outside Latin-1 has no glyph in these fonts.
+            '×' => out.push_str(r"$\times$"),
+            '÷' => out.push_str(r"$\div$"),
+            'ß' => out.push_str(r"{\ss}"),
+            'ÿ' => out.push_str("\\\"y"),
+            '\u{a0}' => out.push('~'),
+            '¡' => out.push_str(r"\textexclamdown{}"),
+            '£' => out.push_str(r"\pounds{}"),
+            '§' => out.push_str(r"\S{}"),
+            '©' => out.push_str(r"\textcopyright{}"),
+            '«' => out.push_str(r"\guillemotleft{}"),
+            '»' => out.push_str(r"\guillemotright{}"),
+            '°' => out.push_str(r"\textdegree{}"),
+            '·' => out.push_str(r"\textperiodcentered{}"),
+            '¿' => out.push_str(r"\textquestiondown{}"),
+            '€' => out.push_str(r"\texteuro{}"),
+            '…' => out.push_str(r"\dots{}"),
+            '‘' => out.push('`'),
+            '’' => out.push('\''),
+            '‚' => out.push_str(r"\quotesinglbase{}"),
+            '“' => out.push_str("``"),
+            '”' => out.push_str("''"),
+            '„' => out.push_str(r"\quotedblbase{}"),
             c => out.push(c),
         }
     }
@@ -307,6 +343,18 @@ mod tests {
         g.member_ids.push(id);
         st.cleaning_groups.push(g);
         st
+    }
+
+    #[test]
+    fn characters_the_t1_fonts_put_elsewhere_are_spelled_out() {
+        assert_eq!(tex_esc("2× per week"), r"2$\times$ per week");
+        assert_eq!(tex_esc("Straße"), r"Stra{\ss}e");
+        assert_eq!(
+            tex_esc("„Küche“ · 5 €"),
+            r"\quotedblbase{}Küche`` \textperiodcentered{} 5 \texteuro{}"
+        );
+        // Accented letters sit where Latin-1 has them, so they stay.
+        assert_eq!(tex_esc("Zoë Ångström"), "Zoë Ångström");
     }
 
     #[test]

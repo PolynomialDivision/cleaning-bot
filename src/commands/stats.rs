@@ -277,7 +277,7 @@ pub(crate) fn blame_group(state: &crate::state::State, group: &CleaningGroup) ->
         format!(
             "📊 **{}** · cleaned {}",
             group.name,
-            group.rhythm.describe()
+            group.rhythm.describe_on(crate::state::today())
         ),
         String::new(),
     ];

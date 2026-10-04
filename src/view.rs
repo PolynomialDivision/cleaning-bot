@@ -68,13 +68,6 @@ pub fn relative(turn: Turn, rhythm: &Rhythm, today: NaiveDate) -> String {
     }
 }
 
-/// A person in a message meant to notify them: their Matrix ID, which the
-/// formatter turns into a pill *and* an `m.mentions` entry — or, without
-/// Matrix, the plain name.
-pub fn mention(person: &Person) -> &str {
-    person.matrix_id.as_deref().unwrap_or(&person.display_name)
-}
-
 /// A person in a read-only view (`!plan`, `!next`, `!status`, `!groups`):
 /// a `[name](https://matrix.to/#/@user:server)` link, which the formatter
 /// renders as a user pill (clickable, avatar in Element and FluffyChat) but
@@ -209,6 +202,7 @@ mod tests {
         let split = Rhythm {
             every_weeks: Some(1),
             shift_starts: vec![0, 3],
+            ..Default::default()
         };
         // The Thu–Sun shift of this week hasn't started on Wednesday.
         assert_eq!(

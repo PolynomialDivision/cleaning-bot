@@ -1,15 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use matrix_sdk::{
-    ruma::{
-        events::{
-            relation::{Reply, Thread},
-            room::message::{
-                FileInfo, FileMessageEventContent, MessageType, Relation, RoomMessageEventContent,
-            },
-        },
-        OwnedEventId, OwnedUserId, UInt,
-    },
+    ruma::{events::room::message::RoomMessageEventContent, OwnedEventId, OwnedUserId},
     Room,
 };
 use mxbot_common::matrix_sdk;
@@ -98,6 +90,15 @@ pub async fn handle(
     let arg_strings = tokens;
     let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
 
+    if room.room_id() != ctx.room_id
+        && !ctx.admin_users.contains(sender)
+        && !private_command_allowed(cmd, &args)
+    {
+        return Ok(Some(format::intentional(format::mentionify(
+            "🏠 Use that command in the cleaning room.",
+        ))));
+    }
+
     // Update the sender's display name from Matrix on every command (lightweight).
     {
         let sender_mxid = sender.as_str().to_owned();
@@ -135,13 +136,26 @@ pub async fn handle(
         ("!plan", Some(n)) if n.parse::<usize>().is_ok() => {
             return cmd_cleanplan(ctx, sender, room, &args).await
         }
-        ("!plan", Some("remind")) => return cmd_remind(ctx, sender, room, rest).await,
-        ("!plan", Some("announce")) => return cmd_announceweek(ctx, sender, room).await,
+        ("!plan", Some("remind")) => {
+            let main = room
+                .client()
+                .get_room(&ctx.room_id)
+                .ok_or_else(|| anyhow::anyhow!("Cleaning room unavailable"))?;
+            return cmd_remind(ctx, sender, &main, rest).await;
+        }
+        ("!plan", Some("announce")) => {
+            let main = room
+                .client()
+                .get_room(&ctx.room_id)
+                .ok_or_else(|| anyhow::anyhow!("Cleaning room unavailable"))?;
+            return cmd_announceweek(ctx, sender, &main).await;
+        }
         ("!plan", Some("pdf")) => {
             return cmd_pdf(ctx, sender, room, rest, event_id, thread_root).await
         }
         ("!mygroups", _) => return cmd_mygroups(ctx, sender, room).await,
         ("!member", Some("welcome")) => return cmd_member_welcome(ctx, sender, room, rest).await,
+        ("!ical", Some("revoke")) => return cmd_icalrevoke(ctx, sender, rest).await,
         ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, room, rest).await,
         ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
         ("!member", Some("link")) => {
@@ -175,6 +189,7 @@ pub async fn handle(
         ("!leave", _) => cmd_leavefloor(ctx, sender, &args).await,
         ("!stats", _) => cmd_stats_overview(ctx, &args).await,
         ("!help", Some("admin")) => Ok(Some(admin_help_text())),
+        ("!help", Some("more")) => Ok(Some(more_help_text())),
         ("!help", _) => Ok(Some(help_text())),
 
         // ── Admin: plan ──
@@ -213,7 +228,9 @@ pub async fn handle(
     // patched in place, so it can never drift from the persisted domain state.
     if command_may_change_current_plan(cmd, sub) {
         let (year, week) = current_iso_week();
-        scheduler::refresh_pinned_plan(ctx, room, year, week).await;
+        if let Some(main) = room.client().get_room(&ctx.room_id) {
+            scheduler::refresh_pinned_plan(ctx, &main, year, week).await;
+        }
     }
 
     match reply {
@@ -292,7 +309,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
         }
         ("!stats", Some("fairness")) => with_sub(args[0], joined(rest)),
         ("!stats", _) => joined(args),
-        ("!ical", Some("reset")) => with_sub(args[0], joined(rest)),
+        ("!ical", Some("reset" | "revoke")) => with_sub(args[0], joined(rest)),
         ("!ical", _) => person_then_number(args),
         ("!groups", Some("remove")) => match rest.split_last() {
             Some((last, head)) if !head.is_empty() && last.eq_ignore_ascii_case("confirm") => {
@@ -354,23 +371,60 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
 const PLAN_USAGE: &str = "Usage: !plan [N] | !plan assign|unassign|skip|remind|announce|pdf|reset|import … (see !help admin)";
 const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person> · !member welcome <person>";
 
+/// What a resident may do in a verified private chat with the bot: their
+/// own turns, groups, completions and calendar, and the public plan —
+/// nothing about other people, nothing for admins (they have their own DM).
+pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
+    match cmd {
+        "!help" | "!mygroups" | "!join" | "!leave" | "!done" | "!undo" => true,
+        "!next" | "!myplan" | "!mycleaning" => {
+            args.is_empty() || (args.len() == 1 && args[0].parse::<usize>().is_ok())
+        }
+        // The plan and its PDF are public in the cleaning room anyway.
+        "!plan" => {
+            args.is_empty()
+                || (args.len() == 1 && args[0].parse::<usize>().is_ok())
+                || args[0].eq_ignore_ascii_case("pdf")
+        }
+        "!ical" => {
+            args.is_empty()
+                || (args.len() == 1
+                    && (matches!(args[0], "reset" | "revoke") || args[0].parse::<usize>().is_ok()))
+        }
+        _ => false,
+    }
+}
+
 fn help_text() -> String {
-    r#"🧹🧽 **Cleaning bot** ✨
-📅 **Your turns**
-!next [person] [N] · when you (or they) clean next
-!done [group] · mark yours done — or react ✅ on the plan
-!undo [group] · take a done mark back
-!takeover [group] [week N] · take a turn over yourself
-!swap @user [group] [week N] · ask someone to take yours
-📋 **The plan**
-!status · this week, done or open
-!plan [N] · the next N weeks
-!groups [group] · groups, members, rooms
-!mygroups · join or leave groups
-💡 **More**
-!stats [person | group] · !ical · your calendar feed
-Admins: !help admin"#
-        .to_owned()
+    "🧹 **A little cleaning, a happier house** ✨\n\n\
+📅 !next · your next turn\n\
+📋 !plan · see the plan\n\
+👥 !mygroups · join or leave groups\n\
+✅ !done · done! (or ✅ on the plan)\n\
+🔄 !swap @user · ask for cover\n\
+🗓 !ical · your private calendar\n\
+📄 !plan pdf · printable plan\n\n\
+❓ !help more · !help admin"
+        .into()
+}
+
+fn more_help_text() -> String {
+    "🫧 **A little more help**\n\
+!status · this week's progress\n\
+!undo [group] · take your done mark back\n\
+!done <group> · mark a group you cleaned\n\
+!takeover [group] · take a turn over yourself\n\
+!swap @user [group] · ask someone to cover; they accept or reject\n\
+!join <group> · !leave <group> · without the number buttons\n\
+!groups [group] · groups, members, rooms\n\
+!stats · cleaning history\n\
+!plan pdf history · the past weeks as a PDF\n\
+!ical reset · a new private calendar link (the old one stops working)\n\n\
+👥 In !mygroups, tap a number to join that group — tap it again to leave. \
+✅ marks the groups you're in.\n\
+🔒 !next, !plan, !mygroups, !done and !ical also work in an encrypted private chat with me \
+— if I don't join when you invite me, ask an admin."
+        .into()
 }
 
 fn admin_help_text() -> String {
@@ -392,11 +446,11 @@ fn admin_help_text() -> String {
 !plan unassign <group> [slot] [week N] [on <day>]
 !plan reset <group> · redistribute future weeks from the rotation
 !plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
-!plan pdf [N] [group] · printable plan
+!plan pdf [history] [N] [group] · printable plan or history
 
 **Groups**
 !groups <group> · details: rhythm, turn order, slots, rooms, weights
-!groups rhythm <group> weekly | 2x | every 2 | mon thu · how often it is cleaned
+!groups rhythm <group> weekly | 2x | every 2 | mon-tue thu-fri · how often it is cleaned
 !groups add|enable|disable <group>
 !groups remove <group> [confirm] · deletes it with its history
 !groups slot add|remove <group> <slot>
@@ -404,7 +458,7 @@ fn admin_help_text() -> String {
 !groups weight <group> [room] <factor>
 
 **Other**
-!ical <person> [N] · !ical reset <person>
+!ical · !ical reset (own feed, privately) · !ical revoke [person]
 !validate · check the saved state for problems
 !admin · bot administration (verification, settings)"#
         .to_owned()

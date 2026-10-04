@@ -13,7 +13,10 @@ use mxbot_common::{
                 reaction::OriginalSyncReactionEvent,
                 room::{
                     member::{MembershipState, OriginalSyncRoomMemberEvent},
-                    message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+                    message::{
+                        MessageType, OriginalSyncRoomMessageEvent, Relation,
+                        RoomMessageEventContent,
+                    },
                     redaction::OriginalSyncRoomRedactionEvent,
                 },
             },
@@ -37,6 +40,8 @@ mod ical;
 mod onboarding;
 mod pdf;
 mod pdf_renderer;
+mod private;
+mod reactions;
 mod resolver;
 mod rhythm;
 mod schedule;
@@ -46,7 +51,7 @@ mod validate;
 mod view;
 
 use config::Config;
-use state::{MarkedDuty, ReactionDone, State};
+use state::State;
 
 /// Give every group without an explicit rhythm the old global
 /// `interval_weeks`. Returns whether anything changed.
@@ -68,6 +73,7 @@ fn thread_reply(text: &str, root: OwnedEventId, reply_to: OwnedEventId) -> RoomM
 #[derive(Clone)]
 pub struct BotContext {
     pub state: Arc<Mutex<State>>,
+    pub operations: Arc<Mutex<()>>,
     pub state_path: PathBuf,
     pub config: Arc<Config>,
     pub admin_users: HashSet<OwnedUserId>,
@@ -80,6 +86,33 @@ async fn main() -> Result<()> {
 
     let config: Config =
         mxbot_common::config::load_toml(&mxbot_common::config::config_path_from_args())?;
+    anyhow::ensure!(
+        config.schedule.timezone.parse::<chrono_tz::Tz>().is_ok(),
+        "Invalid schedule timezone"
+    );
+    anyhow::ensure!(
+        (1..=52).contains(&config.schedule.interval_weeks),
+        "interval_weeks must be 1–52"
+    );
+    anyhow::ensure!(
+        config.schedule.reminder_weekday < 7 && config.schedule.final_reminder_weekday < 7,
+        "Reminder weekdays must be 0–6"
+    );
+    anyhow::ensure!(
+        config.schedule.fill_strategy == config::FillStrategy::RoundRobin,
+        "least_loaded_first is not implemented; use round_robin"
+    );
+    anyhow::ensure!(
+        (1..=104).contains(&config.schedule.materialize_weeks),
+        "materialize_weeks must be 1–104"
+    );
+    if let Some(ical) = &config.ical_server {
+        if !ical.public_url.starts_with("https://") {
+            tracing::warn!(
+                "ical_server.public_url is not HTTPS — calendar feed tokens would travel in clear text"
+            );
+        }
+    }
     let config = Arc::new(config);
 
     // Must happen before any `current_iso_week()` call (materialize below,
@@ -161,6 +194,7 @@ async fn main() -> Result<()> {
     let bot_user_id = bot.user_id.clone();
 
     let ctx = BotContext {
+        operations: Arc::new(Mutex::new(())),
         state: state.clone(),
         state_path,
         config: Arc::clone(&config),
@@ -191,10 +225,10 @@ async fn main() -> Result<()> {
                     Dispatch::AdminDm => true,
                     Dispatch::Continue => false,
                 };
-                if !admin_dm && room.room_id() != ctx.room_id {
+                // Editing a message doesn't run its commands again.
+                if matches!(ev.content.relates_to, Some(Relation::Replacement(_))) {
                     return;
                 }
-
                 let MessageType::Text(ref text) = ev.content.msgtype else {
                     return;
                 };
@@ -207,11 +241,29 @@ async fn main() -> Result<()> {
                 if cmd_lines.is_empty() {
                     return;
                 }
+                // Outside the cleaning room: admins in their DM, or a resident
+                // in a verified private chat (see `private`) — checked only
+                // for commands, as it asks the server for both rooms' members.
+                let private = room.room_id() != ctx.room_id;
+                if private && !admin_dm && !private::authorized(&ctx, &room, &ev.sender).await {
+                    return;
+                }
+                let _operation = ctx.operations.lock().await;
 
                 let thread_root = thread_root(&ev);
 
                 let mut replies: Vec<RoomMessageEventContent> = Vec::new();
-                for line in cmd_lines {
+                for (index, line) in cmd_lines.into_iter().enumerate() {
+                    // A re-delivered message (sync after a restart) runs
+                    // each of its commands at most once.
+                    let key = format!("{}:{index}", ev.event_id);
+                    {
+                        let mut state = ctx.state.lock().await;
+                        if state.processed_commands.contains(&key) {
+                            continue;
+                        }
+                        state.active_command = Some(key.clone());
+                    }
                     match commands::handle(
                         &ctx,
                         &ev.sender,
@@ -227,11 +279,23 @@ async fn main() -> Result<()> {
                             format::mentionify("❌ This command requires admin privileges."),
                         ),
                         Ok(None) => {}
-                        Err(e) => error!("Command error: {e}"),
+                        Err(e) => {
+                            // Marked processed only if it already saved a change.
+                            ctx.state.lock().await.active_command = None;
+                            error!("Command error: {e}");
+                            continue;
+                        }
+                    }
+                    let mut state = ctx.state.lock().await;
+                    state.active_command = None;
+                    state.processed_commands.insert(key);
+                    if let Err(e) = state.save(&ctx.state_path).await {
+                        error!("Cannot persist command replay guard: {e}");
+                        return;
                     }
                 }
                 if !replies.is_empty() {
-                    let target = if admin_dm {
+                    let target = if private {
                         Some(room.clone())
                     } else {
                         client.get_room(&ctx.room_id)
@@ -253,16 +317,16 @@ async fn main() -> Result<()> {
                                 .join("\n\n");
                             format::mentionify(&joined)
                         };
-                        if !admin_dm {
+                        if !private {
                             content = in_thread(content, thread_root, ev.event_id.clone());
                         }
-                        r.send(content).await.ok();
+                        r.send(format::intentional(content)).await.ok();
                     }
                 }
-                if !admin_dm {
+                if !private {
                     onboarding::welcome_if_new(&ctx, &room, &ev.sender).await;
-                    onboarding::refresh_selectors(&ctx, &room).await;
                 }
+                onboarding::refresh_all_selectors(&ctx, &client).await;
             }
         }
     });
@@ -281,21 +345,39 @@ async fn main() -> Result<()> {
                 if room.state() != RoomState::Joined {
                     return;
                 }
-                if room.room_id() != ctx.room_id {
+                if room.room_id() != ctx.room_id
+                    && !private::authorized(&ctx, &room, &ev.sender).await
+                {
                     return;
                 }
+                let _operation = ctx.operations.lock().await;
 
+                if ctx
+                    .state
+                    .lock()
+                    .await
+                    .redacted_reactions
+                    .contains(ev.event_id.as_str())
+                {
+                    return;
+                }
                 let reacted_to = ev.content.relates_to.event_id.to_string();
                 let emoji_key = ev.content.relates_to.key.clone();
                 let sender_mxid = ev.sender.as_str().to_owned();
 
                 // A first reaction here is a first visit too.
-                onboarding::welcome_if_new(&ctx, &room, &ev.sender).await;
+                if room.room_id() == ctx.room_id {
+                    onboarding::welcome_if_new(&ctx, &room, &ev.sender).await;
+                }
 
                 // ── Group selector tap ────────────────────────────────────────
                 {
                     let mut state = ctx.state.lock().await;
-                    if state.group_selectors.contains_key(&reacted_to) {
+                    if state
+                        .group_selectors
+                        .get(&reacted_to)
+                        .is_some_and(|s| onboarding::in_room(s, room.room_id(), &ctx))
+                    {
                         let reply = onboarding::tap(
                             &ctx,
                             &mut state,
@@ -304,15 +386,22 @@ async fn main() -> Result<()> {
                             &sender_mxid,
                             &emoji_key,
                         );
-                        if let Err(e) = state.save(&ctx.state_path).await {
-                            tracing::error!("Failed to save after a group selector tap: {e}");
-                        }
+                        let saved = match state.save(&ctx.state_path).await {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::error!("Failed to save after a group selector tap: {e}");
+                                false
+                            }
+                        };
+                        let recorded = state.group_selectors.get(&reacted_to).is_some_and(|s| {
+                            s.taps.get(ev.event_id.as_str()).is_some_and(|t| !t.undone)
+                        });
                         drop(state);
                         match reply {
-                            Ok(Some(text)) => {
+                            Ok(Some(_)) => {
+                                // The answer is edited into the selector itself.
+                                onboarding::refresh_all_selectors(&ctx, &client).await;
                                 if let Some(r) = client.get_room(&ctx.room_id) {
-                                    onboarding::reply_to_tap(&r, &reacted_to, &text).await;
-                                    onboarding::refresh_selectors(&ctx, &r).await;
                                     let (year, week) = state::current_iso_week();
                                     scheduler::refresh_pinned_plan(&ctx, &r, year, week).await;
                                 }
@@ -320,88 +409,67 @@ async fn main() -> Result<()> {
                             Ok(None) => {}
                             Err(e) => tracing::error!("Group selector tap failed: {e}"),
                         }
+                        // Only once the tap is safely saved: take the
+                        // reaction away, so the same number can be tapped
+                        // again. Never an undo — see the redaction handler.
+                        if saved && recorded {
+                            onboarding::consume_tap(&room, &ev.event_id, &bot_user_id).await;
+                        }
                         return;
                     }
                 }
 
-                if emoji_key != "✅" {
+                if room.room_id() != ctx.room_id || emoji_key != "✅" {
                     return;
                 }
 
-                let mut state = ctx.state.lock().await;
-
                 // ── Consolidated weekly plan reaction ─────────────────────────
-                if let Some((plan_year, plan_week)) =
-                    state.weekly_plan_event_ids.get(&reacted_to).copied()
-                {
-                    let new_pid = uuid::Uuid::new_v4().to_string();
-                    if let Err(e) = state.apply_event(analytics::DomainEvent::PersonCreated {
-                        person_id: new_pid,
-                        display_name: sender_mxid.clone(),
-                        matrix_id: Some(sender_mxid.clone()),
-                    }) {
-                        tracing::error!("PersonCreated failed in plan reaction: {e}");
-                        return;
-                    }
-                    let sender_person_id = state
-                        .person_by_matrix_id(&sender_mxid)
-                        .map(|p| p.id.clone())
-                        .unwrap_or_else(|| sender_mxid.clone());
-
-                    // The sender's own open turns of that week that have
-                    // started (or the next one) — same rule as `!done`.
-                    let duties = commands::markable_duties(
-                        &state,
-                        &sender_person_id,
-                        (plan_year, plan_week),
-                        None,
-                    );
-                    let root_eid = ev.content.relates_to.event_id.clone();
-
-                    if duties.is_empty() {
+                let mut state = ctx.state.lock().await;
+                // ✅ on the plan — or on one of that week's reminders.
+                let Some(plan_week) = state
+                    .weekly_plan_event_ids
+                    .get(&reacted_to)
+                    .copied()
+                    .or_else(|| {
+                        state
+                            .reminder_messages
+                            .get(&reacted_to)
+                            .map(|r| (r.iso_year, r.iso_week))
+                    })
+                else {
+                    return;
+                };
+                match reactions::plan_done(
+                    &mut state,
+                    ev.event_id.as_str(),
+                    &sender_mxid,
+                    plan_week,
+                ) {
+                    Ok(reactions::PlanDone::Seen) => {}
+                    Ok(reactions::PlanDone::NothingOpen) => {
                         drop(state);
+                        let root = ev.content.relates_to.event_id.clone();
                         if let Some(r) = client.get_room(&ctx.room_id) {
                             r.send(thread_reply(
-                                "You are not assigned to any open item in this plan.",
-                                root_eid.clone(),
-                                root_eid,
+                                "You have no open turn this week — nothing to mark.",
+                                root.clone(),
+                                root,
                             ))
                             .await
                             .ok();
                         }
-                        return;
                     }
-
-                    if let Err(e) =
-                        commands::mark_duties_done(&mut state, &sender_person_id, &duties)
-                    {
-                        tracing::error!("Marking plan reaction done failed: {e}");
+                    Ok(reactions::PlanDone::Marked) => {
+                        if let Err(e) = state.save(&ctx.state_path).await {
+                            tracing::error!("Failed to save after plan reaction: {e}");
+                        }
+                        drop(state);
+                        if let Some(r) = client.get_room(&ctx.room_id) {
+                            let (year, week) = plan_week;
+                            scheduler::refresh_pinned_plan(&ctx, &r, year, week).await;
+                        }
                     }
-                    state.reaction_dones.insert(
-                        ev.event_id.to_string(),
-                        ReactionDone {
-                            group_id: duties[0].group.id.clone(),
-                            completed_by_id: sender_person_id.clone(),
-                            iso_year: plan_year,
-                            iso_week: plan_week,
-                            marked: duties
-                                .iter()
-                                .map(|d| MarkedDuty {
-                                    group_id: d.group.id.clone(),
-                                    slot_id: d.group.slots.get(d.slot_index).map(|s| s.id.clone()),
-                                    shift: d.turn.shift,
-                                })
-                                .collect(),
-                        },
-                    );
-                    if let Err(e) = state.save(&ctx.state_path).await {
-                        tracing::error!("Failed to save after plan reaction: {e}");
-                    }
-                    drop(state);
-
-                    if let Some(r) = client.get_room(&ctx.room_id) {
-                        scheduler::refresh_pinned_plan(&ctx, &r, plan_year, plan_week).await;
-                    }
+                    Err(e) => tracing::error!("Marking plan reaction done failed: {e}"),
                 }
             }
         }
@@ -410,69 +478,55 @@ async fn main() -> Result<()> {
     // ── Redaction handler (undo a ✅ or a group selector tap) ──────────────────────────────────
     client.add_event_handler({
         let ctx = ctx.clone();
+        let bot_user_id = bot_user_id.clone();
         move |ev: OriginalSyncRoomRedactionEvent, room: Room, client: Client| {
             let ctx = ctx.clone();
+            let bot_user_id = bot_user_id.clone();
             async move {
+                // The bot's own redactions only clear consumed selector
+                // taps (`onboarding::consume_tap`) — never an undo.
+                if ev.sender == bot_user_id {
+                    return;
+                }
                 if room.state() != RoomState::Joined {
                     return;
                 }
-                if room.room_id() != ctx.room_id {
+                if room.room_id() != ctx.room_id
+                    && !private::authorized(&ctx, &room, &ev.sender).await
+                {
                     return;
                 }
+                let _operation = ctx.operations.lock().await;
 
-                let redacted_id = match &ev.redacts {
+                let redacted_id = match ev.content.redacts.as_ref().or(ev.redacts.as_ref()) {
                     Some(id) => id.to_string(),
                     None => return,
                 };
                 let mut state = ctx.state.lock().await;
-
-                // A group selector tap taken back: undo it.
-                match onboarding::untap(&ctx, &mut state, &redacted_id) {
-                    Ok(None) => {}
-                    Ok(Some((selector_id, text))) => {
-                        if let Err(e) = state.save(&ctx.state_path).await {
-                            tracing::error!(
-                                "Failed to save after undoing a group selector tap: {e}"
-                            );
-                        }
-                        drop(state);
-                        if let Some(r) = client.get_room(&ctx.room_id) {
-                            onboarding::reply_to_tap(&r, &selector_id, &text).await;
-                            onboarding::refresh_selectors(&ctx, &r).await;
-                            let (year, week) = state::current_iso_week();
-                            scheduler::refresh_pinned_plan(&ctx, &r, year, week).await;
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::error!("Undoing a group selector tap failed: {e}");
-                        return;
-                    }
+                let outcome = reactions::redaction(
+                    &ctx,
+                    &mut state,
+                    room.room_id(),
+                    ev.sender.as_str(),
+                    &redacted_id,
+                );
+                if outcome == reactions::Redaction::Refused {
+                    return;
                 }
-
-                let rd = match state.reaction_dones.remove(&redacted_id) {
-                    Some(rd) => rd,
-                    None => return,
-                };
-
-                let removed = match commands::undo_reaction_done(&mut state, &rd) {
-                    Ok(changed) => changed,
-                    Err(e) => {
-                        tracing::error!("Undoing a ✅ reaction failed: {e}");
-                        false
-                    }
-                };
-
                 if let Err(e) = state.save(&ctx.state_path).await {
-                    tracing::error!("Failed to save after reaction removal: {e}");
+                    error!("Failed to save after a redaction: {e}");
                 }
-
-                if removed {
-                    let (undo_year, undo_week) = (rd.iso_year, rd.iso_week);
-                    drop(state);
-                    if let Some(r) = client.get_room(&ctx.room_id) {
-                        scheduler::refresh_pinned_plan(&ctx, &r, undo_year, undo_week).await;
+                drop(state);
+                let refresh = match outcome {
+                    reactions::Redaction::TapUndone => {
+                        onboarding::refresh_all_selectors(&ctx, &client).await;
+                        Some(state::current_iso_week())
                     }
+                    reactions::Redaction::DoneUndone { year, week } => Some((year, week)),
+                    _ => None,
+                };
+                if let (Some((year, week)), Some(r)) = (refresh, client.get_room(&ctx.room_id)) {
+                    scheduler::refresh_pinned_plan(&ctx, &r, year, week).await;
                 }
             }
         }
@@ -501,6 +555,7 @@ async fn main() -> Result<()> {
                 {
                     return; // a profile change, not a join
                 }
+                let _operation = ctx.operations.lock().await;
                 onboarding::welcome_if_new(&ctx, &room, &ev.state_key).await;
             }
         }
@@ -525,10 +580,12 @@ async fn main() -> Result<()> {
     // this can never race a concurrent refresh/announce/tick for the same
     // week. A failure here is logged but never prevents startup.
     scheduler::reconcile_on_startup(&ctx, &client).await;
-    // Group selectors catch up with anything that changed while down.
+    // Of the bot's messages, only the newest plan stays pinned.
     if let Some(room) = client.get_room(&ctx.room_id) {
-        onboarding::refresh_selectors(&ctx, &room).await;
+        scheduler::tidy_pins_on_startup(&ctx, &room).await;
     }
+    // Group selectors catch up with anything that changed while down.
+    onboarding::refresh_all_selectors(&ctx, &client).await;
 
     tokio::spawn(scheduler::run(ctx, client.clone()));
 

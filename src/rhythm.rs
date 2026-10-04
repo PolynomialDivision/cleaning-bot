@@ -2,11 +2,16 @@
 //!
 //! Every group has a `Rhythm`: it is due every `every_weeks` weeks (aligned
 //! to the tracking start), and each due week is split into one or more
-//! consecutive **shifts** — e.g. one shift for the whole week (the classic
-//! model), or Mon–Wed + Thu–Sun for "twice a week". One shift of one due
-//! week is a `Turn`: the unit everything else works with — one person per
-//! turn (and slot) is responsible, gets reminded, marks it done, can swap
-//! it, take it over, and is counted in stats.
+//! **shifts** — e.g. one shift for the whole week (the classic model), or
+//! the windows Mon–Tue + Thu–Fri for "twice a week" (`2x`), with the days
+//! between free. One shift of one due week is a `Turn`: the unit everything
+//! else works with — one person per turn (and slot) is responsible, gets
+//! reminded, marks it done, can swap it, take it over, and is counted in
+//! stats. A window only says when a turn is due; nothing stops a late
+//! cleaning from landing right before the next one.
+//!
+//! A rhythm change applies from the next week on; the versions before it
+//! stay in `previous`, so past and running weeks keep their days.
 //!
 //! Stored records keep their ISO year/week fields and add a `shift` index
 //! defaulting to 0, so data from before rhythms existed reads as shift 0 of
@@ -30,6 +35,20 @@ pub struct Rhythm {
     /// (the last until Sunday). Empty = one shift for the whole week.
     #[serde(default)]
     pub shift_starts: Vec<u8>,
+    /// Last weekday of each shift, for explicit windows with free days in
+    /// between (`2x` = Mon–Tue + Thu–Fri). Empty = each shift runs until
+    /// the next one starts, as rhythms stored before windows existed do —
+    /// those keep their Mon–Wed / Thu–Sun.
+    #[serde(default)]
+    pub shift_ends: Vec<u8>,
+    /// Monday from which this rhythm applies (a change starts next week);
+    /// `None` = always. Earlier weeks use `previous`.
+    #[serde(default)]
+    pub effective_from: Option<NaiveDate>,
+    /// The versions before this one, oldest first, each with its own
+    /// `effective_from` and no history of its own.
+    #[serde(default)]
+    pub previous: Vec<Rhythm>,
 }
 
 /// One shift of a week: weekdays `start..=end` (0 = Monday).
@@ -54,10 +73,41 @@ impl Shift {
 }
 
 impl Rhythm {
+    /// The rhythm in force on `date`: this one from `effective_from` on,
+    /// before that the `previous` version that was — so a change never
+    /// rewrites past or running weeks.
+    pub fn at(&self, date: NaiveDate) -> &Self {
+        if self.effective_from.is_some_and(|from| date < from) {
+            if let Some(previous) = self
+                .previous
+                .iter()
+                .rev()
+                .find(|r| r.effective_from.is_none_or(|from| from <= date))
+            {
+                return previous;
+            }
+        }
+        self
+    }
+
+    /// The rhythm in force in ISO week `year`/`week` (from its Monday).
+    pub fn for_week(&self, year: i32, week: u32) -> &Self {
+        self.at(week_monday(year, week))
+    }
+
+    /// Whether `weekday` (0 = Monday) lies in one of the shifts — with
+    /// explicit windows (`mon-tue thu-fri`) some days are free.
+    pub fn contains_weekday(&self, weekday: u8) -> bool {
+        self.shifts()
+            .iter()
+            .any(|s| s.start <= weekday && weekday <= s.end)
+    }
+
     pub fn weekly() -> Self {
         Rhythm {
             every_weeks: Some(1),
             shift_starts: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -83,7 +133,12 @@ impl Rhythm {
             .enumerate()
             .map(|(i, &start)| Shift {
                 start,
-                end: starts.get(i + 1).map_or(6, |next| next - 1),
+                end: self
+                    .shift_ends
+                    .get(i)
+                    .copied()
+                    .filter(|end| *end >= start && *end < 7)
+                    .unwrap_or_else(|| starts.get(i + 1).map_or(6, |next| next - 1)),
             })
             .collect()
     }
@@ -93,7 +148,7 @@ impl Rhythm {
     }
 
     pub fn is_split(&self) -> bool {
-        self.shift_count() > 1
+        self.shifts() != [Shift { start: 0, end: 6 }]
     }
 
     pub fn shift(&self, index: u8) -> Option<Shift> {
@@ -115,6 +170,20 @@ impl Rhythm {
         (0..n).map(|i| (i * 7 / n) as u8).collect()
     }
 
+    /// `describe` as of `today`, with a change set for a later week:
+    /// "weekly · from week 42: 2× per week (Mon–Tue, Thu–Fri)".
+    pub fn describe_on(&self, today: NaiveDate) -> String {
+        match self.effective_from.filter(|from| *from > today) {
+            Some(from) => format!(
+                "{} · from week {}: {}",
+                self.at(today).describe(),
+                from.iso_week().week(),
+                self.describe()
+            ),
+            None => self.describe(),
+        }
+    }
+
     /// "weekly", "every 2 weeks", "2× per week (Mon–Wed, Thu–Sun)", …
     pub fn describe(&self) -> String {
         let every = match self.every_weeks() {
@@ -122,7 +191,7 @@ impl Rhythm {
             n => Some(format!("every {n} weeks")),
         };
         let shifts = self.shifts();
-        if shifts.len() == 1 {
+        if shifts.len() == 1 && !self.is_split() {
             return every.unwrap_or_else(|| "weekly".to_owned());
         }
         let labels = shifts
@@ -157,6 +226,7 @@ impl Turn {
     /// First and last day of this turn under `rhythm`.
     pub fn dates(&self, rhythm: &Rhythm) -> (NaiveDate, NaiveDate) {
         let monday = week_monday(self.year, self.week);
+        let rhythm = rhythm.at(monday);
         let shift = rhythm
             .shift(self.shift)
             .unwrap_or(Shift { start: 0, end: 6 });
@@ -169,6 +239,7 @@ impl Turn {
     /// Weekday label within the week ("Mon–Wed"), or `None` for a
     /// whole-week rhythm where the week alone says everything.
     pub fn shift_label(&self, rhythm: &Rhythm) -> Option<String> {
+        let rhythm = rhythm.for_week(self.year, self.week);
         if rhythm.is_split() {
             rhythm.shift(self.shift).map(|s| s.label())
         } else {
@@ -246,6 +317,7 @@ mod tests {
         let r = Rhythm {
             every_weeks: Some(1),
             shift_starts: Rhythm::times_per_week(2),
+            ..Default::default()
         };
         assert_eq!(
             r.shifts(),
@@ -268,6 +340,7 @@ mod tests {
         let r = Rhythm {
             every_weeks: Some(2),
             shift_starts: vec![4],
+            ..Default::default()
         };
         assert_eq!(
             r.shifts(),

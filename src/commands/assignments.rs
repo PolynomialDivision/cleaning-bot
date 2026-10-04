@@ -204,7 +204,7 @@ pub(crate) fn parse_iso_week_token(s: &str) -> Option<(i32, u32, Option<u8>)> {
         .or_else(|| week_part.split_once("-w"))?;
     let year: i32 = y.parse().ok()?;
     let week: u32 = w.parse().ok()?;
-    (1..=53).contains(&week).then_some((year, week, day))
+    chrono::NaiveDate::from_isoywd_opt(year, week, chrono::Weekday::Mon).map(|_| (year, week, day))
 }
 
 pub(crate) struct PlannedImport {
@@ -625,7 +625,7 @@ pub(crate) async fn cmd_undo(
             continue;
         }
 
-        let shared = group.is_multi_slot() || group.rhythm.is_split();
+        let shared = group.is_multi_slot() || group.rhythm.for_week(year, week).is_split();
         if !shared || (is_admin && explicit) {
             // The whole week of the group.
             let marked = state
@@ -1065,7 +1065,7 @@ pub(crate) async fn cmd_remind(
     require_admin(ctx, sender)?;
     let (year, week) = current_iso_week();
 
-    let (msg, mxids, reply_to_plan, names) = {
+    let turns = {
         let state = ctx.state.lock().await;
         let groups: Vec<CleaningGroup> = match args.first() {
             Some(name) => match state.group_by_name(name) {
@@ -1083,89 +1083,48 @@ pub(crate) async fn cmd_remind(
                 .cloned()
                 .collect(),
         };
-
-        let mut lines = vec![format!("🔔 **Reminder · Week {week}**")];
-        let mut mxids: Vec<String> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
+        // Per group: its open turns that have started — or else its next one.
+        let mut chosen: Vec<(GroupId, u8)> = Vec::new();
         for group in &groups {
-            let turns: Vec<Turn> = state
+            let open: Vec<Turn> = state
                 .turns_in_week(group, year, week)
                 .into_iter()
                 .filter(|t| !state.is_turn_done(group, *t) && !state.turn_over(group, *t))
                 .collect();
-            let started: Vec<Turn> = turns
+            let started: Vec<Turn> = open
                 .iter()
                 .copied()
                 .filter(|t| state.turn_started(group, *t))
                 .collect();
-            let chosen = if started.is_empty() {
-                turns.into_iter().take(1).collect()
+            let turns = if started.is_empty() {
+                open.into_iter().take(1).collect()
             } else {
                 started
             };
-            for turn in chosen {
-                for (slot_index, assignee) in state.turn_assignees(group, turn) {
-                    if state.is_turn_slot_done(group, slot_index, turn) {
-                        continue;
-                    }
-                    let who = assignee
-                        .map(|p| person_key(p).to_owned())
-                        .unwrap_or_else(|| "(nobody assigned)".into());
-                    if let Some(m) = assignee.and_then(|p| p.matrix_id.clone()) {
-                        mxids.push(m);
-                    }
-                    let label = Duty {
-                        group: group.clone(),
-                        slot_index,
-                        turn,
-                    }
-                    .label();
-                    let rooms = match group.slots.get(slot_index) {
-                        Some(slot) => &slot.room_names,
-                        None => &group.room_names,
-                    };
-                    lines.push(format!("⬜ **{label}** · {who}"));
-                    if !rooms.is_empty() {
-                        lines.push(format!(
-                            "{}{}",
-                            crate::view::INDENT,
-                            crate::view::rooms(rooms)
-                        ));
-                    }
-                    names.push(label);
-                }
-            }
+            chosen.extend(turns.into_iter().map(|t| (group.id.clone(), t.shift)));
         }
-        let week_key = format!("{year}-W{week:02}");
-        (
-            lines.join("\n"),
-            mxids,
-            state.weekly_plan_canonical.get(&week_key).cloned(),
-            names,
-        )
+        chosen
     };
-
-    if names.is_empty() {
+    if turns.is_empty() {
         return Ok(Some(format::mentionify(
             "✅ Nothing due and uncleaned right now.",
         )));
     }
-
-    let uid_refs: Vec<&str> = mxids.iter().map(String::as_str).collect();
-    let fetched = format::fetch_names(room, &uid_refs).await;
-    let parsed: Vec<matrix_sdk::ruma::OwnedUserId> =
-        mxids.iter().filter_map(|s| s.parse().ok()).collect();
-    let mut content = format::mentionify_with_names(&msg, &fetched)
-        .add_mentions(matrix_sdk::ruma::events::Mentions::with_user_ids(parsed));
-    if let Some(plan_eid) = reply_to_plan.and_then(|e| e.parse::<OwnedEventId>().ok()) {
-        content.relates_to = Some(Relation::Reply(Reply::with_event_id(plan_eid)));
-    }
-    if let Err(e) = room.send(content).await {
-        tracing::warn!("!plan remind send failed: {e}");
-        return Ok(Some(format::mentionify("❌ Sending the reminder failed.")));
-    }
-    Ok(Some(format::mentionify(&format!(
-        "✅ Reminder sent for: {}",
-        names.join(", ")
-    ))))
+    let sent = crate::scheduler::send_reminder(
+        ctx,
+        room,
+        crate::state::ReminderNote::StillOpen,
+        (year, week),
+        turns,
+        None,
+    )
+    .await;
+    Ok(Some(format::mentionify(match sent {
+        Ok(Some(_)) => "✅ Reminder sent.",
+        Ok(None) => "⚠️ Nobody is assigned to the open turns — !plan assign.",
+        Err(e) => {
+            tracing::warn!("!plan remind send failed: {e}");
+            "❌ Sending the reminder failed."
+        }
+    })))
 }

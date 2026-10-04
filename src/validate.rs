@@ -100,6 +100,29 @@ pub fn validate_state(state: &State) -> ValidationReport {
         if g.member_ids.is_empty() {
             warnings.push(format!("Group «{}» has no members", g.name));
         }
+        let duties = g.slots.len().max(1) * g.rhythm.shift_count();
+        if g.is_active && g.member_ids.len() < duties {
+            warnings.push(format!("Group «{}» has {} duties per due week but {} members; some duties remain unassigned (one automatic duty per person per week).", g.name, duties, g.member_ids.len()));
+        }
+        if !g.rhythm.shift_ends.is_empty()
+            && (g.rhythm.shift_ends.len() != g.rhythm.shift_starts.len()
+                || g.rhythm
+                    .shift_starts
+                    .iter()
+                    .zip(&g.rhythm.shift_ends)
+                    .any(|(start, end)| start > end || *end > 6)
+                || g.rhythm
+                    .shift_starts
+                    .iter()
+                    .skip(1)
+                    .zip(&g.rhythm.shift_ends)
+                    .any(|(start, end)| start <= end))
+        {
+            errors.push(format!(
+                "Group «{}» has invalid or overlapping cleaning windows",
+                g.name
+            ));
+        }
         // Slot validation
         let mut seen_slot_ids = HashSet::new();
         for slot in &g.slots {

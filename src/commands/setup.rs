@@ -345,8 +345,8 @@ pub(crate) async fn apply_linkmatrix(
     let mut state = ctx.state.lock().await;
 
     // Auto-merge: if the MXID belongs to a stub person created on their own (the
-    // group selector, !join, a ✅) with no cleaning history, remove it so the
-    // link can proceed cleanly.
+    // group selector, !join, a ✅, !ical) with no cleaning history, remove it so
+    // the link can proceed cleanly.
     if let Some(stub_id) = state.person_by_matrix_id(mxid).map(|p| p.id.clone()) {
         let has_history = state
             .completions
@@ -369,6 +369,14 @@ pub(crate) async fn apply_linkmatrix(
                 group_id: gid.clone(),
             })?;
             apply_group_departure(ctx, &mut state, &stub_id, gid)?;
+        }
+        // Same Matrix user: their calendar link keeps working.
+        for token in state
+            .calendar_tokens
+            .iter_mut()
+            .filter(|t| t.person_id == stub_id)
+        {
+            token.person_id = person_id.clone();
         }
         state.persons.retain(|p| p.id != stub_id);
     }
@@ -420,6 +428,7 @@ pub(crate) async fn cmd_addfloor(
             rhythm: crate::rhythm::Rhythm {
                 every_weeks: Some(every),
                 shift_starts: Vec::new(),
+                ..Default::default()
             },
         })?;
     }
@@ -930,17 +939,23 @@ pub(crate) async fn cmd_back(
 // ── Admin: !groups rhythm <group> [weekly | <N>x | every <N> | <days…>] ──────
 //
 // How often a group is cleaned. `2x` splits every due week into two shifts
-// (Mon–Wed, Thu–Sun), each with its own person from the rotation; `every 2`
-// cleans every second week; weekdays set the shift starts explicitly
-// (`mon thu`, Monday always starts one). Parts combine: `every 2 2x`.
+// (Mon–Tue, Thu–Fri, the other days free), each with its own person from
+// the rotation; `every 2` cleans every second week; windows set the shifts
+// explicitly (`mon-tue thu-fri`, the first starting Monday), plain weekdays
+// set where back-to-back shifts start (`mon thu` = Mon–Wed, Thu–Sun). Parts
+// combine with the rhythm set last: `every 2 2x`, or `weekly every 2` to
+// start afresh. A change applies from next week; one set for next week can
+// still be replaced. Changes that would move an imported, assigned or done
+// turn are refused.
 
 pub(crate) async fn cmd_groups_rhythm(
     ctx: &BotContext,
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<String>> {
-    let usage = "Usage: !groups rhythm <group> weekly | <N>x | every <N> | <weekdays…>  \
-                 (e.g. `2x` = Mon–Wed + Thu–Sun, `every 2`, `mon thu`)";
+    let usage =
+        "Usage: !groups rhythm <group> weekly | <N>x | every <N> | <day-day…> | <weekdays…>  \
+                 (e.g. `2x` = Mon–Tue + Thu–Fri, `every 2`, `mon-tue thu-fri`, `mon thu`)";
     let Some((&group_name, spec)) = args.split_first() else {
         return Ok(Some(usage.into()));
     };
@@ -952,7 +967,7 @@ pub(crate) async fn cmd_groups_rhythm(
         return Ok(Some(format!(
             "«{}» is cleaned {}.\n{usage}",
             group.name,
-            group.rhythm.describe()
+            group.rhythm.describe_on(crate::state::today())
         )));
     }
     require_admin(ctx, sender)?;
@@ -970,12 +985,14 @@ pub(crate) async fn cmd_groups_rhythm(
             rhythm.describe()
         )));
     }
-    apply_rhythm_change(ctx, &mut state, &group.id, rhythm.clone())?;
+    if let Err(e) = apply_rhythm_change(ctx, &mut state, &group.id, rhythm.clone()) {
+        return Ok(Some(format!("⚠️ {e}")));
+    }
     let next = next_assignment_summary(&state, &group.id);
     state.save(&ctx.state_path).await?;
     Ok(Some(format!(
-        "✅ «{}» is now cleaned {}.\n\
-         This week's existing turns are kept; later weeks were re-planned from the rotation.\n{next}",
+        "✅ «{}» will be cleaned {} from next week.\n\
+         This week's dates and duties stay unchanged; future rotation turns were re-planned.\n{next}",
         group.name,
         rhythm.describe()
     )))
@@ -988,8 +1005,11 @@ pub(crate) fn parse_rhythm(
     spec: &[&str],
 ) -> std::result::Result<crate::rhythm::Rhythm, String> {
     let mut rhythm = current.clone();
+    rhythm.previous.clear();
+    rhythm.effective_from = None;
     rhythm.every_weeks = Some(current.every_weeks());
     let mut days: Vec<u8> = Vec::new();
+    let mut windows = Vec::new();
     let mut i = 0;
     while i < spec.len() {
         let token = spec[i].to_ascii_lowercase();
@@ -997,6 +1017,7 @@ pub(crate) fn parse_rhythm(
             rhythm = crate::rhythm::Rhythm::weekly();
         } else if token == "daily" {
             rhythm.shift_starts = crate::rhythm::Rhythm::times_per_week(7);
+            rhythm.shift_ends.clear();
         } else if token == "every" {
             let n: u32 = spec
                 .get(i + 1)
@@ -1020,6 +1041,14 @@ pub(crate) fn parse_rhythm(
                 return Err("Between 1x and 7x per week.".into());
             }
             rhythm.shift_starts = crate::rhythm::Rhythm::times_per_week(n);
+            rhythm.shift_ends = if n == 2 { vec![1, 4] } else { Vec::new() };
+        } else if let Some((start, end)) = token.split_once('-') {
+            let start = parse_weekday(start).ok_or("Unknown window start day")?;
+            let end = parse_weekday(end).ok_or("Unknown window end day")?;
+            if end < start {
+                return Err("Windows cannot wrap across weeks.".into());
+            }
+            windows.push((start, end));
         } else if let Some(day) = parse_weekday(&token) {
             days.push(day);
         } else {
@@ -1027,13 +1056,22 @@ pub(crate) fn parse_rhythm(
         }
         i += 1;
     }
+    if !windows.is_empty() {
+        windows.sort_unstable();
+        if !days.is_empty() || windows[0].0 != 0 || windows.windows(2).any(|w| w[0].1 >= w[1].0) {
+            return Err("Use non-overlapping windows, starting on Monday: mon-tue thu-fri.".into());
+        }
+        rhythm.shift_starts = windows.iter().map(|w| w.0).collect();
+        rhythm.shift_ends = windows.iter().map(|w| w.1).collect();
+    }
     if !days.is_empty() {
         days.push(0);
         days.sort_unstable();
         days.dedup();
         rhythm.shift_starts = if days.len() == 1 { Vec::new() } else { days };
+        rhythm.shift_ends.clear();
     }
-    if rhythm.shift_count() == 1 {
+    if rhythm.shift_count() == 1 && rhythm.shift_ends.is_empty() {
         rhythm.shift_starts = Vec::new();
     }
     Ok(rhythm)

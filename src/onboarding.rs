@@ -8,27 +8,31 @@
 //! posts a fresh selector (without the intro) any time.
 //!
 //! Each tap on a number toggles that group — join if they're not in it,
-//! leave if they are — so it works the same however they got in. Taking
-//! the reaction back undoes exactly that tap (when it still applies). The
-//! selector is edited to show the new state, and a short confirmation
-//! replies to it. Every tap is recorded by its reaction event ID, so a
-//! re-delivered event counts once, also across restarts.
+//! leave if they are — so it works the same however they got in. The
+//! selector is edited to show the new state, with a one-line confirmation
+//! (or why not) in it; no extra message. Once the tap is saved the bot
+//! redacts the reaction (`consume_tap`), so the same number can be tapped
+//! again. Without the power to do that the reaction stays, and taking it
+//! back by hand undoes exactly that tap (when it still applies). Every tap
+//! is recorded by its reaction event ID, so a re-delivered event counts
+//! once, also across restarts.
+//!
+//! A selector belongs to one user and one room: the cleaning room, or a
+//! verified private chat (`private`) — the only place a calendar feed link
+//! is ever shown.
 
 use anyhow::Result;
-use mxbot_common::{
-    matrix_sdk::{
-        ruma::{
-            events::{
-                reaction::ReactionEventContent,
-                relation::Annotation,
-                room::message::{ReplacementMetadata, RoomMessageEventContent},
-                Mentions,
-            },
-            OwnedEventId, OwnedUserId,
+use mxbot_common::matrix_sdk::{
+    ruma::{
+        events::{
+            reaction::ReactionEventContent,
+            relation::Annotation,
+            room::message::{ReplacementMetadata, RoomMessageEventContent},
+            Mentions,
         },
-        Room,
+        OwnedEventId, OwnedUserId, RoomId,
     },
-    send::in_thread,
+    Room,
 };
 
 use crate::{
@@ -77,10 +81,22 @@ pub fn new_selector(state: &State, user_id: &str, welcome: bool) -> GroupSelecto
 /// Tap a number to join or leave a group:
 /// 1️⃣ ✅ **2nd Floor**
 /// 2️⃣ 3+4 Floor
+/// ✅ Joined **2nd Floor**
 ///
-/// !mygroups brings this back anytime.
+/// 📅 Next: 2nd Floor · 5 – 11 Oct
+/// 🗓 Your calendar: send !ical to @bot in a private chat
+/// !mygroups reopens this · !join / !leave · !help
 /// ```
 pub fn selector_text(state: &State, selector: &GroupSelector) -> String {
+    selector_text_with(state, selector, &crate::schedule::build_schedule(state, 52))
+}
+
+/// `selector_text` with the schedule already built — one for many selectors.
+fn selector_text_with(
+    state: &State,
+    selector: &GroupSelector,
+    schedule: &crate::schedule::ScheduleSnapshot,
+) -> String {
     let person = state.person_by_matrix_id(&selector.user_id);
     let mut lines = Vec::new();
     let tap_line = if selector.welcome {
@@ -111,22 +127,72 @@ pub fn selector_text(state: &State, selector: &GroupSelector) -> String {
             format!("{number} {}{paused}", group.name)
         });
     }
+    if state.cleaning_groups.iter().filter(|g| g.is_active).count() > NUMBERS.len() {
+        choices.push("More groups: !groups · !join <group>".into());
+    }
     if choices.is_empty() {
         lines.push("There are no cleaning groups yet — an admin will set them up.".into());
     } else {
         lines.push(tap_line);
         lines.extend(choices);
     }
-    if selector.welcome {
-        lines.push(String::new());
-        lines.push("!mygroups brings this back anytime.".into());
+    if let Some(feedback) = current_feedback(state, selector) {
+        lines.push(feedback.to_owned());
     }
+    lines.push(String::new());
+    if let Some(person) = person.filter(|p| {
+        state
+            .cleaning_groups
+            .iter()
+            .any(|g| g.member_ids.contains(&p.id))
+    }) {
+        let today = crate::state::today();
+        match schedule
+            .for_person(&person.id)
+            .into_iter()
+            .find(|a| !a.is_completed && a.end >= today)
+        {
+            Some(next) => lines.push(format!(
+                "📅 Next: {} · {}",
+                next.group_name, next.period_label
+            )),
+            None => lines.push("📅 No upcoming turn yet.".into()),
+        }
+    }
+    lines.push(match &selector.calendar_url {
+        Some(url) => format!("🗓 [Your calendar]({url}) · keep this link private"),
+        None => format!(
+            "🗓 Your calendar: send !ical to {} in a private chat",
+            selector
+                .contact_url
+                .as_deref()
+                .map_or_else(|| "me".to_owned(), |url| format!("[me]({url})"))
+        ),
+    });
+    lines.push("!mygroups reopens this · !join / !leave · !help".into());
     lines.join("\n")
+}
+
+/// The last tap's confirmation (or why it did nothing) — until the
+/// selector owner's memberships change some other way (`!join`, an admin,
+/// another selector), when it would only confuse.
+fn current_feedback<'a>(state: &State, selector: &'a GroupSelector) -> Option<&'a str> {
+    let feedback = selector.feedback.as_deref()?;
+    let Some(since) = selector.feedback_at else {
+        return Some(feedback);
+    };
+    let person_id = state.person_by_matrix_id(&selector.user_id).map(|p| &p.id);
+    let changed = state.event_log.iter().skip(since).any(|e| match &e.event {
+        DomainEvent::PersonJoinedGroup { person_id: p, .. }
+        | DomainEvent::PersonLeftGroup { person_id: p, .. } => Some(p) == person_id,
+        _ => false,
+    });
+    (!changed).then_some(feedback)
 }
 
 /// A reaction `key` by `sender` on the selector `selector_id`: toggle that
 /// group. Returns the confirmation to reply with, or `None` when the
-/// reaction is no tap (someone else's, another emoji, seen before).
+/// reaction is no tap (someone else's, another emoji, seen or taken back before).
 pub fn tap(
     ctx: &BotContext,
     state: &mut State,
@@ -138,7 +204,10 @@ pub fn tap(
     let Some(selector) = state.group_selectors.get(selector_id) else {
         return Ok(None);
     };
-    if selector.user_id != sender || selector.taps.contains_key(reaction_id) {
+    if selector.user_id != sender
+        || selector.taps.contains_key(reaction_id)
+        || state.redacted_reactions.contains(reaction_id)
+    {
         return Ok(None);
     }
     let Some(group_id) = number_index(key).and_then(|i| selector.group_ids.get(i).cloned()) else {
@@ -154,12 +223,16 @@ pub fn tap(
     } else {
         toggle(ctx, state, sender, &group_id, true)?
     };
+    let applied_at_event = Some(state.event_log.len());
     if let Some(selector) = state.group_selectors.get_mut(selector_id) {
+        selector.feedback = reply.clone();
+        selector.feedback_at = applied_at_event;
         selector.taps.insert(
             reaction_id.to_owned(),
             SelectorTap {
                 group_id,
                 effect,
+                applied_at_event,
                 undone: false,
             },
         );
@@ -182,6 +255,22 @@ pub fn untap(
     }) else {
         return Ok(None);
     };
+    if let Some(index) = tap.applied_at_event {
+        let pid = state.person_by_matrix_id(&user_id).map(|p| &p.id);
+        if state.event_log.iter().skip(index).any(|e| match &e.event {
+            DomainEvent::PersonJoinedGroup {
+                person_id,
+                group_id,
+            }
+            | DomainEvent::PersonLeftGroup {
+                person_id,
+                group_id,
+            } => Some(person_id) == pid && *group_id == tap.group_id,
+            _ => false,
+        }) {
+            return Ok(None);
+        }
+    }
     let joined = state
         .person_by_matrix_id(&user_id)
         .is_some_and(|p| state.is_member(&tap.group_id, &p.id));
@@ -192,6 +281,11 @@ pub fn untap(
         }
         _ => None,
     };
+    let at = state.event_log.len();
+    if let Some(s) = state.group_selectors.get_mut(&selector_id) {
+        s.feedback = reply.clone();
+        s.feedback_at = Some(at);
+    }
     Ok(reply.map(|r| (selector_id, r)))
 }
 
@@ -208,19 +302,10 @@ fn toggle(
     } else {
         leave_group(ctx, state, mxid, group_id)?
     };
-    let who = state
-        .person_by_matrix_id(mxid)
-        .map_or_else(|| view::user_id_link(mxid), view::user_link);
     let group = group_name_of(state, group_id);
     Ok(match (outcome, join) {
-        (Ok(summary), true) => (
-            TapEffect::Joined,
-            Some(format!("✅ {who} joined **{group}**\n{summary}")),
-        ),
-        (Ok(summary), false) => (
-            TapEffect::Left,
-            Some(format!("👋 {who} left **{group}**\n{summary}")),
-        ),
+        (Ok(_summary), true) => (TapEffect::Joined, Some(format!("✅ Joined **{group}**"))),
+        (Ok(_summary), false) => (TapEffect::Left, Some(format!("👋 Left **{group}**"))),
         (Err(why), _) => (TapEffect::Nothing, Some(why)),
     })
 }
@@ -279,13 +364,27 @@ pub async fn welcome_if_new(ctx: &BotContext, room: &Room, user_id: &OwnedUserId
     if room.room_id() != ctx.room_id {
         return;
     }
+    if ctx
+        .state
+        .lock()
+        .await
+        .greeted_users
+        .contains(user_id.as_str())
     {
-        let mut state = ctx.state.lock().await;
-        if !claim_welcome(&mut state, user_id.as_str()) {
+        return;
+    }
+    for candidate in room.client().joined_rooms() {
+        if candidate.room_id() != ctx.room_id
+            && candidate
+                .direct_targets()
+                .iter()
+                .any(|t| t.as_user_id() == Some(user_id.as_ref()))
+            && crate::private::authorized(ctx, &candidate, user_id).await
+        {
+            if let Err(e) = post_selector(ctx, &candidate, user_id.as_str(), true).await {
+                tracing::error!("Private welcome failed: {e}");
+            }
             return;
-        }
-        if let Err(e) = state.save(&ctx.state_path).await {
-            tracing::error!("Failed to save the welcome of {user_id}: {e}");
         }
     }
     if let Err(e) = post_selector(ctx, room, user_id.as_str(), true).await {
@@ -293,22 +392,84 @@ pub async fn welcome_if_new(ctx: &BotContext, room: &Room, user_id: &OwnedUserId
     }
 }
 
-/// Post a selector for `user_id` and seed the number reactions to tap. It
-/// stands in the main timeline — taps are answered in its thread — and
-/// replaces the user's previous selector.
+/// Post a selector for `user_id` in `room` and seed the number reactions to
+/// tap. It replaces the user's previous selector in that room.
 pub async fn post_selector(
     ctx: &BotContext,
     room: &Room,
     user_id: &str,
     welcome: bool,
 ) -> Result<()> {
-    let selector = new_selector(&*ctx.state.lock().await, user_id, welcome);
+    if room.room_id() != ctx.room_id {
+        let user = OwnedUserId::try_from(user_id)?;
+        anyhow::ensure!(
+            crate::private::authorized(ctx, room, &user).await,
+            "Private room not authorized"
+        );
+    }
+    let private = room.room_id() != ctx.room_id;
+    let pending_key = format!("{}|{user_id}", room.room_id());
+    let mut state = ctx.state.lock().await;
+    let first_welcome = welcome && !state.greeted_users.contains(user_id);
+    let pending = state
+        .pending_welcomes
+        .get(&pending_key)
+        .filter(|_| first_welcome)
+        .cloned();
+    let selector = match pending {
+        // A welcome that may have gone out before a crash: send exactly it
+        // again. Its transaction ID makes the server hand back the event
+        // already sent, whose text then matches `rendered`.
+        Some(pending) => pending,
+        None => {
+            let mut selector = new_selector(&state, user_id, welcome);
+            selector.room_id = room.room_id().to_string();
+            selector.contact_url =
+                Some(format!("https://matrix.to/#/{}", ctx.config.matrix.user_id));
+            // The feed link only ever goes into a verified private chat.
+            if let (true, Some(cfg)) = (private, &ctx.config.ical_server) {
+                state.apply_event(DomainEvent::PersonCreated {
+                    person_id: uuid::Uuid::new_v4().to_string(),
+                    display_name: user_id.into(),
+                    matrix_id: Some(user_id.into()),
+                })?;
+                let person_id = state
+                    .person_by_matrix_id(user_id)
+                    .map(|p| p.id.clone())
+                    .ok_or_else(|| anyhow::anyhow!("{user_id} has no person record"))?;
+                let token = crate::private::calendar_token(&mut state, &person_id);
+                selector.calendar_url = Some(crate::private::feed_url(cfg, &token));
+            }
+            selector.rendered = selector_text(&state, &selector);
+            if first_welcome {
+                state
+                    .pending_welcomes
+                    .insert(pending_key.clone(), selector.clone());
+            }
+            selector
+        }
+    };
+    state.save(&ctx.state_path).await?;
+    drop(state);
     let content = format::intentional(format::mentionify(&selector.rendered));
-    let event_id = room.send(content).await?.response.event_id;
+    let event_id = if first_welcome {
+        let txn = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, pending_key.as_bytes());
+        room.send(content)
+            .with_transaction_id(format!("welcome-{txn}").into())
+            .await?
+            .response
+            .event_id
+    } else {
+        room.send(content).await?.response.event_id
+    };
     let numbers = selector.group_ids.len();
     {
         let mut state = ctx.state.lock().await;
-        state.group_selectors.retain(|_, s| s.user_id != user_id);
+        state.greeted_users.insert(user_id.to_owned());
+        state.pending_welcomes.remove(&pending_key);
+        state
+            .group_selectors
+            .retain(|_, s| s.user_id != user_id || !in_room(s, room.room_id(), ctx));
         state.group_selectors.insert(event_id.to_string(), selector);
         state.save(&ctx.state_path).await?;
     }
@@ -322,17 +483,62 @@ pub async fn post_selector(
     Ok(())
 }
 
-/// Answer a tap in the selector's thread.
-pub async fn reply_to_tap(room: &Room, selector_id: &str, text: &str) {
-    let Ok(selector) = OwnedEventId::try_from(selector_id) else {
-        return;
-    };
-    let content = format::intentional(format::mentionify(text));
-    if let Err(e) = room
-        .send(in_thread(content, selector.clone(), selector))
+/// Take a tap's reaction away once it is saved, so the number can be
+/// tapped again (and toggles back). The redaction is the bot's, so it is
+/// no undo. Without the power to redact others' events the reaction just
+/// stays: the tap is recorded by its ID and counts once anyway, and
+/// removing it by hand undoes it.
+pub async fn consume_tap(room: &Room, reaction_id: &OwnedEventId, bot: &OwnedUserId) {
+    let allowed = room
+        .power_levels()
         .await
-    {
-        tracing::warn!("Failed to confirm a group selector tap: {e}");
+        .is_ok_and(|levels| levels.user_can_redact_event_of_other(bot));
+    if !allowed {
+        tracing::debug!(
+            "No power to redact taps in {}; leaving them",
+            room.room_id()
+        );
+        return;
+    }
+    if let Err(e) = room.redact(reaction_id, None, None).await {
+        tracing::warn!("Failed to clear a group selector tap: {e}");
+    }
+}
+
+/// Whether `selector` stands in `room`. Selectors from before they knew
+/// their room are all in the cleaning room.
+pub fn in_room(selector: &GroupSelector, room_id: &RoomId, ctx: &BotContext) -> bool {
+    if selector.room_id.is_empty() {
+        room_id == ctx.room_id
+    } else {
+        selector.room_id == room_id.as_str()
+    }
+}
+
+/// `refresh_selectors` in every room that has one — after a change made
+/// in one room (a private chat, say) that selectors elsewhere show.
+pub async fn refresh_all_selectors(ctx: &BotContext, client: &mxbot_common::matrix_sdk::Client) {
+    let rooms: std::collections::BTreeSet<String> = ctx
+        .state
+        .lock()
+        .await
+        .group_selectors
+        .values()
+        .map(|s| {
+            if s.room_id.is_empty() {
+                ctx.room_id.to_string()
+            } else {
+                s.room_id.clone()
+            }
+        })
+        .collect();
+    for room_id in rooms {
+        let Ok(room_id) = mxbot_common::matrix_sdk::ruma::OwnedRoomId::try_from(room_id) else {
+            continue;
+        };
+        if let Some(room) = client.get_room(&room_id) {
+            refresh_selectors(ctx, &room).await;
+        }
     }
 }
 
@@ -342,16 +548,33 @@ pub async fn reply_to_tap(room: &Room, selector_id: &str, text: &str) {
 pub async fn refresh_selectors(ctx: &BotContext, room: &Room) {
     let stale: Vec<(String, GroupSelector, String)> = {
         let state = ctx.state.lock().await;
+        if !state
+            .group_selectors
+            .values()
+            .any(|s| in_room(s, room.room_id(), ctx))
+        {
+            return;
+        }
+        let schedule = crate::schedule::build_schedule(&state, 52);
         state
             .group_selectors
             .iter()
+            .filter(|(_, s)| in_room(s, room.room_id(), ctx))
             .filter_map(|(id, s)| {
-                let text = selector_text(&state, s);
+                let text = selector_text_with(&state, s, &schedule);
                 (text != s.rendered).then(|| (id.clone(), s.clone(), text))
             })
             .collect()
     };
     for (id, selector, text) in stale {
+        if room.room_id() != ctx.room_id {
+            let Ok(user) = OwnedUserId::try_from(selector.user_id.as_str()) else {
+                continue;
+            };
+            if !crate::private::authorized(ctx, room, &user).await {
+                continue;
+            }
+        }
         let Ok(event_id) = OwnedEventId::try_from(id.as_str()) else {
             continue;
         };
@@ -362,7 +585,7 @@ pub async fn refresh_selectors(ctx: &BotContext, room: &Room) {
         } else {
             Mentions::new()
         };
-        let edit: RoomMessageEventContent = format::intentional(format::mentionify(&text))
+        let edit: RoomMessageEventContent = format::quiet(format::mentionify(&text))
             .make_replacement(ReplacementMetadata::new(event_id, Some(already_mentioned)));
         match room.send(edit).await {
             Ok(_) => {

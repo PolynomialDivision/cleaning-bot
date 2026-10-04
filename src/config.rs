@@ -45,7 +45,8 @@ pub struct ScheduleConfig {
     /// Assignment fill strategy.
     #[serde(default)]
     pub fill_strategy: FillStrategy,
-    /// How many due weeks per group to pre-materialize assignments for.
+    /// How many due weeks per group to pre-materialize assignments for
+    /// (1–104, checked at startup).
     #[serde(default = "default_materialize_weeks")]
     pub materialize_weeks: u32,
 }
@@ -56,8 +57,9 @@ pub struct ScheduleConfig {
 pub struct ICalServerConfig {
     /// Address to bind the HTTP server to, e.g. "0.0.0.0:8080".
     pub bind_addr: String,
-    /// Public base URL shown to users, e.g. "https://cal.example.org".
-    /// Must NOT end with a trailing slash.
+    /// Public base URL shown to users, e.g. "https://cal.example.org" (a
+    /// trailing slash is ignored). Should be HTTPS: feed URLs carry the
+    /// token that grants access.
     pub public_url: String,
 }
 
@@ -78,4 +80,31 @@ fn default_reminder_time() -> String {
 }
 fn default_timezone() -> String {
     "UTC".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_example_config_parses_and_passes_the_startup_checks() {
+        let config: Config = toml::from_str(include_str!("../config.example.toml")).unwrap();
+        let s = &config.schedule;
+        assert!(s.timezone.parse::<chrono_tz::Tz>().is_ok());
+        assert!((1..=52).contains(&s.interval_weeks));
+        assert!(s.reminder_weekday < 7 && s.final_reminder_weekday < 7);
+        assert_eq!(s.fill_strategy, FillStrategy::RoundRobin);
+        assert!((1..=104).contains(&s.materialize_weeks));
+        // With the commented-out section filled in, it reads too.
+        let ical = include_str!("../config.example.toml")
+            .replace("# [ical_server]", "[ical_server]")
+            .replace("# bind_addr", "bind_addr")
+            .replace("# public_url", "public_url");
+        let config: Config = toml::from_str(&ical).unwrap();
+        assert!(config
+            .ical_server
+            .unwrap()
+            .public_url
+            .starts_with("https://"));
+    }
 }

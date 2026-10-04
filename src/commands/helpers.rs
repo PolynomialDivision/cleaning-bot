@@ -36,11 +36,6 @@ pub(crate) fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()
     )?)
 }
 
-/// Returns the MXID or display_name depending on whether the person has Matrix.
-pub(crate) fn person_key(p: &Person) -> &str {
-    p.matrix_id.as_deref().unwrap_or(&p.display_name)
-}
-
 /// Format a CLI deviation as a percentage and a human-readable label.
 ///
 /// Thresholds:  > +10% → overloaded  |  < -10% → under-contributing  |  else → balanced
@@ -193,26 +188,58 @@ pub(crate) fn apply_rhythm_change(
     group_id: &GroupId,
     rhythm: crate::rhythm::Rhythm,
 ) -> anyhow::Result<()> {
-    state.apply_event(DomainEvent::RhythmSet {
+    let group = state
+        .group_by_id(group_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Unknown group"))?;
+    let current = current_iso_week();
+    let next = add_weeks(current.0, current.1, 1);
+    let mut rhythm = rhythm;
+    rhythm.effective_from = Some(crate::rhythm::week_monday(next.0, next.1));
+    rhythm.previous = group.rhythm.previous.clone();
+    let mut prior = group.rhythm.for_week(current.0, current.1).clone();
+    prior.previous.clear();
+    if rhythm.previous.last() != Some(&prior) {
+        rhythm.previous.push(prior);
+    }
+    // Validate protected records before making any changes.
+    let mut proposed = state.clone();
+    proposed.apply_event(DomainEvent::RhythmSet {
         group_id: group_id.clone(),
         rhythm: rhythm.clone(),
     })?;
-    let dropped = drop_future_assignments(state, group_id);
-    // This week's turns that no longer exist (fewer shifts now).
-    let current = current_iso_week();
-    let shifts = rhythm.shift_count() as u8;
-    state.slot_assignments.retain(|a| {
-        !(a.group_id == *group_id && (a.iso_year, a.iso_week) == current && a.shift >= shifts)
-    });
-    if let Some(group) = state.group_by_id(group_id).cloned() {
-        let queue = resolver::rewind_queue(&resolver::reconcile_queue(state, &group), &dropped);
-        state.apply_event(DomainEvent::RotationQueueSet {
-            group_id: group_id.clone(),
-            queue,
-        })?;
+    let new_group = proposed.group_by_id(group_id).unwrap();
+    for a in state
+        .slot_assignments
+        .iter()
+        .filter(|a| a.group_id == *group_id && (a.iso_year, a.iso_week) > current)
+    {
+        let turn = Turn::new(a.iso_year, a.iso_week, a.shift);
+        if (a.source != AssignmentSource::RoundRobin
+            || state.completion_for(&group, a.slot_index, turn).is_some())
+            && (!proposed
+                .turns_in_week(new_group, a.iso_year, a.iso_week)
+                .contains(&turn)
+                || turn.dates(&group.rhythm) != turn.dates(&rhythm))
+        {
+            anyhow::bail!("This change would move a protected assignment in {}-W{:02}. Resolve it explicitly before changing rhythm.", a.iso_year, a.iso_week);
+        }
     }
-    let cycles = ctx.config.schedule.materialize_weeks as usize;
-    materialize_group_and_apply(state, group_id, cycles)
+    let dropped = take_replannable_assignments(state, &group, Turn::new(next.0, next.1, 0));
+    let queue = resolver::rewind_queue(&resolver::reconcile_queue(state, &group), &dropped);
+    state.apply_event(DomainEvent::RotationQueueSet {
+        group_id: group_id.clone(),
+        queue,
+    })?;
+    state.apply_event(DomainEvent::RhythmSet {
+        group_id: group_id.clone(),
+        rhythm,
+    })?;
+    materialize_group_and_apply(
+        state,
+        group_id,
+        ctx.config.schedule.materialize_weeks as usize,
+    )
 }
 
 /// Add `person_id` to `group_id` and fold them into the group's *next*
@@ -687,14 +714,17 @@ pub(crate) fn turns_for(
             "«{}» is not cleaned in week {} (it is cleaned {}).",
             group.name,
             week.1,
-            group.rhythm.describe()
+            group.rhythm.for_week(week.0, week.1).describe()
         ));
+    }
+    if day.is_some_and(|day| !group.rhythm.for_week(week.0, week.1).contains_weekday(day)) {
+        return Err("That day is outside the cleaning windows.".into());
     }
     Ok(match day {
         Some(day) => vec![Turn::new(
             week.0,
             week.1,
-            group.rhythm.shift_for_weekday(day),
+            group.rhythm.for_week(week.0, week.1).shift_for_weekday(day),
         )],
         None => turns,
     })
@@ -711,14 +741,15 @@ pub(crate) fn single_turn(
     let turns = turns_for(state, group, week, day)?;
     match turns.as_slice() {
         [turn] => Ok(*turn),
-        _ => Err(shift_hint(group)),
+        _ => Err(shift_hint(group, week)),
     }
 }
 
 /// "«Bathroom» is cleaned in shifts (Mon–Wed, Thu–Sun) — add `on <day>`, e.g. `on thu`."
-pub(crate) fn shift_hint(group: &CleaningGroup) -> String {
-    let shifts: Vec<String> = group.rhythm.shifts().iter().map(|s| s.label()).collect();
-    let example = group.rhythm.shifts().get(1).map_or("mon", |s| {
+pub(crate) fn shift_hint(group: &CleaningGroup, week: (i32, u32)) -> String {
+    let rhythm = group.rhythm.for_week(week.0, week.1);
+    let shifts: Vec<String> = rhythm.shifts().iter().map(|s| s.label()).collect();
+    let example = rhythm.shifts().get(1).map_or("mon", |s| {
         ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][s.start as usize]
     });
     format!(
@@ -1137,7 +1168,10 @@ pub(crate) fn markable_duties(
         }
         for turn in state.turns_in_week(group, year, week) {
             for slot_index in state.held_slots(group, person_id, turn) {
-                if !state.is_turn_slot_done(group, slot_index, turn) {
+                if !state.is_turn_slot_done(group, slot_index, turn)
+                    && (group.rhythm.for_week(year, week).shift_ends.is_empty()
+                        || state.turn_started(group, turn))
+                {
                     open.push(Duty {
                         group: group.clone(),
                         slot_index,

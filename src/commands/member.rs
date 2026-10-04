@@ -195,17 +195,12 @@ pub(crate) async fn cmd_mygroups(
     sender: &OwnedUserId,
     room: &Room,
 ) -> Result<Option<RoomMessageEventContent>> {
-    if room.room_id() != ctx.room_id {
-        return Ok(Some(format::mentionify(
-            "!mygroups works in the cleaning room.",
-        )));
-    }
-    let welcome = {
-        let mut state = ctx.state.lock().await;
-        let first = crate::onboarding::claim_welcome(&mut state, sender.as_str());
-        state.save(&ctx.state_path).await?;
-        first
-    };
+    let welcome = !ctx
+        .state
+        .lock()
+        .await
+        .greeted_users
+        .contains(sender.as_str());
     crate::onboarding::post_selector(ctx, room, sender.as_str(), welcome).await?;
     Ok(None)
 }
@@ -332,6 +327,9 @@ pub(crate) fn join_group(
     mxid: &str,
     group_id: &GroupId,
 ) -> Result<std::result::Result<String, String>> {
+    if !state.group_by_id(group_id).is_some_and(|g| g.is_active) {
+        return Ok(Err("⚠️ This group is paused.".into()));
+    }
     // PersonCreated is idempotent — safe even if this Matrix user already exists.
     state.apply_event(DomainEvent::PersonCreated {
         person_id: uuid::Uuid::new_v4().to_string(),

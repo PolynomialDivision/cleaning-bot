@@ -85,6 +85,8 @@ pub fn reconcile_queue(state: &State, group: &CleaningGroup) -> Vec<PersonId> {
             }
         }
     }
+    let mut seen = HashSet::new();
+    queue.retain(|id| seen.insert(id.clone()) && state.person_by_id(id).is_some_and(|p| p.active));
     queue
 }
 
@@ -120,7 +122,6 @@ pub fn materialize_group(
     }
     let mut events: Vec<DomainEvent> = Vec::new();
     let num_slots = group.slots.len().max(1);
-    let every = group.rhythm.every_weeks() as i64;
     let first_due = state.next_due_week(group, current_iso_week());
     let mut queue = reconcile_queue(state, group);
     let mut any_pop = false;
@@ -140,8 +141,10 @@ pub fn materialize_group(
         .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
         .max();
 
-    for i in 0..cycles_ahead as i64 {
-        let (dy, dw) = add_weeks(first_due.0, first_due.1, i * every);
+    let mut due = first_due;
+    for _ in 0..cycles_ahead {
+        let (dy, dw) = due;
+        due = state.next_due_week(group, add_weeks(dy, dw, 1));
 
         // Track who's already been drawn for *this* week so nobody is
         // picked twice — skipping absent members means a draw can land past
@@ -231,7 +234,7 @@ pub fn preview_slot_assignee(
     if offset < 0 {
         return None;
     }
-    let cycles = (offset as usize) / (group.rhythm.every_weeks() as usize) + 1;
+    let cycles = offset as usize + 1;
 
     materialize_group(state, group, cycles)
         .into_iter()

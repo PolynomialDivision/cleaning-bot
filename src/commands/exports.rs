@@ -28,68 +28,29 @@ pub(crate) fn plan_message(state: &crate::state::State, n: usize) -> RoomMessage
 /// nobody (`view::user_link`). This week's lines show their status
 /// (⬜ ✅ ⏭️ ❌); later weeks are plain bullets.
 pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
-    let groups: Vec<&CleaningGroup> = state
-        .cleaning_groups
-        .iter()
-        .filter(|g| g.is_active)
-        .collect();
-    if groups.is_empty() {
-        return "No cleaning groups configured yet.".into();
+    let snapshot = build_schedule(state, n);
+    if snapshot.is_empty() {
+        return "No active cleaning groups configured yet.".into();
     }
-    let current = current_iso_week();
     let mut lines = vec![format!(
         "📋 **Plan · next {}**",
         crate::view::plural(n, "week", "weeks")
     )];
-    for i in 0..n as i64 {
-        let (y, w) = add_weeks(current.0, current.1, i);
-        let mut week_lines = Vec::new();
-        for group in &groups {
-            for turn in state.turns_in_week(group, y, w) {
-                for (slot_index, assignee) in state.turn_assignees(group, turn) {
-                    let what = Duty {
-                        group: (*group).clone(),
-                        slot_index,
-                        turn,
-                    }
-                    .label();
-                    let who =
-                        assignee.map_or_else(|| "nobody assigned".into(), crate::view::user_link);
-                    let away = assignee
-                        .filter(|p| state.is_absent(&p.id, &group.id, y, w))
-                        .map_or("", |_| " 🌴 away");
-                    let line = match state.completion_for(group, slot_index, turn) {
-                        Some(c) if c.skipped => format!("⏭️ {what}: {who} · skipped"),
-                        Some(c) => {
-                            let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
-                                .then(|| state.person_by_id(&c.completed_by_id))
-                                .flatten()
-                                .map(|p| format!(" · done by {}", crate::view::user_link(p)))
-                                .unwrap_or_default();
-                            format!("✅ {what}: {who}{by}")
-                        }
-                        None if state.turn_over(group, turn) => {
-                            format!("❌ {what}: {who} · missed")
-                        }
-                        None if i == 0 => format!("⬜ {what}: {who}{away}"),
-                        None => format!("• {what}: {who}{away}"),
-                    };
-                    week_lines.push(line);
-                }
-            }
+    let mut week = None;
+    for a in &snapshot.assignments {
+        if week != Some((a.iso_year, a.iso_week)) {
+            lines.push(format!(
+                "\n📅 **{}**",
+                crate::view::week_label(a.iso_year, a.iso_week)
+            ));
+            week = Some((a.iso_year, a.iso_week));
         }
-        if week_lines.is_empty() {
-            continue;
-        }
-        lines.push(String::new());
-        let now = if i == 0 { " · this week" } else { "" };
-        lines.push(format!("📅 **{}**{now}", crate::view::week_label(y, w)));
-        lines.extend(week_lines);
+        lines.push(a.matrix_line(true, false));
     }
     lines.join("\n")
 }
 
-// ── Admin: !plan pdf [N] ───────────────────────────────────────────────────────────
+// ── !plan pdf [history] [N] [group] ─────────────────────────────────────────────
 
 pub(crate) async fn cmd_pdf(
     ctx: &BotContext,
@@ -99,7 +60,9 @@ pub(crate) async fn cmd_pdf(
     event_id: OwnedEventId,
     thread_root: OwnedEventId,
 ) -> Result<Option<RoomMessageEventContent>> {
-    require_admin(ctx, sender)?;
+    let _ = sender;
+    let history = args.first() == Some(&"history");
+    let args = if history { &args[1..] } else { args };
     // !plan pdf [weeks] [group name]
     // First arg: either a number (weeks) or start of group name.
     let (n, group_filter) = {
@@ -121,12 +84,20 @@ pub(crate) async fn cmd_pdf(
         }
     };
 
-    // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99".
-    refresh_display_names(ctx, room).await;
+    // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99"
+    // — as the cleaning room knows them, also when asked in a private chat.
+    if let Some(main) = room.client().get_room(&ctx.room_id) {
+        refresh_display_names(ctx, &main).await;
+    }
 
     let (tex, file_name) = {
         let state = ctx.state.lock().await;
-        let mut snapshot = build_schedule(&state, n);
+        let mut snapshot = if history {
+            let (y, w) = current_iso_week();
+            crate::schedule::build_schedule_from(&state, add_weeks(y, w, -(n as i64 - 1)), n)
+        } else {
+            build_schedule(&state, n)
+        };
         if let Some(ref name) = group_filter {
             match state.group_by_name(name) {
                 Some(g) => {
@@ -169,34 +140,39 @@ pub(crate) async fn cmd_pdf(
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("tectonic render failed: {e}");
-            return Ok(Some(format::mentionify(&format!(
-                "❌ PDF render failed: {e}"
-            ))));
+            return Ok(Some(format::mentionify(
+                "❌ PDF could not be generated. Please ask an admin to check the renderer.",
+            )));
         }
     };
 
     let mime: mime::Mime = "application/pdf".parse().expect("valid mime");
-    let pdf_size = pdf_bytes.len();
-    match room.client().media().upload(&mime, pdf_bytes, None).await {
-        Ok(upload) => {
-            let mut file_info = FileInfo::new();
-            file_info.mimetype = Some("application/pdf".to_owned());
-            file_info.size = UInt::new(pdf_size as u64);
-            let mut fc = FileMessageEventContent::plain(file_name, upload.content_uri);
-            fc.info = Some(Box::new(file_info));
-            let mut file_content = RoomMessageEventContent::new(MessageType::File(fc));
-            file_content.relates_to =
-                Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
-                    Thread::reply(thread_root.clone(), event_id.clone()),
-                ));
-            room.send(file_content).await.ok();
-            Ok(Some(format::mentionify("📄 Schedule generated.")))
-        }
-        Err(e) => {
-            tracing::warn!("PDF upload failed: {e}");
-            Ok(Some(format::mentionify("❌ Upload failed.")))
-        }
-    }
+    room.send_attachment(
+        file_name,
+        &mime,
+        pdf_bytes,
+        matrix_sdk::attachment::AttachmentConfig::new()
+            .mentions(Some(matrix_sdk::ruma::events::Mentions::new()))
+            .extra_content(Some(thread_relation(thread_root, event_id))),
+    )
+    .await?;
+    Ok(None)
+}
+
+/// `m.relates_to` putting a file into the same thread as a text reply
+/// (`in_thread`). Passed as extra content rather than an SDK `Reply`, which
+/// would first fetch the command event — and lose the file if that fails.
+/// The SDK still encrypts the event and the upload in encrypted rooms.
+fn thread_relation(
+    root: OwnedEventId,
+    reply_to: OwnedEventId,
+) -> serde_json::Map<String, serde_json::Value> {
+    let content =
+        mxbot_common::send::in_thread(RoomMessageEventContent::text_plain(""), root, reply_to);
+    let mut json = serde_json::to_value(content).expect("message content serializes");
+    let mut extra = serde_json::Map::new();
+    extra.insert("m.relates_to".into(), json["m.relates_to"].take());
+    extra
 }
 
 // ── !ical [N] / !ical <person> [N] ────────────────────────────────────────────
@@ -207,94 +183,53 @@ pub(crate) async fn cmd_ical(
     room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
+    if !crate::private::authorized(ctx, room, sender).await {
+        return Ok(Some(format::intentional(format::mentionify(
+            "🗓 Send !ical in an encrypted private chat with me. Calendar links are private.",
+        ))));
+    }
     let sender_mxid = sender.as_str();
-    let is_admin = ctx.admin_users.contains(sender);
-
-    // Parse target person and week count.
-    let (person_id, weeks): (String, usize) = {
-        let state = ctx.state.lock().await;
-        match args.first() {
-            None => {
-                let pid = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
-                    Some(id) => id,
-                    None => {
-                        return Ok(Some(format::mentionify(&format!(
-                        "❌ You ({sender_mxid}) are not registered — !mygroups to join a group."
-                    ))))
-                    }
-                };
-                (pid, 26)
-            }
-            Some(first) => {
-                if let Ok(n) = first.parse::<usize>() {
-                    let pid = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
-                        Some(id) => id,
-                        None => {
-                            return Ok(Some(format::mentionify(&format!(
-                                "You ({sender_mxid}) are not registered."
-                            ))))
-                        }
-                    };
-                    (pid, n.clamp(1, 104))
-                } else {
-                    if !is_admin {
-                        return Ok(Some(format::mentionify(
-                            "❌ Admin permission required to generate iCal for others.",
-                        )));
-                    }
-                    let person = match lookup_person(&state, first) {
-                        Ok(Some(p)) => p.clone(),
-                        Err(ambiguous) => return Ok(Some(format::mentionify(&ambiguous))),
-                        Ok(None) => {
-                            return Ok(Some(format::mentionify(&format!(
-                                "❌ Person «{first}» not found."
-                            ))))
-                        }
-                    };
-                    let n = args
-                        .get(1)
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(26usize)
-                        .clamp(1, 104);
-                    (person.id.clone(), n)
-                }
-            }
-        }
-    };
+    {
+        let mut state = ctx.state.lock().await;
+        state.apply_event(DomainEvent::PersonCreated {
+            person_id: Uuid::new_v4().to_string(),
+            display_name: sender_mxid.into(),
+            matrix_id: Some(sender_mxid.into()),
+        })?;
+        state.save(&ctx.state_path).await?;
+    }
+    if args.len() > 1 || args.first().is_some_and(|a| a.parse::<usize>().is_err()) {
+        return Ok(Some(format::mentionify(
+            "🗓 !ical [weeks] shows only your calendar. !ical reset replaces its private link.",
+        )));
+    }
+    let weeks = args
+        .first()
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(26)
+        .clamp(1, 104);
+    let person_id = ctx
+        .state
+        .lock()
+        .await
+        .person_by_matrix_id(sender_mxid)
+        .unwrap()
+        .id
+        .clone();
 
     // If HTTP server is configured, return URL (token-based feed).
     if let Some(ical_cfg) = &ctx.config.ical_server {
         let mut state = ctx.state.lock().await;
 
-        // Check if a non-revoked token already exists for this person.
-        let has_token = state
-            .calendar_tokens
-            .iter()
-            .any(|ct| !ct.revoked && ct.person_id == person_id);
-
-        if has_token {
-            return Ok(Some(format::mentionify(
-                "📅 You already have an active calendar feed.\n\
-                 Use !ical reset to get a new URL (this invalidates the old subscription).",
-            )));
-        }
-
-        let (raw_token, hash) = new_calendar_token();
-        state.calendar_tokens.push(CalendarToken {
-            id: Uuid::new_v4().to_string(),
-            token_hash: hash,
-            person_id: person_id.clone(),
-            created_at: Utc::now(),
-            revoked: false,
-        });
+        let raw_token = crate::private::calendar_token(&mut state, &person_id);
         state.save(&ctx.state_path).await?;
         drop(state);
 
-        let url = format!("{}/ical/{raw_token}.ics", ical_cfg.public_url);
+        let url = crate::private::feed_url(ical_cfg, &raw_token);
         return Ok(Some(format::mentionify(&format!(
             "📅 Your calendar feed URL:\n{url}\n\n\
              Add this URL to your calendar app for automatic updates.\n\
-             ⚠️ This URL is shown only once — save it!"
+             Keep this URL private. !ical shows it again; !ical reset replaces it."
         ))));
     }
 
@@ -305,46 +240,16 @@ pub(crate) async fn cmd_ical(
         crate::ical::render_ics(&snapshot, &person_id)
     };
 
-    let safe_name = person_id
-        .trim_start_matches('@')
-        .split(':')
-        .next()
-        .unwrap_or("user")
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-
     let mime: mime::Mime = "text/calendar".parse().expect("valid mime");
-    match room
-        .client()
-        .media()
-        .upload(&mime, ical_data.into_bytes(), None)
-        .await
-    {
-        Ok(upload) => {
-            use matrix_sdk::ruma::events::room::message::{FileMessageEventContent, MessageType};
-            let content =
-                RoomMessageEventContent::new(MessageType::File(FileMessageEventContent::plain(
-                    format!("putzplan_{safe_name}.ics"),
-                    upload.content_uri,
-                )));
-            room.send(content).await.ok();
-            Ok(Some(format::mentionify(&format!(
-                "📅 iCal · {weeks} weeks · Import .ics into your calendar app.\n\
-                 Tip: configure [ical_server] in config.toml for live-updating feed URLs."
-            ))))
-        }
-        Err(e) => {
-            tracing::warn!("iCal upload failed: {e}");
-            Ok(Some(format::mentionify("❌ Upload failed.")))
-        }
-    }
+    room.send_attachment(
+        format!("cleaning-dates-{weeks}-weeks.ics"),
+        &mime,
+        ical_data.into_bytes(),
+        matrix_sdk::attachment::AttachmentConfig::new()
+            .mentions(Some(matrix_sdk::ruma::events::Mentions::new())),
+    )
+    .await?;
+    Ok(None)
 }
 
 // ── !ical reset [person] ───────────────────────────────────────────────────────
@@ -352,71 +257,136 @@ pub(crate) async fn cmd_ical(
 pub(crate) async fn cmd_icalreset(
     ctx: &BotContext,
     sender: &OwnedUserId,
-    _room: &Room,
+    room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
+    if !crate::private::authorized(ctx, room, sender).await {
+        return Ok(Some(format::intentional(format::mentionify(
+            "🗓 Send !ical in an encrypted private chat with me. Calendar links are private.",
+        ))));
+    }
     let sender_mxid = sender.as_str();
-    let is_admin = ctx.admin_users.contains(sender);
-
+    {
+        let mut state = ctx.state.lock().await;
+        state.apply_event(DomainEvent::PersonCreated {
+            person_id: Uuid::new_v4().to_string(),
+            display_name: sender_mxid.into(),
+            matrix_id: Some(sender_mxid.into()),
+        })?;
+        state.save(&ctx.state_path).await?;
+    }
+    if !args.is_empty() {
+        return Ok(Some(format::mentionify(
+            "🗓 !ical reset replaces only your own calendar link.",
+        )));
+    }
     let Some(ical_cfg) = &ctx.config.ical_server else {
         return Ok(Some(format::mentionify(
-            "iCal HTTP server is not configured. Add [ical_server] to config.toml.",
+            "🗓 Live subscriptions are unavailable. !ical gives you a calendar file.",
         )));
     };
-
-    let person_id: String = {
-        let state = ctx.state.lock().await;
-        match args.first() {
-            None => match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
-                Some(id) => id,
-                None => {
-                    return Ok(Some(format::mentionify(&format!(
-                        "❌ {sender_mxid} is not registered."
-                    ))))
-                }
-            },
-            Some(query) => {
-                if !is_admin {
-                    return Ok(Some(format::mentionify("❌ Admin permission required.")));
-                }
-                match lookup_person(&state, query) {
-                    Ok(Some(p)) => p.id.clone(),
-                    Err(ambiguous) => return Ok(Some(format::mentionify(&ambiguous))),
-                    Ok(None) => {
-                        return Ok(Some(format::mentionify(&format!(
-                            "❌ Person «{query}» not found."
-                        ))))
-                    }
-                }
-            }
-        }
-    };
+    let person_id = ctx
+        .state
+        .lock()
+        .await
+        .person_by_matrix_id(sender_mxid)
+        .unwrap()
+        .id
+        .clone();
 
     let mut state = ctx.state.lock().await;
-    // Revoke all existing tokens for this person.
+    // Revoke all existing tokens for this person; their secrets go too.
     for ct in state
         .calendar_tokens
         .iter_mut()
         .filter(|ct| ct.person_id == person_id)
     {
         ct.revoked = true;
+        ct.raw_token = None;
     }
 
     // Issue new token.
     let (raw_token, hash) = new_calendar_token();
     state.calendar_tokens.push(CalendarToken {
         id: Uuid::new_v4().to_string(),
+        raw_token: Some(raw_token.clone()),
         token_hash: hash,
         person_id: person_id.clone(),
         created_at: Utc::now(),
         revoked: false,
     });
+    let url = crate::private::feed_url(ical_cfg, &raw_token);
+    for selector in state
+        .group_selectors
+        .values_mut()
+        .filter(|s| s.user_id == sender_mxid && s.calendar_url.is_some())
+    {
+        selector.calendar_url = Some(url.clone());
+    }
     state.save(&ctx.state_path).await?;
     drop(state);
 
-    let url = format!("{}/ical/{raw_token}.ics", ical_cfg.public_url);
     Ok(Some(format::mentionify(&format!(
         "🔄 New calendar feed URL:\n{url}\n\n\
          ⚠️ Old URLs for this person are now invalid."
     ))))
+}
+
+/// Revoke only: administrators may revoke someone else's feed, never retrieve it.
+pub(crate) async fn cmd_icalrevoke(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<RoomMessageEventContent>> {
+    let mut state = ctx.state.lock().await;
+    let person = if args.is_empty() {
+        state.person_by_matrix_id(sender.as_str())
+    } else {
+        require_admin(ctx, sender)?;
+        match lookup_person(&state, &args.join(" ")) {
+            Ok(p) => p,
+            Err(e) => return Ok(Some(format::mentionify(&e))),
+        }
+    };
+    let Some(person) = person.cloned() else {
+        return Ok(Some(format::mentionify("No calendar found.")));
+    };
+    for token in state
+        .calendar_tokens
+        .iter_mut()
+        .filter(|t| t.person_id == person.id)
+    {
+        token.revoked = true;
+        token.raw_token = None;
+    }
+    for selector in state
+        .group_selectors
+        .values_mut()
+        .filter(|s| Some(s.user_id.as_str()) == person.matrix_id.as_deref())
+    {
+        selector.calendar_url = None;
+    }
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format::intentional(format::mentionify(
+        "🗓 Calendar links revoked. Existing subscriptions no longer work.",
+    ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matrix_sdk::ruma::owned_event_id;
+
+    #[test]
+    fn a_pdf_lands_in_the_same_thread_as_a_text_reply() {
+        let relation = thread_relation(owned_event_id!("$root"), owned_event_id!("$command"));
+        assert_eq!(
+            serde_json::Value::Object(relation),
+            serde_json::json!({ "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$root",
+                "m.in_reply_to": { "event_id": "$command" },
+            }})
+        );
+    }
 }

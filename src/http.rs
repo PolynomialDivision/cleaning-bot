@@ -8,11 +8,11 @@
 //!   3. Render ICS (pure, from snapshot)
 //!   4. Set ETag (SHA-256 of ICS body) and Last-Modified (state.last_modified)
 //!
-//! The raw token is never stored — only its SHA-256 hash lives in state.json.
+//! Authentication compares hashes. Recoverable token secrets are private state.
 
 use axum::{
     extract::{Path, State as AxumState},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -45,12 +45,14 @@ pub async fn run(state: Arc<Mutex<State>>, bind_addr: &str) -> anyhow::Result<()
 async fn serve_ical(
     Path(token_ics): Path<String>,
     AxumState(app): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Response {
-    let token = token_ics.trim_end_matches(".ics");
-    info!(
-        "iCal request: token_prefix={}",
-        &token.chars().take(8).collect::<String>()
-    );
+    let Some(token) = token_ics
+        .strip_suffix(".ics")
+        .filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
 
     let state = app.state.lock().await;
 
@@ -65,7 +67,12 @@ async fn serve_ical(
         info!("iCal request: token not found or revoked");
         return (StatusCode::NOT_FOUND, "Token not found or revoked.\n").into_response();
     };
-    info!("iCal request: serving feed for person {person_id}");
+    if !state
+        .person_by_id(&person_id)
+        .is_some_and(|p| p.active && p.matrix_id.is_some())
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
 
     // Build schedule snapshot (pure computation, no mutations).
     let snapshot = build_schedule(&state, 52);
@@ -79,6 +86,22 @@ async fn serve_ical(
 
     // ETag = SHA-256 of the ICS body (deterministic for unchanged state).
     let etag = format!("\"{}\"", hex::encode(Sha256::digest(ics_body.as_bytes())));
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|tag| tag.trim() == etag || tag.trim() == "*")
+        })
+    {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, "private, no-cache, must-revalidate")
+            .body(axum::body::Body::empty())
+            .unwrap();
+    }
     // Last-Modified in RFC 7231 format.
     let last_mod_str = last_modified
         .format("%a, %d %b %Y %H:%M:%S GMT")
@@ -96,4 +119,62 @@ async fn serve_ical(
         .header("Cache-Control", "private, no-cache, must-revalidate")
         .body(axum::body::Body::from(ics_body))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{CleaningGroup, Person};
+    #[tokio::test]
+    async fn feed_authentication_cache_and_revocation_are_enforced() {
+        let mut state = State::default();
+        let person = Person::new_matrix("@alice:example.org");
+        let pid = person.id.clone();
+        state.persons.push(person);
+        let mut group = CleaningGroup::new("Kitchen");
+        group.member_ids.push(pid.clone());
+        state.cleaning_groups.push(group);
+        let token = crate::private::calendar_token(&mut state, &pid);
+        let app = Arc::new(AppState {
+            state: Arc::new(Mutex::new(state)),
+        });
+        let path = format!("{token}.ics");
+        let response =
+            serve_ical(Path(path.clone()), AxumState(app.clone()), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let tag = response.headers()[header::ETAG].clone();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8(body.to_vec())
+            .unwrap()
+            .contains("BEGIN:VEVENT"));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, tag);
+        assert_eq!(
+            serve_ical(Path(path.clone()), AxumState(app.clone()), headers.clone())
+                .await
+                .status(),
+            StatusCode::NOT_MODIFIED
+        );
+        app.state.lock().await.calendar_tokens[0].revoked = true;
+        assert_eq!(
+            serve_ical(Path(path), AxumState(app.clone()), headers)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        for invalid in ["alice.ics", "xyz.ics", &token, "../../state.json"] {
+            assert_eq!(
+                serve_ical(
+                    Path(invalid.into()),
+                    AxumState(app.clone()),
+                    HeaderMap::new()
+                )
+                .await
+                .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+    }
 }

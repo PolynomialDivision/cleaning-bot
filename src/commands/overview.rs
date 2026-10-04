@@ -25,48 +25,34 @@ fn away_marker(
 
 /// One status line per slot of each turn of the week — "✅ Scharni: Alice",
 /// "⬜ Thu–Sun: Carol ← now", "❌ Bob · missed" — so everyone sharing a week
-/// (slots, shifts) shows with their own done/open state.
+/// (slots, shifts) shows with their own done/open state. Each comes with
+/// whether it is done — `None` when skipped, which needs no doing at all.
 pub(crate) fn week_task_lines(
     state: &State,
     group: &CleaningGroup,
     year: i32,
     week: u32,
-) -> Vec<(bool, String)> {
-    let running = state.current_turn(group);
-    let mut lines = Vec::new();
-    for turn in state.turns_in_week(group, year, week) {
-        let now = if group.rhythm.is_split() && Some(turn) == running {
-            " ← now"
-        } else {
-            ""
-        };
-        for (slot_index, assignee) in state.turn_assignees(group, turn) {
-            let what = crate::scheduler::duty_prefix(group, slot_index, turn);
-            let who = assignee
-                .map(name)
-                .unwrap_or_else(|| "nobody assigned".into());
-            let line = match state.completion_for(group, slot_index, turn) {
-                Some(c) if c.skipped => (true, format!("⏭️ {what}{who} · skipped")),
-                Some(c) => {
-                    let by = (assignee.map(|p| &p.id) != Some(&c.completed_by_id))
-                        .then(|| state.person_by_id(&c.completed_by_id))
-                        .flatten()
-                        .map(|p| format!(" · done by {}", name(p)))
-                        .unwrap_or_default();
-                    (true, format!("✅ {what}{who}{by}"))
-                }
-                None if state.turn_over(group, turn) => (false, format!("❌ {what}{who} · missed")),
-                None => {
-                    let away = assignee
-                        .map(|p| away_marker(state, p, &group.id, year, week))
-                        .unwrap_or_default();
-                    (false, format!("⬜ {what}{who}{away}{now}"))
-                }
+) -> Vec<(Option<bool>, String)> {
+    crate::schedule::build_schedule_from(state, (year, week), 1)
+        .assignments
+        .into_iter()
+        .filter(|a| a.group_id == group.id)
+        .map(|a| {
+            let now = if group.rhythm.for_week(year, week).is_split()
+                && a.start <= crate::state::today()
+                && a.end >= crate::state::today()
+                && !a.is_completed
+            {
+                " ← now"
+            } else {
+                ""
             };
-            lines.push(line);
-        }
-    }
-    lines
+            (
+                (!a.is_skipped).then_some(a.is_completed),
+                format!("{}{now}", a.matrix_line(false, false)),
+            )
+        })
+        .collect()
 }
 
 /// Everyone on one due week of the group, compactly: "Koch (Scharni),
@@ -139,24 +125,29 @@ pub(crate) fn status_text(state: &State, year: i32, week: u32) -> String {
             continue;
         }
         body.push(String::new());
-        if group.rhythm.is_split() || group.rhythm.every_weeks() > 1 {
-            body.push(format!("**{}** · {}", group.name, group.rhythm.describe()));
+        if group.rhythm.for_week(year, week).is_split()
+            || group.rhythm.for_week(year, week).every_weeks() > 1
+        {
+            body.push(format!(
+                "**{}** · {}",
+                group.name,
+                group.rhythm.for_week(year, week).describe()
+            ));
         } else {
             body.push(format!("**{}**", group.name));
         }
         for (is_done, line) in week_task_lines(state, group, year, week) {
-            total += 1;
-            done += usize::from(is_done);
+            // "2/3 done" counts what has to be cleaned: skipped turns don't.
+            if let Some(is_done) = is_done {
+                total += 1;
+                done += usize::from(is_done);
+            }
             body.push(line);
         }
         body.extend(next_week_line(state, group, (year, week)));
     }
 
-    let all_done = if total > 0 && done == total {
-        " ✨"
-    } else {
-        ""
-    };
+    let all_done = if done == total { " ✨" } else { "" };
     let mut lines = vec![format!(
         "🧹 **{}** · {done}/{total} done{all_done}",
         crate::view::week_label(year, week)
@@ -234,7 +225,11 @@ pub(crate) fn groups_text(state: &State) -> String {
 /// One group in detail: this week, what's coming, members, rooms, weights.
 pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String {
     let (year, week) = current_iso_week();
-    let mut header = format!("🏠 **{}** · {}", group.name, group.rhythm.describe());
+    let mut header = format!(
+        "🏠 **{}** · {}",
+        group.name,
+        group.rhythm.describe_on(crate::state::today())
+    );
     if !group.is_active {
         header.push_str(" · 🚫 disabled");
     }

@@ -21,16 +21,22 @@ pub async fn tex_to_pdf(tex: &str) -> Result<Vec<u8>> {
         .await
         .context("Failed to write temp .tex file")?;
 
-    let out = tokio::process::Command::new("tectonic")
-        .args([
-            "--outdir",
-            tmp.path().to_str().unwrap(),
-            "--print",
-            tex_path.to_str().unwrap(),
-        ])
-        .output()
-        .await
-        .context("Failed to spawn tectonic — is it installed?")?;
+    let mut command = tokio::process::Command::new("tectonic");
+    command.kill_on_drop(true);
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        command
+            .args([
+                "--outdir",
+                tmp.path().to_str().unwrap(),
+                "--print",
+                tex_path.to_str().unwrap(),
+            ])
+            .output(),
+    )
+    .await
+    .context("PDF rendering timed out")?
+    .context("Failed to spawn tectonic — is it installed?")?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

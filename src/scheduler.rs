@@ -4,8 +4,11 @@ use matrix_sdk::{
     ruma::{
         events::{
             reaction::ReactionEventContent,
-            relation::{Annotation, Reply},
-            room::message::{Relation, ReplacementMetadata, RoomMessageEventContent},
+            relation::Annotation,
+            room::{
+                message::{ReplacementMetadata, RoomMessageEventContent},
+                pinned_events::RoomPinnedEventsEventContent,
+            },
             Mentions,
         },
         OwnedEventId, OwnedUserId,
@@ -13,12 +16,13 @@ use matrix_sdk::{
     Client, Room,
 };
 use mxbot_common::matrix_sdk;
+use std::collections::HashSet;
 use tracing::{error, info, warn};
 
 use crate::{
     domain::CleaningGroup,
     rhythm::Turn,
-    state::{current_iso_week, ReminderKind},
+    state::{current_iso_week, ReminderKind, ReminderMessage, ReminderNote},
     view, BotContext,
 };
 
@@ -34,12 +38,9 @@ async fn mention_message(
     let all_mxids = crate::format::extract_mxids(text);
     let refs: Vec<&str> = all_mxids.iter().map(String::as_str).collect();
     let names = crate::format::fetch_names(room, &refs).await;
-    let content = crate::format::mentionify_with_names(text, &names);
-    if parsed.is_empty() {
-        content
-    } else {
-        content.add_mentions(Mentions::with_user_ids(parsed))
-    }
+    let mut content = crate::format::mentionify_with_names(text, &names);
+    content.mentions = Some(Mentions::with_user_ids(parsed));
+    content
 }
 
 pub async fn run(ctx: BotContext, client: Client) {
@@ -69,10 +70,13 @@ pub(crate) async fn roll_planning_horizon(ctx: &BotContext) -> anyhow::Result<()
     state.save(&ctx.state_path).await
 }
 
-/// Edit the pinned weekly plan message to reflect the current completion state.
+/// Edit the pinned weekly plan message — and that week's reminders — to
+/// reflect the current completion state.
 /// No-op if no plan has been sent for this week yet, or if the rendered
 /// content already matches what was last sent (avoids a pointless Matrix edit).
 pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32, week: u32) {
+    // The week's reminders show who's done, too.
+    refresh_reminders(ctx, room, year, week).await;
     let week_key = format!("{year}-W{week:02}");
 
     let (canonical_eid, msg, mxids, already_mentioned) = {
@@ -91,9 +95,6 @@ pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32
             .filter(|g| state.belongs_in_weekly_plan(g, year, week))
             .cloned()
             .collect();
-        if due_groups.is_empty() {
-            return;
-        }
         let (msg, mxids) = build_weekly_plan(&state, year, week, &due_groups);
         let previous = state.weekly_plan_rendered.get(&week_key);
         if previous == Some(&msg) {
@@ -165,6 +166,7 @@ async fn register_weekly_plan_message(
 }
 
 async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
+    let _operation = ctx.operations.lock().await;
     let tz: Tz = ctx
         .config
         .schedule
@@ -194,29 +196,26 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     // ── Weekly plan: every turn of the week, posted and pinned once ──────────
     let plan = {
         let state = ctx.state.lock().await;
-        let week_key = format!("{year}-W{week:02}");
         let plan_groups: Vec<CleaningGroup> = state
             .cleaning_groups
             .iter()
             .filter(|g| state.belongs_in_weekly_plan(g, year, week))
             .cloned()
             .collect();
-        // Per-group initial reminders are from the scheduler before the
-        // consolidated plan; a week that has them needs no plan.
-        let any_per_group_sent = state
-            .cleaning_groups
-            .iter()
-            .any(|g| state.reminder_sent(&g.id, year, week, 0, &ReminderKind::Initial));
-        (local_weekday == ctx.config.schedule.reminder_weekday
-            && !state.reminder_sent("*", year, week, 0, &ReminderKind::Initial)
-            && !any_per_group_sent
-            && !state.weekly_plan_canonical.contains_key(&week_key)
-            && !plan_groups.is_empty())
+        (!plan_groups.is_empty()
+            && weekly_plan_due(
+                &state,
+                year,
+                week,
+                local_weekday,
+                ctx.config.schedule.reminder_weekday,
+            ))
         .then(|| build_weekly_plan(&state, year, week, &plan_groups))
     };
     if let Some((msg, mxids)) = plan {
         let resp = room
             .send(mention_message(&msg, &mxids, &room).await)
+            .with_transaction_id(format!("weekly-{year}-{week}").into())
             .await
             .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
         let plan_eid = resp.response.event_id.clone();
@@ -230,38 +229,44 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
         )))
         .await
         .ok();
-        pin_weekly_plan(&room, &plan_eid).await;
+        pin_weekly_plan(ctx, &room, Some(&plan_eid)).await;
     }
 
     // ── Turn reminders: a shift starting today, open turns ending today ──────
     for kind in [ReminderKind::Initial, ReminderKind::Final] {
-        let due = {
+        let turns = {
             let state = ctx.state.lock().await;
-            let turns = turns_to_remind(
+            turns_to_remind(
                 &state,
                 today,
                 &kind,
                 ctx.config.schedule.final_reminder_weekday,
-            );
-            (!turns.is_empty()).then(|| {
-                let (msg, mxids) = build_turn_reminder(&state, &kind, &turns);
-                let reply_to = state
-                    .weekly_plan_canonical
-                    .get(&format!("{year}-W{week:02}"))
-                    .cloned();
-                (turns, msg, mxids, reply_to)
-            })
+            )
         };
-        let Some((turns, msg, mxids, reply_to)) = due else {
+        if turns.is_empty() {
             continue;
-        };
-        let mut content = mention_message(&msg, &mxids, &room).await;
-        if let Some(plan_eid) = reply_to.and_then(|e| e.parse::<OwnedEventId>().ok()) {
-            content.relates_to = Some(Relation::Reply(Reply::with_event_id(plan_eid)));
         }
-        room.send(content)
-            .await
-            .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
+        let note = match kind {
+            ReminderKind::Initial => ReminderNote::StartsToday,
+            _ => ReminderNote::EndsToday,
+        };
+        // The same reminder, retried after a crash, is sent only once —
+        // but a later one the same day (other turns) is a new message.
+        let covered: Vec<String> = turns
+            .iter()
+            .map(|(g, t)| format!("{}:{}:{}:{}", g.id, t.year, t.week, t.shift))
+            .collect();
+        let txn = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, covered.join(",").as_bytes());
+        let turn_ids = turns.iter().map(|(g, t)| (g.id.clone(), t.shift)).collect();
+        send_reminder(
+            ctx,
+            &room,
+            note,
+            (year, week),
+            turn_ids,
+            Some(format!("reminder-{kind:?}-{txn}")),
+        )
+        .await?;
         let mut state = ctx.state.lock().await;
         for (group, turn) in &turns {
             state.mark_reminder_sent(&group.id, turn.year, turn.week, turn.shift, kind.clone());
@@ -270,6 +275,30 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
         info!("Sent {kind:?} reminder for {} turn(s)", turns.len());
     }
     Ok(())
+}
+
+/// Whether the weekly plan of `year`/`week` is still to be posted on
+/// `weekday`: on the configured `plan_weekday` — or later that week, when
+/// the bot was down then — but only once (also across a restart).
+pub(crate) fn weekly_plan_due(
+    state: &crate::state::State,
+    year: i32,
+    week: u32,
+    weekday: u8,
+    plan_weekday: u8,
+) -> bool {
+    // Per-group initial reminders are from the scheduler before the
+    // consolidated plan; a week that has them needs no plan.
+    let any_per_group_sent = state
+        .cleaning_groups
+        .iter()
+        .any(|g| state.reminder_sent(&g.id, year, week, 0, &ReminderKind::Initial));
+    weekday >= plan_weekday
+        && !state.reminder_sent("*", year, week, 0, &ReminderKind::Initial)
+        && !any_per_group_sent
+        && !state
+            .weekly_plan_canonical
+            .contains_key(&format!("{year}-W{week:02}"))
 }
 
 /// Turns that get a reminder of `kind` today and haven't had one:
@@ -288,12 +317,14 @@ pub(crate) fn turns_to_remind(
     let mut due = Vec::new();
     for group in state.cleaning_groups.iter().filter(|g| g.is_active) {
         for turn in state.turns_in_week(group, year, week) {
-            let Some(shift) = group.rhythm.shift(turn.shift) else {
+            let Some(shift) = group.rhythm.for_week(year, week).shift(turn.shift) else {
                 continue;
             };
             let wanted = match kind {
                 ReminderKind::Initial => turn.shift > 0 && shift.start == weekday,
-                ReminderKind::Final if group.rhythm.is_split() => shift.end == weekday,
+                ReminderKind::Final if group.rhythm.for_week(year, week).is_split() => {
+                    shift.end == weekday
+                }
                 ReminderKind::Final => final_weekday == weekday,
                 ReminderKind::WeeklySummary => false,
             };
@@ -365,27 +396,270 @@ pub(crate) async fn announce_weekly_plan(
     )))
     .await
     .ok();
-    pin_weekly_plan(room, &new_eid).await;
+    pin_weekly_plan(ctx, room, Some(&new_eid)).await;
 
     Ok(Some(new_eid))
 }
 
 // ── Room pin management ───────────────────────────────────────────────────────
 
-/// Pin `new_eid` and unpin every currently pinned event in the room.
-/// Reads live room state so it catches messages pinned before state tracking began.
-pub(crate) async fn pin_weekly_plan(room: &Room, new_eid: &OwnedEventId) {
-    for old_eid in room.pinned_event_ids().unwrap_or_default() {
-        if old_eid == *new_eid {
+/// Make `plan` the bot's only pinned message: every other message the bot
+/// sent — old plans and reminders of any age or format — is unpinned.
+/// Messages people pinned stay.
+///
+/// Sent as one `m.room.pinned_events` event, computed from the list as the
+/// server has it now. (`Room::pin_event`/`unpin_event` each start from the
+/// locally cached list, which sync hasn't updated between two calls: a loop
+/// of them wrote the earlier pins back, and old plans piled up.)
+pub(crate) async fn pin_weekly_plan(ctx: &BotContext, room: &Room, plan: Option<&OwnedEventId>) {
+    let pinned = match room.load_pinned_events().await {
+        Ok(pinned) => pinned.unwrap_or_default(),
+        Err(e) => {
+            warn!("Pins: could not read the pinned messages: {e}");
+            return;
+        }
+    };
+    let known: HashSet<String> = {
+        let state = ctx.state.lock().await;
+        state
+            .weekly_plan_canonical
+            .values()
+            .cloned()
+            .chain(state.weekly_plan_event_ids.keys().cloned())
+            .chain(state.reminder_messages.keys().cloned())
+            .collect()
+    };
+    let mut bots = HashSet::new();
+    for id in &pinned {
+        if Some(id) != plan && (known.contains(id.as_str()) || is_own_or_gone(room, id).await) {
+            bots.insert(id.clone());
+        }
+    }
+    let wanted = wanted_pins(&pinned, plan, &bots);
+    if wanted == pinned {
+        return;
+    }
+    let content = RoomPinnedEventsEventContent::new(wanted);
+    match room.send_state_event(content).await {
+        Ok(_) => info!("Pins: {} unpinned, plan pinned", bots.len()),
+        Err(e) => warn!("Pins: could not update the pinned messages: {e}"),
+    }
+}
+
+/// Whether pinned `id` is the bot's own message — or no longer exists, so
+/// the pin shows nothing anyway. When unsure (a network error), no.
+async fn is_own_or_gone(room: &Room, id: &OwnedEventId) -> bool {
+    match room.event(id, None).await {
+        Ok(event) => event
+            .kind
+            .raw()
+            .deserialize_as::<serde_json::Value>()
+            .is_ok_and(|v| v["sender"].as_str() == room.client().user_id().map(|u| u.as_str())),
+        Err(e) => {
+            use matrix_sdk::ruma::api::error::ErrorKind;
+            matches!(e.client_api_error_kind(), Some(ErrorKind::NotFound))
+        }
+    }
+}
+
+/// The pinned list without the bot's messages, `plan` last (newest).
+fn wanted_pins(
+    pinned: &[OwnedEventId],
+    plan: Option<&OwnedEventId>,
+    bots: &HashSet<OwnedEventId>,
+) -> Vec<OwnedEventId> {
+    let mut wanted: Vec<OwnedEventId> = pinned
+        .iter()
+        .filter(|id| !bots.contains(*id) && Some(*id) != plan)
+        .cloned()
+        .collect();
+    wanted.extend(plan.cloned());
+    wanted
+}
+
+/// On startup: only the newest plan — this week's, or the last one before
+/// it — stays pinned of the bot's messages.
+pub async fn tidy_pins_on_startup(ctx: &BotContext, room: &Room) {
+    let plan = newest_plan(&*ctx.state.lock().await, current_iso_week());
+    pin_weekly_plan(ctx, room, plan.as_ref()).await;
+}
+
+/// The plan of `week`, or else the newest one before it.
+fn newest_plan(state: &crate::state::State, (year, week): (i32, u32)) -> Option<OwnedEventId> {
+    let this_week = format!("{year}-W{week:02}");
+    state
+        .weekly_plan_canonical
+        .iter()
+        .filter(|(key, _)| key.as_str() <= this_week.as_str())
+        .max_by(|a, b| a.0.cmp(b.0))
+        .and_then(|(_, id)| id.parse().ok())
+}
+
+// ── Reminders ─────────────────────────────────────────────────────────────────
+
+/// Send a reminder of `turns` (group, shift) in `week` — short, pinging only
+/// whoever is still open — and keep it to be updated as they finish
+/// (`refresh_reminders`). `None` when no open turn has anyone assigned.
+pub(crate) async fn send_reminder(
+    ctx: &BotContext,
+    room: &Room,
+    note: ReminderNote,
+    week: (i32, u32),
+    turns: Vec<(crate::domain::GroupId, u8)>,
+    txn_id: Option<String>,
+) -> anyhow::Result<Option<OwnedEventId>> {
+    let Some((text, mxids)) = reminder_text(&*ctx.state.lock().await, note, week, &turns) else {
+        return Ok(None);
+    };
+    let mut send = room.send(mention_message(&text, &mxids, room).await);
+    if let Some(txn_id) = txn_id {
+        send = send.with_transaction_id(txn_id.into());
+    }
+    let event_id = send
+        .await
+        .map_err(|e| anyhow::anyhow!("send failed: {e}"))?
+        .response
+        .event_id;
+    {
+        let mut state = ctx.state.lock().await;
+        let now = current_iso_week();
+        let last_week = crate::state::add_weeks(now.0, now.1, -1);
+        state
+            .reminder_messages
+            .retain(|_, r| (r.iso_year, r.iso_week) >= last_week);
+        state.reminder_messages.insert(
+            event_id.to_string(),
+            ReminderMessage {
+                iso_year: week.0,
+                iso_week: week.1,
+                note,
+                turns,
+                rendered: text,
+            },
+        );
+        state.save(&ctx.state_path).await?;
+    }
+    // Like on the plan: a ✅ to tap.
+    room.send(ReactionEventContent::new(Annotation::new(
+        event_id.clone(),
+        "✅".to_owned(),
+    )))
+    .await
+    .ok();
+    Ok(Some(event_id))
+}
+
+/// Bring the reminders of `week` up to date — who is done, who is still
+/// open. The edits notify nobody.
+async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) {
+    let stale: Vec<(String, String)> = {
+        let state = ctx.state.lock().await;
+        state
+            .reminder_messages
+            .iter()
+            .filter(|(_, r)| (r.iso_year, r.iso_week) == (year, week))
+            .filter_map(|(id, r)| {
+                let (text, _) = reminder_text(&state, r.note, (year, week), &r.turns)?;
+                (text != r.rendered).then(|| (id.clone(), text))
+            })
+            .collect()
+    };
+    for (id, text) in stale {
+        let Ok(event_id) = id.parse::<OwnedEventId>() else {
             continue;
-        }
-        if let Err(e) = room.unpin_event(&old_eid).await {
-            warn!("Failed to unpin {old_eid}: {e}");
+        };
+        let edit = crate::format::quiet(mention_message(&text, &[], room).await)
+            .make_replacement(ReplacementMetadata::new(event_id, None));
+        match room.send(edit).await {
+            Ok(_) => {
+                let mut state = ctx.state.lock().await;
+                if let Some(r) = state.reminder_messages.get_mut(&id) {
+                    r.rendered = text;
+                }
+                if let Err(e) = state.save(&ctx.state_path).await {
+                    warn!("Failed to save an updated reminder: {e}");
+                }
+            }
+            Err(e) => warn!("Failed to update a reminder: {e}"),
         }
     }
-    if let Err(e) = room.pin_event(new_eid).await {
-        warn!("Failed to pin weekly plan: {e}");
+}
+
+/// A reminder as it should read now, with the Matrix IDs to notify (those
+/// still open):
+///
+/// ```text
+/// ⏰ Still open, ends today: @bob (Bath · Thu–Fri) · Dan (Kitchen)
+/// ✅ alice (2nd Floor)
+/// React ✅ here or on the plan when it's done.
+/// ```
+///
+/// Once everyone is done: "✨ All done — thanks!" over the ✅ line. `None`
+/// when none of the turns has anyone assigned.
+pub(crate) fn reminder_text(
+    state: &crate::state::State,
+    note: ReminderNote,
+    week: (i32, u32),
+    turns: &[(crate::domain::GroupId, u8)],
+) -> Option<(String, Vec<String>)> {
+    let snapshot = crate::schedule::build_schedule_from(state, week, 1);
+    let duties: Vec<_> = snapshot
+        .assignments
+        .iter()
+        .filter(|a| turns.iter().any(|(g, s)| *g == a.group_id && *s == a.shift))
+        .filter(|a| a.assignee.is_some() && !a.is_skipped)
+        .collect();
+    if duties.is_empty() {
+        return None;
     }
+    let what = |a: &crate::schedule::AssignmentInstance| {
+        let mut parts = vec![a.group_name.clone()];
+        parts.extend(a.shift_label.clone());
+        parts.extend(a.slot_name.clone());
+        parts.join(" · ")
+    };
+    let mut open = Vec::new();
+    let mut done = Vec::new();
+    let mut mxids = Vec::new();
+    for a in duties {
+        let person = a.assignee.as_ref().expect("filtered above");
+        if a.is_completed {
+            let link = view::user_link(&crate::domain::Person {
+                id: person.id.clone(),
+                display_name: person.name.clone(),
+                active: true,
+                matrix_id: person.mxid.clone(),
+            });
+            done.push(format!("{link} ({})", what(a)));
+        } else {
+            open.push(format!(
+                "{} ({})",
+                person.mxid.as_deref().unwrap_or(&person.name),
+                what(a)
+            ));
+            mxids.extend(person.mxid.clone());
+        }
+    }
+    let mut lines = Vec::new();
+    if open.is_empty() {
+        lines.push("✨ All done — thanks!".to_owned());
+    } else {
+        let title = match note {
+            ReminderNote::StartsToday => "🔔 Your turn starts today:",
+            ReminderNote::EndsToday => "⏰ Still open, ends today:",
+            ReminderNote::StillOpen => "🔔 Still open this week:",
+        };
+        lines.push(format!("{title} {}", open.join(" · ")));
+    }
+    if !done.is_empty() {
+        lines.push(format!("✅ {}", done.join(" · ")));
+    }
+    if !open.is_empty() {
+        lines.push("React ✅ here or on the plan when it's done.".to_owned());
+    }
+    mxids.sort();
+    mxids.dedup();
+    Some((lines.join("\n"), mxids))
 }
 
 // ── Startup reconciliation ──────────────────────────────────────────────────
@@ -400,7 +674,8 @@ pub(crate) async fn pin_weekly_plan(room: &Room, new_eid: &OwnedEventId) {
 pub(crate) enum PlanReconcileAction {
     /// No plan is tracked for this week yet — nothing to check.
     NoPlanTracked,
-    /// Nothing is due/completed for this week — no message should exist.
+    /// The tracked message is gone and nothing is due this week (any more)
+    /// — no need to bring it back.
     NothingDue,
     /// The tracked message exists and its live content already matches
     /// persisted state.
@@ -446,11 +721,11 @@ pub(crate) fn decide_plan_reconcile_action(
         .cleaning_groups
         .iter()
         .any(|g| state.belongs_in_weekly_plan(g, year, week));
-    if !any_due {
-        return PlanReconcileAction::NothingDue;
-    }
 
+    // A plan whose groups were all disabled since is still edited, to say
+    // there's nothing to clean — it mustn't keep showing old duties.
     match actual_body {
+        None if !any_due => PlanReconcileAction::NothingDue,
         None => PlanReconcileAction::NeedsRecreate,
         Some(actual) if actual == expected_effective_body => PlanReconcileAction::AlreadyConsistent,
         Some(_) => PlanReconcileAction::NeedsEdit { event_id },
@@ -491,6 +766,7 @@ fn effective_plan_body(evt: &matrix_sdk::deserialized_responses::TimelineEvent) 
 /// A failure here (missing room, network error, ...) is logged and does not
 /// prevent the bot from starting.
 pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
+    let _operation = ctx.operations.lock().await;
     let Some(room) = client.get_room(&ctx.room_id) else {
         warn!(
             "Reconcile: bot is not in room {} — skipping startup reconciliation",
@@ -502,18 +778,14 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
     let week_key = format!("{year}-W{week:02}");
     info!("Reconcile: checking weekly plan for {week_key} against persisted state");
 
-    // Cheap pure pre-check (dummy body args — only NoPlanTracked/NothingDue
-    // are inspected here) so a brand-new/idle week never costs a Matrix
+    // Cheap pure pre-check (dummy body args — only NoPlanTracked is
+    // inspected here) so a week without a plan never costs a Matrix
     // round-trip.
     let stored_eid: Option<OwnedEventId> = {
         let state = ctx.state.lock().await;
         match decide_plan_reconcile_action(&state, year, week, "", None) {
             PlanReconcileAction::NoPlanTracked => {
                 info!("Reconcile: no weekly plan tracked for {week_key} — nothing to check");
-                None
-            }
-            PlanReconcileAction::NothingDue => {
-                info!("Reconcile: nothing due/completed for {week_key} — nothing to check");
                 None
             }
             _ => state
@@ -626,7 +898,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
                             )))
                             .await
                             .ok();
-                            pin_weekly_plan(&room, &new_eid).await;
+                            pin_weekly_plan(ctx, &room, Some(&new_eid)).await;
                             info!("Reconcile: recreated {week_key} plan message ({new_eid}) and pinned it");
                         }
                         Err(e) => error!(
@@ -648,6 +920,7 @@ pub(crate) fn build_weekly_plan(
     week: u32,
     due_groups: &[CleaningGroup],
 ) -> (String, Vec<String>) {
+    let snapshot = crate::schedule::build_schedule_from(state, (year, week), 1);
     let all_done = due_groups.iter().all(|g| {
         state
             .turns_in_week(g, year, week)
@@ -656,7 +929,9 @@ pub(crate) fn build_weekly_plan(
     });
     let mut lines = vec![
         format!("🧹 **{}**", view::week_label(year, week)),
-        if all_done && !due_groups.is_empty() {
+        if due_groups.is_empty() {
+            "No cleaning due this week.".to_owned()
+        } else if all_done {
             "✨ All done for this week — thank you!".to_owned()
         } else {
             "React ✅ when your part is done 🫧".to_owned()
@@ -667,7 +942,7 @@ pub(crate) fn build_weekly_plan(
         lines.push(String::new());
         lines.extend(group_heading(group));
         for turn in state.turns_in_week(group, year, week) {
-            for (line, mxid) in turn_lines(state, group, turn, true) {
+            for (line, mxid) in turn_lines(&snapshot, group, turn, true) {
                 lines.push(line);
                 all_mxids.extend(mxid);
             }
@@ -692,82 +967,36 @@ pub(crate) fn group_heading(group: &CleaningGroup) -> Vec<String> {
     lines
 }
 
-/// "Thu–Sun · Scharni: " — what part of the turn a line is about, empty
-/// for a group that is neither split into shifts nor slots.
-pub(crate) fn duty_prefix(group: &CleaningGroup, slot_index: usize, turn: Turn) -> String {
-    let shift = turn.shift_label(&group.rhythm);
-    match (shift, group.slots.get(slot_index)) {
-        (Some(shift), Some(slot)) => format!("{shift} · {}: ", slot.name),
-        (Some(shift), None) => format!("{shift}: "),
-        (None, Some(slot)) => format!("{}: ", slot.name),
-        (None, None) => String::new(),
-    }
-}
-
 /// One line per slot of a turn, with the assignee's MXID for mentions —
 /// "⬜ @bob", "✅ Scharni: @alice", "⬜ Thu–Sun: @carol 🌴 away" — each
 /// slot's rooms indented below it. `with_done` also lists finished slots.
 fn turn_lines(
-    state: &crate::state::State,
+    snapshot: &crate::schedule::ScheduleSnapshot,
     group: &CleaningGroup,
     turn: Turn,
     with_done: bool,
 ) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
-    for (slot_index, assignee) in state.turn_assignees(group, turn) {
-        let completion = state.completion_for(group, slot_index, turn);
-        if completion.is_some() && !with_done {
+    for a in snapshot
+        .assignments
+        .iter()
+        .filter(|a| a.group_id == group.id && a.shift == turn.shift)
+    {
+        if a.is_completed && !with_done {
             continue;
         }
-        let what = duty_prefix(group, slot_index, turn);
-        let who = assignee.map_or("nobody assigned", view::mention);
-        let line = match completion {
-            Some(c) if c.skipped => format!("⏭️ {what}{who} · skipped"),
-            Some(_) => format!("✅ {what}{who}"),
-            None => {
-                let away = assignee
-                    .filter(|p| state.is_absent(&p.id, &group.id, turn.year, turn.week))
-                    .map_or("", |_| " 🌴 away");
-                format!("⬜ {what}{who}{away}")
-            }
-        };
-        out.push((line, assignee.and_then(|p| p.matrix_id.clone())));
-        if let Some(slot) = group.slots.get(slot_index) {
-            if !slot.room_names.is_empty() {
-                out.push((
-                    format!("{}{}", view::INDENT, view::rooms(&slot.room_names)),
-                    None,
-                ));
-            }
+        out.push((
+            a.matrix_line(false, true),
+            a.assignee.as_ref().and_then(|p| p.mxid.clone()),
+        ));
+        if a.slot_name.is_some() && !a.room_names.is_empty() {
+            out.push((
+                format!("{}{}", view::INDENT, view::rooms(&a.room_names)),
+                None,
+            ));
         }
     }
     out
-}
-
-/// A consolidated turn reminder: the shifts starting today, or the open
-/// turns ending today.
-fn build_turn_reminder(
-    state: &crate::state::State,
-    kind: &ReminderKind,
-    turns: &[(CleaningGroup, Turn)],
-) -> (String, Vec<String>) {
-    let title = match kind {
-        ReminderKind::Initial => "🔔 **Your turn starts today**",
-        _ => "⏰ **Still open · ends today**",
-    };
-    let mut lines = vec![title.to_owned()];
-    let mut all_mxids: Vec<String> = Vec::new();
-    for (group, turn) in turns {
-        lines.push(String::new());
-        lines.extend(group_heading(group));
-        for (line, mxid) in turn_lines(state, group, *turn, false) {
-            lines.push(line);
-            all_mxids.extend(mxid);
-        }
-    }
-    all_mxids.sort();
-    all_mxids.dedup();
-    (lines.join("\n"), all_mxids)
 }
 
 /// Parse "HH:MM" → (hour, minute). Falls back to (9, 0) on bad input.
@@ -785,7 +1014,189 @@ mod tests {
         domain::{CleaningGroup, Person, SlotAssignment},
         state::{Absence, State},
     };
+    use matrix_sdk::ruma::events::room::message::Relation;
     use std::collections::HashMap;
+
+    #[test]
+    fn only_the_newest_plan_stays_pinned_of_the_bots_messages() {
+        let id = |s: &str| OwnedEventId::try_from(s).unwrap();
+        let pinned = [
+            id("$plan38"),
+            id("$house_rules"),
+            id("$plan39"),
+            id("$plan40"),
+        ];
+        let bots: HashSet<_> = [id("$plan38"), id("$plan39")].into();
+        // People's pins stay where they were; the plan goes last (newest).
+        let wanted = wanted_pins(&pinned, Some(&id("$plan40")), &bots);
+        assert_eq!(wanted, [id("$house_rules"), id("$plan40")]);
+        // Applying it again changes nothing — no needless state event.
+        assert_eq!(wanted_pins(&wanted, Some(&id("$plan40")), &bots), wanted);
+        // No plan yet: only the bot's pins go.
+        assert_eq!(
+            wanted_pins(&pinned, None, &bots),
+            [id("$house_rules"), id("$plan40")]
+        );
+
+        // On startup: this week's plan, else the newest before it.
+        let mut state = State::default();
+        for (key, eid) in [
+            ("2026-W38", "$plan38"),
+            ("2026-W39", "$plan39"),
+            ("2026-W41", "$plan41"),
+        ] {
+            state.weekly_plan_canonical.insert(key.into(), eid.into());
+        }
+        assert_eq!(newest_plan(&state, (2026, 40)), Some(id("$plan39")));
+        assert_eq!(newest_plan(&state, (2026, 41)), Some(id("$plan41")));
+        assert_eq!(newest_plan(&state, (2026, 37)), None);
+    }
+
+    #[test]
+    fn a_reminder_is_short_pings_only_whos_open_and_shows_whos_done() {
+        let alice = Person::new_matrix("@alice:example.org");
+        let bob = Person::new_matrix("@bob:example.org");
+        let dan = Person::new_named("Dan");
+        let mut floor = CleaningGroup::new("Floor");
+        floor.slots = vec![
+            crate::domain::CleaningSlot::new("Scharni"),
+            crate::domain::CleaningSlot::new("Colbe"),
+        ];
+        let kitchen = CleaningGroup::new("Kitchen");
+        let mut hall = CleaningGroup::new("Hall");
+        hall.member_ids = vec![dan.id.clone()];
+        let (year, week) = (2024, 10);
+        let mut state = State::default();
+        for (group, slot, who) in [
+            (&floor, 0, Some(&alice.id)),
+            (&floor, 1, Some(&bob.id)),
+            (&kitchen, 0, Some(&dan.id)),
+            (&hall, 0, None),
+        ] {
+            state.slot_assignments.push(SlotAssignment {
+                group_id: group.id.clone(),
+                slot_index: slot,
+                iso_year: year,
+                iso_week: week,
+                shift: 0,
+                person_id: who.cloned(),
+                source: Default::default(),
+            });
+        }
+        let turns: Vec<_> = [&floor, &kitchen, &hall]
+            .iter()
+            .map(|g| (g.id.clone(), 0))
+            .collect();
+        let (floor_id, alice_id) = (floor.id.clone(), alice.id.clone());
+        state.persons = vec![alice, bob, dan];
+        state.cleaning_groups = vec![floor, kitchen, hall.clone()];
+
+        let (text, mxids) =
+            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns).unwrap();
+        assert_eq!(
+            text,
+            "⏰ Still open, ends today: @alice:example.org (Floor · Scharni) · \
+             @bob:example.org (Floor · Colbe) · Dan (Kitchen)\n\
+             React ✅ here or on the plan when it's done."
+        );
+        assert_eq!(mxids, ["@alice:example.org", "@bob:example.org"]);
+
+        // Alice is done: she moves to the ✅ line, as a pill that pings nobody.
+        state
+            .apply_event(crate::analytics::DomainEvent::CleaningCompleted {
+                group_id: floor_id.clone(),
+                slot_id: Some(state.cleaning_groups[0].slots[0].id.clone()),
+                person_id: alice_id,
+                responsible_person_ids: vec![],
+                iso_year: year,
+                iso_week: week,
+                shift: 0,
+            })
+            .unwrap();
+        let (text, mxids) =
+            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns).unwrap();
+        assert!(
+            text.contains(
+                "\n✅ [alice](https://matrix.to/#/@alice:example.org) (Floor · Scharni)\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(mxids, ["@bob:example.org"]);
+
+        // Everyone done (or excused): it says so, and asks nothing more.
+        state.completions.clear();
+        let all_done: Vec<_> = state
+            .cleaning_groups
+            .iter()
+            .map(|g| {
+                (
+                    g.id.clone(),
+                    g.slots.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        for (group_id, slots) in all_done {
+            let slots = if slots.is_empty() {
+                vec![None]
+            } else {
+                slots.into_iter().map(Some).collect()
+            };
+            for slot_id in slots {
+                state
+                    .apply_event(crate::analytics::DomainEvent::CleaningCompleted {
+                        group_id: group_id.clone(),
+                        slot_id,
+                        person_id: state.persons[2].id.clone(),
+                        responsible_person_ids: vec![],
+                        iso_year: year,
+                        iso_week: week,
+                        shift: 0,
+                    })
+                    .unwrap();
+            }
+        }
+        let (text, mxids) =
+            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns).unwrap();
+        assert!(text.starts_with("✨ All done — thanks!\n✅ "), "{text}");
+        assert!(!text.contains("React"), "{text}");
+        assert!(mxids.is_empty());
+
+        // Only unassigned turns: nobody to remind.
+        assert!(reminder_text(
+            &state,
+            ReminderNote::StillOpen,
+            (year, week),
+            &[(hall.id, 0)]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_missed_weekly_plan_is_caught_up_once_also_after_a_restart() {
+        let mut state = State::default();
+        state.cleaning_groups.push(CleaningGroup::new("Hall"));
+        let (year, week) = (2026, 40);
+        // Plan day Wednesday: not before, but any later day of the week.
+        assert!(!weekly_plan_due(&state, year, week, 1, 2));
+        assert!(weekly_plan_due(&state, year, week, 2, 2));
+        assert!(weekly_plan_due(&state, year, week, 5, 2));
+        // Posted (on Saturday, after downtime): never again that week.
+        state
+            .weekly_plan_canonical
+            .insert(format!("{year}-W{week:02}"), "$plan".into());
+        let restored: State =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(!weekly_plan_due(&restored, year, week, 6, 2));
+        assert!(weekly_plan_due(&restored, year, week + 1, 2, 2));
+    }
+
+    #[test]
+    fn a_plan_with_nothing_due_says_so() {
+        let state = State::default();
+        let (plan, mxids) = build_weekly_plan(&state, 2026, 40, &[]);
+        assert!(plan.ends_with("\nNo cleaning due this week."), "{plan}");
+        assert!(mxids.is_empty());
+    }
 
     #[test]
     fn plan_marks_an_already_frozen_but_now_absent_assignee_as_away() {
@@ -1226,9 +1637,9 @@ mod tests {
             plan,
             format!(
                 "🧹 **{}**\nReact ✅ when your part is done 🫧\n\n\
-                 **Hall**\n{i}🧽 Stairs, Entrance\n⬜ Bob\n\n\
-                 **Floor**\n✅ Scharni: @alice:example.org\n{i}🚽 Toilet · 🚿 Shower\n⬜ Colbe: Bob",
-                view::week_label(year, week)
+                 **Hall**\n{i}🧽 Stairs, Entrance\n❌ Bob · missed\n\n\
+                 **Floor**\n✅ Scharni: @alice:example.org · {}\n{i}🚽 Toilet · 🚿 Shower\n❌ Colbe: Bob · missed",
+                view::week_label(year, week), crate::state::local_time(state.completions[0].completed_at).format("%a %-d %b")
             )
         );
         assert_eq!(mxids, vec!["@alice:example.org".to_owned()]);
@@ -1443,7 +1854,7 @@ mod tests {
         // by name, distinct from an arbitrary stale-text edit.
         let (mut state, year, week, _) = plan_reconcile_fixture();
         let (open_text, _) = build_weekly_plan(&state, year, week, &state.cleaning_groups);
-        assert!(open_text.contains('⬜'), "{open_text}");
+        assert!(open_text.contains('❌'), "{open_text}");
 
         let bid = state.persons[0].id.clone();
         let gid = state.cleaning_groups[0].id.clone();

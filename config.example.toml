@@ -9,6 +9,8 @@ device_id     = "REPLACE_ME"
 [security]
 # Users allowed to invite the bot ("all" = anyone, [] = nobody).
 # Configured admins may always open a direct chat with the bot.
+# Residents who want to use the bot privately (!next, !mygroups, !ical in
+# an encrypted direct chat) must be allowed here, or the bot won't join.
 allowed_inviters = ["@admin:example.org"]
 # Only these users may run admin commands, also privately in a direct chat
 # with the bot (!groups add, !member add, …).
@@ -21,10 +23,11 @@ room_id = "!REPLACE_ME:example.org"
 
 # Default rhythm for new groups: cleaned every N weeks. Each group's rhythm
 # is set in the bot with `!groups rhythm <group> …` (e.g. `2x` = two shifts
-# per week, Mon–Wed and Thu–Sun, each with its own person; `every 2`).
+# per week, Mon–Tue and Thu–Fri, each with its own person; `every 2`).
 interval_weeks = 1
 
 # Day of week the weekly plan is posted and pinned: 0 = Monday … 6 = Sunday.
+# If the bot is down that day, it posts the plan later in the same week.
 # A shift starting later in the week gets its own reminder that day.
 reminder_weekday = 0          # Monday
 
@@ -32,12 +35,33 @@ reminder_weekday = 0          # Monday
 # Shifts get theirs on their own last day.
 final_reminder_weekday = 6    # Sunday
 
-# IANA timezone used for weekday calculations.
+# Local time (HH:MM) from which the plan and reminders are sent each day.
+reminder_time = "09:00"
+
+# IANA timezone used for weekdays, dates and reminder times.
 timezone = "Europe/Berlin"
 
-# Post a weekly stats summary on this weekday (0=Mon … 6=Sun).
-# Comment out to disable.
-summary_weekday = 0   # Monday
+# How many due weeks per group are planned ahead (1–104). Planned weeks are
+# fixed: later joins and leaves don't reshuffle them.
+materialize_weeks = 26
+
+# Only "round_robin" is implemented (the default).
+# fill_strategy = "round_robin"
+
+# ── Calendar feeds (optional) ──────────────────────────────────────────────────
+# With this section, `!ical` (in an encrypted private chat with the bot) gives
+# each resident a private subscription URL. Without it, `!ical` sends a .ics
+# file instead.
+#
+# The feed URLs are bearer secrets and are stored in state.json so they can be
+# shown again: keep state.json and its backups private, serve the feed over
+# HTTPS only, and keep /ical/ paths out of proxy access logs.
+# `!ical reset` replaces a link, `!ical revoke` (admins: `!ical revoke <person>`)
+# switches it off.
+#
+# [ical_server]
+# bind_addr  = "0.0.0.0:8080"
+# public_url = "https://cal.example.org"
 
 # ── Groups and members ─────────────────────────────────────────────────────────
 # Groups and members are managed at runtime via bot commands — not in this file.

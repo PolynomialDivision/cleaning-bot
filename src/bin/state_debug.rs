@@ -4,6 +4,11 @@
 //! schedule, completions, pending swaps, inactive stubs, and a validation
 //! summary.
 //!
+//! It reads its own simplified copy of the types and knows nothing of
+//! per-group rhythms (shifts, windows, versions) or slot assignments — its
+//! "schedule" is a plain weekly rotation guess, not what the bot plans. Use
+//! the bot's `!plan`, `!status` and `!validate` for that.
+//!
 //! Usage:
 //!   cargo run --bin state_debug                          # ./store/state.json
 //!   cargo run --bin state_debug -- /path/to/state.json

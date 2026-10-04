@@ -101,6 +101,30 @@ pub enum ReminderKind {
     WeeklySummary,
 }
 
+/// A reminder message the bot sent, kept up to date as people finish.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ReminderMessage {
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub note: ReminderNote,
+    /// The turns it reminds of: (group, shift) in that week.
+    pub turns: Vec<(GroupId, u8)>,
+    /// The text it shows now.
+    pub rendered: String,
+}
+
+/// What a reminder says about its turns.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReminderNote {
+    /// A shift starting today (the week's first is announced by the plan).
+    StartsToday,
+    /// Open turns on their last day.
+    EndsToday,
+    /// `!plan remind`: open turns of this week.
+    StillOpen,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SentReminder {
     /// A group id, or `*` for the consolidated weekly plan.
@@ -123,6 +147,21 @@ pub struct SentReminder {
 pub struct GroupSelector {
     /// Whose selector it is; nobody else's taps count.
     pub user_id: String,
+    /// Empty in old state means the configured cleaning room.
+    #[serde(default)]
+    pub room_id: String,
+    /// What the last tap did ("✅ Joined **Kitchen**", or why not).
+    #[serde(default)]
+    pub feedback: Option<String>,
+    /// `event_log` length when `feedback` was given; once the owner's
+    /// memberships change after that, the feedback is out of date.
+    #[serde(default)]
+    pub feedback_at: Option<usize>,
+    /// Only set in a verified private room.
+    #[serde(default)]
+    pub calendar_url: Option<String>,
+    #[serde(default)]
+    pub contact_url: Option<String>,
     /// The groups offered, in number order (1️⃣ first). Fixed once posted,
     /// so a number always means the same group.
     pub group_ids: Vec<GroupId>,
@@ -142,6 +181,8 @@ pub struct GroupSelector {
 pub struct SelectorTap {
     pub group_id: GroupId,
     pub effect: TapEffect,
+    #[serde(default)]
+    pub applied_at_event: Option<usize>,
     /// The reaction was taken back (and its effect undone, if it still
     /// applied).
     #[serde(default)]
@@ -158,6 +199,34 @@ pub enum TapEffect {
 }
 
 pub use crate::domain::CalendarToken;
+
+/// Event IDs seen recently, oldest first, capped at `RecentIds::CAP`.
+/// Matrix only re-delivers recent events (after a restart, from the last
+/// sync token), so older IDs can go. Serialized as a plain list — the same
+/// JSON as the `HashSet` it replaces.
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(transparent)]
+pub struct RecentIds(std::collections::VecDeque<String>);
+
+impl RecentIds {
+    const CAP: usize = 2000;
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.0.iter().any(|seen| seen == id)
+    }
+
+    /// Remember `id`; false when it was already known.
+    pub fn insert(&mut self, id: String) -> bool {
+        if self.contains(&id) {
+            return false;
+        }
+        self.0.push_back(id);
+        while self.0.len() > Self::CAP {
+            self.0.pop_front();
+        }
+        true
+    }
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -192,6 +261,8 @@ pub struct State {
     /// Updated on every save; used as deterministic DTSTAMP in ICS exports.
     #[serde(default)]
     pub last_modified: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub schedule_fingerprint: String,
     /// event_id → (iso_year, iso_week)  (consolidated weekly plan / final-reminder messages)
     #[serde(default)]
     pub weekly_plan_event_ids: HashMap<String, (i32, u32)>,
@@ -211,10 +282,36 @@ pub struct State {
     pub weekly_plan_rendered: HashMap<String, String>,
     #[serde(default)]
     pub reaction_dones: HashMap<String, ReactionDone>,
+    /// Reminder messages by event ID, of this and last week: edited as
+    /// people finish, and a ✅ on them counts like one on the plan.
+    #[serde(default)]
+    pub reminder_messages: HashMap<String, ReminderMessage>,
+    /// Reactions that were redacted — by their sender (an undo) or by the
+    /// bot (a consumed selector tap) — so a late or repeated delivery of the
+    /// reaction itself is ignored. Only the most recent are kept.
+    #[serde(default)]
+    pub redacted_reactions: RecentIds,
+    /// ✅ reaction event ID → when the completions it made were recorded, so
+    /// taking an old reaction back can't undo a newer completion of the
+    /// same turn. Absent for reactions from before this was tracked.
+    #[serde(default)]
+    pub reaction_completion_times: HashMap<String, Vec<DateTime<Utc>>>,
+    /// "`event_id`:`line`" of commands already run, so a re-delivered
+    /// message doesn't run them twice. Only the most recent are kept.
+    #[serde(default)]
+    pub processed_commands: RecentIds,
+    /// The command now running; `save` marks it processed together with its
+    /// first change, so a crash after that doesn't run it again.
+    #[serde(skip)]
+    pub active_command: Option<String>,
     /// Matrix users who have had their welcome — once each, ever. (Named
     /// for the old greeting, so everyone greeted by it still counts.)
     #[serde(default)]
     pub greeted_users: HashSet<String>,
+    /// "`room`|`user`" → a first welcome being sent, kept until it is
+    /// recorded as sent so a retry sends the very same message.
+    #[serde(default)]
+    pub pending_welcomes: HashMap<String, GroupSelector>,
     /// Live group selectors by event ID — the latest one per user.
     #[serde(default)]
     pub group_selectors: HashMap<String, GroupSelector>,
@@ -650,7 +747,8 @@ impl State {
                 // given slot and/or shift.
                 let shifts: Vec<u8> = match shift {
                     Some(s) => vec![*s],
-                    None => (0..group.rhythm.shift_count() as u8).collect(),
+                    None => (0..group.rhythm.for_week(*iso_year, *iso_week).shift_count() as u8)
+                        .collect(),
                 };
                 let slots: Vec<Option<SlotId>> = if group.is_multi_slot() {
                     group
@@ -807,7 +905,28 @@ impl State {
     }
 
     pub async fn save(&mut self, path: &Path) -> Result<()> {
-        self.last_modified = Some(Utc::now());
+        if let Some(key) = &self.active_command {
+            self.processed_commands.insert(key.clone());
+        }
+        // Completion times only matter while the reaction can still be undone.
+        let dones = &self.reaction_dones;
+        self.reaction_completion_times
+            .retain(|id, _| dones.contains_key(id));
+        use sha2::{Digest, Sha256};
+        let data = serde_json::to_value((
+            &self.persons,
+            &self.cleaning_groups,
+            &self.slot_assignments,
+            &self.completions,
+            &self.absences,
+            &self.swap_requests,
+            self.created_at,
+        ))?;
+        let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&data)?));
+        if fingerprint != self.schedule_fingerprint {
+            self.last_modified = Some(Utc::now());
+            self.schedule_fingerprint = fingerprint;
+        }
         mxbot_common::persist::save_json_atomic(path, self).await
     }
 
@@ -893,7 +1012,7 @@ impl State {
     /// True when `group` is cleaned in this ISO week: every
     /// `rhythm.every_weeks` weeks, counted from the tracking start.
     pub fn is_due_week(&self, group: &CleaningGroup, year: i32, week: u32) -> bool {
-        let every = group.rhythm.every_weeks() as i64;
+        let every = group.rhythm.for_week(year, week).every_weeks() as i64;
         let offset = weeks_between(self.tracking_start(), (year, week));
         offset.rem_euclid(every) == 0
     }
@@ -904,7 +1023,7 @@ impl State {
         if !self.is_due_week(group, year, week) {
             return Vec::new();
         }
-        (0..group.rhythm.shift_count() as u8)
+        (0..group.rhythm.for_week(year, week).shift_count() as u8)
             .map(|shift| Turn::new(year, week, shift))
             .collect()
     }
@@ -927,10 +1046,10 @@ impl State {
 
     /// First week at or after `from` in which `group` is due.
     pub fn next_due_week(&self, group: &CleaningGroup, from: (i32, u32)) -> (i32, u32) {
-        let every = group.rhythm.every_weeks() as i64;
-        let offset = weeks_between(self.tracking_start(), from);
-        let ahead = (every - offset.rem_euclid(every)) % every;
-        add_weeks(from.0, from.1, ahead)
+        (0..=104)
+            .map(|i| add_weeks(from.0, from.1, i))
+            .find(|&(y, w)| self.is_due_week(group, y, w))
+            .unwrap_or(from)
     }
 
     /// The turn running today, if the group is due this week.
@@ -941,11 +1060,10 @@ impl State {
             return None;
         }
         let weekday = today.weekday().num_days_from_monday() as u8;
-        Some(Turn::new(
-            year,
-            week,
-            group.rhythm.shift_for_weekday(weekday),
-        ))
+        let rhythm = group.rhythm.for_week(year, week);
+        rhythm
+            .contains_weekday(weekday)
+            .then(|| Turn::new(year, week, rhythm.shift_for_weekday(weekday)))
     }
 
     /// The turn has begun (its first day is today or earlier).
@@ -1238,6 +1356,10 @@ pub fn current_iso_week() -> (i32, u32) {
 }
 
 /// Today's date in the configured local timezone (see `current_iso_week`).
+pub fn local_time(at: DateTime<Utc>) -> DateTime<chrono_tz::Tz> {
+    at.with_timezone(&TIMEZONE.get().copied().unwrap_or(chrono_tz::UTC))
+}
+
 pub fn today() -> NaiveDate {
     let tz = TIMEZONE.get().copied().unwrap_or(chrono_tz::UTC);
     Utc::now().with_timezone(&tz).date_naive()
@@ -1270,6 +1392,20 @@ pub fn week_dates(year: i32, week: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_ids_forget_the_oldest_and_read_the_old_set_format() {
+        let mut ids: RecentIds = serde_json::from_str(r#"["$a", "$b"]"#).unwrap();
+        assert!(ids.contains("$a"));
+        assert!(!ids.insert("$b".into()));
+        for n in 0..RecentIds::CAP {
+            ids.insert(format!("${n}"));
+        }
+        assert!(!ids.contains("$a") && !ids.contains("$b"));
+        assert!(ids.contains("$0") && ids.contains(&format!("${}", RecentIds::CAP - 1)));
+        let json = serde_json::to_value(&ids).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), RecentIds::CAP);
+    }
 
     #[test]
     fn iso_week_follows_local_midnight_not_utc_midnight() {

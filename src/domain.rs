@@ -183,11 +183,13 @@ impl CleaningGroup {
 
 // ── CalendarToken ─────────────────────────────────────────────────────────────
 
-/// A per-person iCal feed token.  Only the SHA-256 hash is persisted;
-/// the raw token is shown once and never stored.
+/// A per-person iCal bearer token. Legacy records have only a hash; new
+/// records also retain the secret for repeat private delivery. Protect state/backups.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CalendarToken {
-    pub id: String,         // UUID for the record itself
+    pub id: String, // UUID for the record itself
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_token: Option<String>,
     pub token_hash: String, // hex SHA-256 of the 32-byte raw token
     pub person_id: PersonId,
     pub created_at: DateTime<Utc>,
@@ -205,6 +207,9 @@ pub fn new_calendar_token() -> (String, String) {
 
 /// Verify a raw hex token string against a stored SHA-256 hash.
 pub fn verify_calendar_token(token_hex: &str, stored_hash: &str) -> bool {
+    if token_hex.len() != 64 {
+        return false;
+    }
     let Ok(raw) = hex::decode(token_hex) else {
         return false;
     };

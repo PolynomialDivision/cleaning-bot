@@ -33,6 +33,10 @@ pub struct AssignmentInstance {
     pub uid: String,
     pub group_id: GroupId,
     pub group_name: String,
+    pub slot_index: usize,
+    pub source: crate::domain::AssignmentSource,
+    pub is_away: bool,
+    pub completion_time: Option<chrono::DateTime<Utc>>,
     /// `Some` for multi-slot groups; `None` for single-slot groups.
     #[allow(dead_code)]
     pub slot_id: Option<SlotId>,
@@ -63,6 +67,69 @@ pub struct AssignmentInstance {
 }
 
 impl AssignmentInstance {
+    pub fn matrix_line(&self, include_group: bool, notify: bool) -> String {
+        let mut labels = Vec::new();
+        if include_group {
+            labels.push(self.group_name.clone());
+        }
+        labels.extend(self.shift_label.clone());
+        labels.extend(self.slot_name.clone());
+        let prefix = if labels.is_empty() {
+            String::new()
+        } else {
+            format!("{}: ", labels.join(" · "))
+        };
+        let who = self
+            .assignee
+            .as_ref()
+            .map(|p| {
+                if notify {
+                    p.mxid.clone().unwrap_or_else(|| p.name.clone())
+                } else {
+                    crate::view::user_link(&crate::domain::Person {
+                        id: p.id.clone(),
+                        display_name: p.name.clone(),
+                        active: true,
+                        matrix_id: p.mxid.clone(),
+                    })
+                }
+            })
+            .unwrap_or_else(|| "nobody assigned".into());
+        let (icon, mut note) = if self.is_skipped {
+            ("⏭️", " · skipped".to_string())
+        } else if self.is_completed {
+            let by = self
+                .completed_by
+                .as_ref()
+                .filter(|by| by.as_str() != self.assignee_name())
+                .map(|by| format!(" · done by {by}"))
+                .unwrap_or_default();
+            let at = self
+                .completion_time
+                .map(|at| format!(" · {}", crate::state::local_time(at).format("%a %-d %b")))
+                .unwrap_or_default();
+            ("✅", format!("{by}{at}"))
+        } else if self.end < crate::state::today() {
+            ("❌", " · missed".into())
+        } else {
+            (
+                "⬜",
+                if self.is_away {
+                    " 🌴 away".into()
+                } else {
+                    String::new()
+                },
+            )
+        };
+        if self.is_away && !note.contains("away") && !self.is_completed {
+            note.push_str(" 🌴 away");
+        }
+        if let Some(source) = crate::view::source_note(&self.source) {
+            note.push_str(&format!(" · {source}"));
+        }
+        format!("{icon} {prefix}{who}{note}")
+    }
+
     /// The assignee display name, or "(nobody assigned)" fallback.
     pub fn assignee_name(&self) -> &str {
         self.assignee
@@ -115,6 +182,32 @@ impl ScheduleSnapshot {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 
+/// A scratch copy of the scheduling data with the next `cycles` due weeks
+/// of every group planned. Leaves out the event log and the bot's message
+/// bookkeeping, which planning never reads — copying those for every
+/// preview would cost more than the planning itself.
+fn project(state: &State, cycles: usize) -> State {
+    let mut projection = State {
+        persons: state.persons.clone(),
+        cleaning_groups: state.cleaning_groups.clone(),
+        slot_assignments: state.slot_assignments.clone(),
+        completions: state.completions.clone(),
+        swap_requests: state.swap_requests.clone(),
+        absences: state.absences.clone(),
+        created_at: state.created_at,
+        last_modified: state.last_modified,
+        ..State::default()
+    };
+    for event in crate::resolver::materialize(state, cycles) {
+        // The resolver only plans existing groups and people; if an event
+        // is refused anyway, that turn just shows as not yet planned.
+        if let Err(e) = projection.apply_event(event) {
+            tracing::warn!("Schedule preview skipped a planned turn: {e}");
+        }
+    }
+    projection
+}
+
 /// Build a deterministic schedule snapshot of the next `weeks` calendar
 /// weeks (from the current one): every turn of every active group in that
 /// range — each group in its own rhythm, one entry per slot of each turn —
@@ -123,8 +216,25 @@ impl ScheduleSnapshot {
 /// Does NOT mutate state. Reads completions for status, then returns a fully
 /// resolved, immutable snapshot.
 pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
-    let first = current_iso_week();
+    build_schedule_from(state, current_iso_week(), weeks)
+}
+
+/// `build_schedule` for `weeks` weeks from `first` — earlier weeks too
+/// (`!plan pdf history`), read from what was recorded.
+///
+/// Weeks not yet planned are filled in on a scratch copy, exactly as
+/// `resolver::materialize` would plan them for real, so a preview shows what
+/// will happen and `state` itself stays untouched.
+pub fn build_schedule_from(state: &State, first: (i32, u32), weeks: usize) -> ScheduleSnapshot {
     let last = add_weeks(first.0, first.1, weeks.max(1) as i64 - 1);
+    let horizon = crate::state::weeks_between(current_iso_week(), last);
+    let projection;
+    let state = if horizon >= 0 {
+        projection = project(state, horizon as usize + 1);
+        &projection
+    } else {
+        state
+    };
     let mut assignments = Vec::new();
 
     for group in state.cleaning_groups.iter().filter(|g| g.is_active) {
@@ -162,6 +272,22 @@ pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
                     uid,
                     group_id: group.id.clone(),
                     group_name: group.name.clone(),
+                    slot_index,
+                    source: state
+                        .slot_assignments
+                        .iter()
+                        .find(|a| {
+                            a.group_id == group.id
+                                && a.slot_index == slot_index
+                                && (a.iso_year, a.iso_week, a.shift)
+                                    == (turn.year, turn.week, turn.shift)
+                        })
+                        .map(|a| a.source.clone())
+                        .unwrap_or_default(),
+                    is_away: assignee
+                        .as_ref()
+                        .is_some_and(|p| state.is_absent(&p.id, &group.id, turn.year, turn.week)),
+                    completion_time: completion.filter(|c| !c.skipped).map(|c| c.completed_at),
                     slot_id: slot.map(|s| s.id.clone()),
                     slot_name: slot.map(|s| s.name.clone()),
                     room_names: slot
@@ -173,7 +299,7 @@ pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
                     end,
                     period_label: turn.period_label(&group.rhythm),
                     shift_label: turn.shift_label(&group.rhythm),
-                    rhythm: group.rhythm.describe(),
+                    rhythm: group.rhythm.for_week(turn.year, turn.week).describe(),
                     assignee,
                     is_completed: completion.is_some(),
                     is_skipped: completion.is_some_and(|c| c.skipped),
@@ -182,7 +308,7 @@ pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
                         .map(|p| p.display_name.clone()),
                     completed_at: completion
                         .filter(|c| !c.skipped)
-                        .map(|c| c.completed_at.date_naive()),
+                        .map(|c| crate::state::local_time(c.completed_at).date_naive()),
                 });
             }
         }
@@ -192,7 +318,7 @@ pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
         (
             a.start,
             order.iter().position(|id| **id == a.group_id),
-            a.slot_name.clone(),
+            a.slot_index,
         )
     });
 
@@ -200,7 +326,7 @@ pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
     let state_timestamp = state
         .last_modified
         .or(state.created_at)
-        .unwrap_or_else(Utc::now);
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
 
     ScheduleSnapshot {
         state_timestamp,

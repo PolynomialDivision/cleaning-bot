@@ -38,6 +38,15 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
         });
 
         let mut desc_parts = vec![a.period_label.clone()];
+        if let Some(slot) = &a.slot_name {
+            desc_parts.push(format!("Task: {slot}"));
+        }
+        if a.is_skipped {
+            desc_parts.push("Skipped — no cleaning required".into());
+        }
+        if let Some(date) = a.completed_at {
+            desc_parts.push(format!("Completed: {date}"));
+        }
         if !a.room_names.is_empty() {
             desc_parts.push(format!("Rooms: {}", a.room_names.join(", ")));
         }
@@ -76,9 +85,17 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
         prop(&mut events, "DTEND;VALUE=DATE", &dtend);
         prop(&mut events, "SUMMARY", &summary);
         prop(&mut events, "DESCRIPTION", &description);
-        if a.is_completed {
-            prop(&mut events, "STATUS", "COMPLETED");
-        }
+        prop(
+            &mut events,
+            "STATUS",
+            if a.is_skipped {
+                "CANCELLED"
+            } else {
+                "CONFIRMED"
+            },
+        );
+        prop(&mut events, "LAST-MODIFIED", &dtstamp);
+        prop(&mut events, "TRANSP", "TRANSPARENT");
         events.push_str("END:VEVENT\r\n");
     }
 
@@ -91,7 +108,7 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
     prop(
         &mut out,
         "X-WR-CALNAME",
-        &ical_text(&format!("Putzplan – {person_name}")),
+        &ical_text(&format!("Cleaning – {person_name}")),
     );
     out.push_str(&events);
     out.push_str("END:VCALENDAR\r\n");
