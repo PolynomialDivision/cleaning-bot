@@ -6341,3 +6341,23 @@ async fn linking_a_name_to_someone_with_a_calendar_keeps_their_feed() {
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }
+
+#[tokio::test]
+async fn the_welcome_links_the_calendar_feed_when_feeds_are_set_up() {
+    let (ctx, path, _) = selector_world();
+    let state = ctx.state.lock().await;
+    let mut selector = new_selector(&state, MIA, true);
+    selector.calendar_url = Some("https://cal.example.org/ical/abc.ics".into());
+    let text = selector_text(&state, &selector);
+    assert!(
+        text.contains(
+            "🗓 Your calendar: [subscribe](https://cal.example.org/ical/abc.ics) — add it in your calendar app"
+        ),
+        "{text}"
+    );
+    // A link, not a mention: nobody but Mia (welcomed) is pinged.
+    let content = crate::format::intentional(crate::format::mentionify(&text));
+    assert_eq!(content.mentions.unwrap().user_ids.len(), 1);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}

@@ -57,8 +57,7 @@ pub(crate) async fn cmd_pdf(
     sender: &OwnedUserId,
     room: &Room,
     args: &[&str],
-    event_id: OwnedEventId,
-    thread_root: OwnedEventId,
+    answer_to: Option<Answer>,
 ) -> Result<Option<RoomMessageEventContent>> {
     let _ = sender;
     // `history`: the weeks up to this one; `next`: from next week on.
@@ -163,22 +162,20 @@ pub(crate) async fn cmd_pdf(
         pdf_bytes,
         matrix_sdk::attachment::AttachmentConfig::new()
             .mentions(Some(matrix_sdk::ruma::events::Mentions::new()))
-            .extra_content(Some(thread_relation(thread_root, event_id))),
+            .extra_content(answer_to.map(relation_content)),
     )
     .await?;
     Ok(None)
 }
 
-/// `m.relates_to` putting a file into the same thread as a text reply
-/// (`in_thread`). Passed as extra content rather than an SDK `Reply`, which
-/// would first fetch the command event — and lose the file if that fails.
-/// The SDK still encrypts the event and the upload in encrypted rooms.
-fn thread_relation(
-    root: OwnedEventId,
-    reply_to: OwnedEventId,
-) -> serde_json::Map<String, serde_json::Value> {
-    let content =
-        mxbot_common::send::in_thread(RoomMessageEventContent::text_plain(""), root, reply_to);
+/// `m.relates_to` making a file the same kind of answer as a text reply
+/// (see `answer_relation` in `main`). Passed as extra content rather than an
+/// SDK `Reply`, which would first fetch the event answered — and lose the
+/// file if that fails. The SDK still encrypts the event and the upload in
+/// encrypted rooms.
+fn relation_content(relation: Answer) -> serde_json::Map<String, serde_json::Value> {
+    let mut content = RoomMessageEventContent::text_plain("");
+    content.relates_to = Some(relation);
     let mut json = serde_json::to_value(content).expect("message content serializes");
     let mut extra = serde_json::Map::new();
     extra.insert("m.relates_to".into(), json["m.relates_to"].take());
@@ -193,11 +190,6 @@ pub(crate) async fn cmd_ical(
     room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
-    if !crate::private::authorized(ctx, room, sender).await {
-        return Ok(Some(format::intentional(format::mentionify(
-            "🗓 Send !ical in an encrypted private chat with me. Calendar links are private.",
-        ))));
-    }
     let sender_mxid = sender.as_str();
     {
         let mut state = ctx.state.lock().await;
@@ -210,7 +202,7 @@ pub(crate) async fn cmd_ical(
     }
     if args.len() > 1 || args.first().is_some_and(|a| a.parse::<usize>().is_err()) {
         return Ok(Some(format::mentionify(
-            "🗓 !ical [weeks] shows only your calendar. !ical reset replaces its private link.",
+            "🗓 !ical [weeks] shows only your own calendar. !ical reset replaces its link.",
         )));
     }
     let weeks = args
@@ -239,7 +231,7 @@ pub(crate) async fn cmd_ical(
         return Ok(Some(format::mentionify(&format!(
             "📅 Your calendar feed URL:\n{url}\n\n\
              Add this URL to your calendar app for automatic updates.\n\
-             Keep this URL private. !ical shows it again; !ical reset replaces it."
+             !ical shows it again; !ical reset replaces it."
         ))));
     }
 
@@ -267,14 +259,8 @@ pub(crate) async fn cmd_ical(
 pub(crate) async fn cmd_icalreset(
     ctx: &BotContext,
     sender: &OwnedUserId,
-    room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
-    if !crate::private::authorized(ctx, room, sender).await {
-        return Ok(Some(format::intentional(format::mentionify(
-            "🗓 Send !ical in an encrypted private chat with me. Calendar links are private.",
-        ))));
-    }
     let sender_mxid = sender.as_str();
     {
         let mut state = ctx.state.lock().await;
@@ -385,13 +371,25 @@ pub(crate) async fn cmd_icalrevoke(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use matrix_sdk::ruma::owned_event_id;
+    use matrix_sdk::ruma::{events::relation::Reply, owned_event_id};
 
     #[test]
-    fn a_pdf_lands_in_the_same_thread_as_a_text_reply() {
-        let relation = thread_relation(owned_event_id!("$root"), owned_event_id!("$command"));
+    fn a_pdf_is_the_same_kind_of_answer_as_a_text_reply() {
+        let reply = relation_content(Relation::Reply(Reply::with_event_id(owned_event_id!(
+            "$command"
+        ))));
         assert_eq!(
-            serde_json::Value::Object(relation),
+            serde_json::Value::Object(reply),
+            serde_json::json!({ "m.relates_to": { "m.in_reply_to": { "event_id": "$command" } } })
+        );
+        let thread = relation_content(Relation::Thread(
+            matrix_sdk::ruma::events::relation::Thread::reply(
+                owned_event_id!("$root"),
+                owned_event_id!("$command"),
+            ),
+        ));
+        assert_eq!(
+            serde_json::Value::Object(thread),
             serde_json::json!({ "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$root",

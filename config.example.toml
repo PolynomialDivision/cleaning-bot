@@ -49,13 +49,10 @@ materialize_weeks = 26
 # fill_strategy = "round_robin"
 
 # ── Calendar feeds (optional) ──────────────────────────────────────────────────
-# With this section, `!ical` (in an encrypted private chat with the bot) gives
-# each resident a private subscription URL. Without it, `!ical` sends a .ics
-# file instead.
-#
-# The feed URLs are bearer secrets and are stored in state.json so they can be
-# shown again: keep state.json and its backups private, serve the feed over
-# HTTPS only, and keep /ical/ paths out of proxy access logs.
+# With this section, `!ical` and the welcome give each resident a personal
+# subscription URL (it shows only their own turns). Without it, `!ical` sends
+# a .ics file instead. The URLs are stored in state.json so they can be shown
+# again; serve the feed over HTTPS.
 # `!ical reset` replaces a link, `!ical revoke` (admins: `!ical revoke <person>`)
 # switches it off.
 #

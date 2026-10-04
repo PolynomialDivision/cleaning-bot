@@ -90,7 +90,8 @@ pub fn feed_url(cfg: &crate::config::ICalServerConfig, token: &str) -> String {
 }
 
 /// Recoverable random bearer token. Old hash-only subscriptions stay valid.
-/// State and backups must be private; never log tokens or place them in the main room.
+/// Never logged. A token only grants that person's own turns — public in the
+/// cleaning room anyway — so the link may be shown there (the welcome does).
 pub fn calendar_token(state: &mut State, person_id: &str) -> String {
     if let Some(raw) = state
         .calendar_tokens

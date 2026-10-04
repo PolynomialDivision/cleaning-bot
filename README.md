@@ -16,6 +16,18 @@ keeps track of who actually cleaned.
 📄 !plan pdf · printable plan
 ```
 
+The bot answers a command as a reply to it — in the thread, if you wrote
+it in one.
+
+**The help board.** An admin can post a friendly overview with `!help post`.
+Its reactions are buttons — 📅 your next turns, 📋 the plan, 👥 your
+groups, 📄 a PDF, 💬 a private chat: the bot answers privately if you
+have a private chat with it, else as a reply to the board, addressed to
+you, and then takes the reaction away so the button stays clean. 💬 makes
+the bot invite you to a new encrypted chat (no invite allowlist needed for
+that); once you join, it greets you there with your groups and calendar
+link.
+
 `!help more` lists the rest (`!status`, `!undo`, `!takeover`, `!join`,
 `!leave`, `!groups`, `!stats`, `!plan pdf history`, `!ical reset`).
 
@@ -55,7 +67,7 @@ Tap a number to join or leave a group:
 ✅ Joined **2nd Floor**
 
 📅 Next: 2nd Floor · 5 – 11 Oct
-🗓 Your calendar: send !ical to @bot in a private chat
+🗓 Your calendar: subscribe — add it in your calendar app
 !mygroups reopens this · !join / !leave · !help
 ```
 
@@ -144,19 +156,19 @@ from a private chat update the plan in the cleaning room.
 
 ### Calendar feeds (`!ical`)
 
-With `[ical_server]` configured, `!ical` — in a private chat only — gives a
-personal subscription URL (`https://…/ical/<token>.ics`); without it, a .ics
-file. In the cleaning room, `!ical` only says to ask privately; a private
-welcome shows the link directly.
+With `[ical_server]` configured, `!ical` gives a personal subscription URL
+(`https://…/ical/<token>.ics`); without it, a .ics file. The welcome and
+every group selector show the link too. It isn't treated as a secret: a
+feed holds only that person's own turns, which the plan in the room shows
+anyway — but anyone with the link can follow those turns.
 
 - Tokens are 256 bits of randomness. The server checks the exact token
   format, that the token isn't revoked, and that its person is active and
   linked to Matrix. It answers with an ETag (and 304 for `If-None-Match`)
   and `Cache-Control: private`; tokens are never logged.
-- **The tokens are stored in `state.json`** (with their hash) so `!ical` can
-  show the same link again. Treat `state.json` and its backups as secrets,
-  serve the feed over HTTPS only (the bot warns at startup otherwise), and
-  keep `/ical/` URLs out of reverse-proxy access logs.
+- The tokens are stored in `state.json` (with their hash) so `!ical` can
+  show the same link again. Serve the feed over HTTPS (the bot warns at
+  startup otherwise).
 - `!ical reset` replaces your link (the old one stops working); `!ical
   revoke` switches it off; admins can `!ical revoke <person>` without ever
   seeing the link.
@@ -172,10 +184,12 @@ welcome shows the link directly.
 
 `!plan pdf [N] [group]` renders N weeks from this one (default 8); `!plan pdf
 next [N] [group]` N weeks from next week on; `!plan pdf history [N] [group]`
-the last N weeks up to this one. Weeks alternate white and shaded and never
-break across pages; a slot's rooms are listed once under the title, with
-icons. It is made to be printed, in black and white too: open turns have a
-box to tick by hand, done ones a tick and the date. Both show the time
+the last N weeks up to this one. It is made to be printed in black and
+white: a heavy frame and heavy rules between weeks, dashed rules between the
+shifts of a week, dotted ones between slots; a week never breaks across
+pages. Open turns have a box to tick by hand, done ones a tick and the date;
+a slot's rooms are listed once under the title, with icons. Colour is only
+a bonus on screens. Both show the time
 windows, who was responsible, who actually cleaned if that was someone else,
 the date it was done, and whether a turn was assigned, imported, taken over
 or swapped. A skipped turn shows `--`, not a tick. Disabled groups are left

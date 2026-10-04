@@ -184,7 +184,7 @@ impl CleaningGroup {
 // ── CalendarToken ─────────────────────────────────────────────────────────────
 
 /// A per-person iCal bearer token. Legacy records have only a hash; new
-/// records also retain the secret for repeat private delivery. Protect state/backups.
+/// records also keep the token itself, so the same link can be shown again.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CalendarToken {
     pub id: String, // UUID for the record itself

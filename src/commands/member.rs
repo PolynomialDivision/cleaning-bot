@@ -189,6 +189,23 @@ pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<
 
 // ── !mygroups ────────────────────────────────────────────────────────────
 
+/// `!help post` (admin) — the help board, with its buttons, in the cleaning
+/// room (see `help_board`).
+pub(crate) async fn cmd_help_post(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+) -> Result<Option<RoomMessageEventContent>> {
+    require_admin(ctx, sender)?;
+    let Some(cleaning_room) = room.client().get_room(&ctx.room_id) else {
+        return Ok(Some(format::mentionify("❌ I'm not in the cleaning room.")));
+    };
+    crate::help_board::post(ctx, &cleaning_room).await?;
+    // In the room the board speaks for itself; a direct chat gets word.
+    Ok((room.room_id() != ctx.room_id)
+        .then(|| format::mentionify("✅ Help board posted in the cleaning room.")))
+}
+
 /// `!mygroups` — the group selector again (the welcome, the first time).
 pub(crate) async fn cmd_mygroups(
     ctx: &BotContext,

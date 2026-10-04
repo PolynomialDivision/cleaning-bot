@@ -18,8 +18,8 @@
 //! once, also across restarts.
 //!
 //! A selector belongs to one user and one room: the cleaning room, or a
-//! verified private chat (`private`) — the only place a calendar feed link
-//! is ever shown.
+//! verified private chat (`private`). With calendar feeds set up, it links
+//! the user's own feed.
 
 use anyhow::Result;
 use mxbot_common::matrix_sdk::{
@@ -160,7 +160,7 @@ fn selector_text_with(
         }
     }
     lines.push(match &selector.calendar_url {
-        Some(url) => format!("🗓 [Your calendar]({url}) · keep this link private"),
+        Some(url) => format!("🗓 Your calendar: [subscribe]({url}) — add it in your calendar app"),
         None => format!(
             "🗓 Your calendar: send !ical to {} in a private chat",
             selector
@@ -407,7 +407,6 @@ pub async fn post_selector(
             "Private room not authorized"
         );
     }
-    let private = room.room_id() != ctx.room_id;
     let pending_key = format!("{}|{user_id}", room.room_id());
     let mut state = ctx.state.lock().await;
     let first_welcome = welcome && !state.greeted_users.contains(user_id);
@@ -426,8 +425,10 @@ pub async fn post_selector(
             selector.room_id = room.room_id().to_string();
             selector.contact_url =
                 Some(format!("https://matrix.to/#/{}", ctx.config.matrix.user_id));
-            // The feed link only ever goes into a verified private chat.
-            if let (true, Some(cfg)) = (private, &ctx.config.ical_server) {
+            // Their calendar feed, ready to add. The link isn't treated as a
+            // secret: it shows only their own turns, which the plan in the
+            // room shows anyway.
+            if let Some(cfg) = &ctx.config.ical_server {
                 state.apply_event(DomainEvent::PersonCreated {
                     person_id: uuid::Uuid::new_v4().to_string(),
                     display_name: user_id.into(),

@@ -18,8 +18,8 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \usepackage{longtable}
 \usepackage{array}
 \usepackage{multirow}
-\usepackage{hhline}
 \usepackage[table]{xcolor}
+\usepackage{arydshln}
 \usepackage{tikz}
 \usepackage{fontawesome5}
 \usepackage[T1]{fontenc}
@@ -39,9 +39,13 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \definecolor{accent}{HTML}{2F6F73}
 \definecolor{ink}{HTML}{1F2933}
 \definecolor{muted}{HTML}{6B7785}
-\definecolor{shade}{HTML}{EEF3F5}
-\definecolor{hair}{HTML}{D3DCE1}
 \definecolor{weekrule}{HTML}{7D8B96}
+\arrayrulecolor{black}
+% Horizontal rules take no height of their own: then nothing between two rows
+% of a week is a place to break the page (see `group_section`).
+\ADLnullwidehline
+\setlength{\dashlinedash}{3pt}
+\setlength{\dashlinegap}{2pt}
 \color{ink}
 % The week number in a ring; small enough not to make its row taller.
 \newcommand{\weekno}[1]{\tikz[baseline=(n.base)]\node[circle, draw=accent,
@@ -102,13 +106,22 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
 
 // ── Per-group section ─────────────────────────────────────────────────────────
 
+/// The heavy outer frame of the table (also between weeks, as a rule).
+const FRAME: &str = "!{\\color{black}\\vrule width 1.2pt}";
+/// The fine line between two columns.
+const COLUMN_RULE: &str = "!{\\color{black!45}\\vrule width 0.4pt}";
+/// A heavy black rule across the table: around the header, between weeks.
+const HEAVY_RULE: &str =
+    "\\noalign{\\global\\arrayrulewidth=1.2pt}\\hline\n\\noalign{\\global\\arrayrulewidth=0.5pt}\n";
+
 // Made to be printed — in black and white, too: no dark fills, and nothing
 // told by colour alone (done is a tick, skipped a dash).
 //
-// Separators, from strong to faint: a darker rule between weeks (which also
-// alternate white and lightly shaded), a hairline between the shifts of a
-// week, and one between the slots of a shift that leaves the shift's dates
-// merged. The week number and the dates are centred over their rows
+// Printed in black and white, the structure has to come from the lines: a
+// heavy frame, heavy rules around the header and between weeks, dashed
+// rules between the shifts of a week and dotted ones between the slots of a
+// shift, fine lines between columns. Colour is only a bonus on screens —
+// and rows are never filled: cell colour would paint over the dashed lines. The week number and the dates are centred over their rows
 // (`\multirow` with a negative count, placed in the block's last row so the
 // shading of later rows can't paint over it), so every row has the same
 // height. Rows inside a week end in `\\*`: a week never breaks across pages.
@@ -165,21 +178,30 @@ fn group_section(
     }
     s.push_str("\\vspace{4mm}\n");
 
-    // Column widths (A4 182 mm text width, 4.5 pt padding each side).
-    let mut spec = String::from(
-        ">{\\centering\\arraybackslash}m{12mm}>{\\raggedright\\arraybackslash}m{42mm}",
-    );
+    // Column widths (A4 182 mm text width, 4.5 pt padding each side), in a
+    // heavy frame with fine lines between the columns.
+    let mut widths = vec![("c", 12), ("l", 41)];
     if with_slot {
-        spec.push_str(
-            ">{\\raggedright\\arraybackslash}m{26mm}>{\\raggedright\\arraybackslash}m{65mm}",
-        );
+        widths.extend([("l", 25), ("l", 63)]);
     } else {
-        spec.push_str(">{\\raggedright\\arraybackslash}m{94mm}");
+        widths.push(("l", 91));
     }
-    spec.push_str(">{\\raggedright\\arraybackslash}m{20mm}");
+    widths.push(("l", 20));
+    let columns: Vec<String> = widths
+        .iter()
+        .map(|(align, mm)| {
+            let align = if *align == "c" {
+                "centering"
+            } else {
+                "raggedright"
+            };
+            format!(">{{\\{align}\\arraybackslash}}m{{{mm}mm}}")
+        })
+        .collect();
+    let spec = format!("{FRAME}{}{FRAME}", columns.join(COLUMN_RULE));
     s.push_str(&format!("\\begin{{longtable}}{{{spec}}}\n"));
 
-    // A light header with a strong line under it — no ink-heavy bar.
+    // The header, between two heavy rules.
     let header = {
         let mut cells = vec!["Week", "Dates"];
         if with_slot {
@@ -190,10 +212,7 @@ fn group_section(
             .iter()
             .map(|c| format!("\\textcolor{{accent}}{{\\bfseries {c}}}"))
             .collect();
-        format!(
-            "{} \\\\\n\\noalign{{\\global\\arrayrulewidth=1.2pt}}\\arrayrulecolor{{accent}}\\hline\n\\noalign{{\\global\\arrayrulewidth=0.4pt}}\n",
-            cells.join(" & ")
-        )
+        format!("{HEAVY_RULE}{} \\\\\n{HEAVY_RULE}", cells.join(" & "))
     };
     s.push_str(&header);
     s.push_str("\\endfirsthead\n");
@@ -203,10 +222,12 @@ fn group_section(
     ));
     s.push_str(&header);
     s.push_str("\\endhead\n");
+    // A page that ends mid-table closes its frame; the last week closes
+    // the table's.
+    s.push_str(&format!("{HEAVY_RULE}\\endfoot\n\\endlastfoot\n"));
 
     // ── One block per week ────────────────────────────────────────────────────
     let mut i = 0;
-    let mut block = 0;
     let mut year = rows.first().map(|a| a.iso_year);
     while i < rows.len() {
         let key = (rows[i].iso_year, rows[i].iso_week);
@@ -215,16 +236,14 @@ fn group_section(
             j += 1;
         }
         let week = &rows[i..j];
-        let shade = if block % 2 == 1 { "shade" } else { "white" };
 
         // A new year gets its own small heading row.
         if year != Some(key.0) {
             year = Some(key.0);
             s.push_str(&format!(
-                "\\multicolumn{{{cols}}}{{l}}{{\\cellcolor{{white}}\\bfseries\\color{{accent}} {}}} \\\\\n",
+                "\\multicolumn{{{cols}}}{{{FRAME}l{FRAME}}}{{\\bfseries\\color{{accent}} {}}} \\\\\n{HEAVY_RULE}",
                 key.0
             ));
-            s.push_str("\\arrayrulecolor{weekrule}\\hline\n");
         }
 
         for (k, &a) in week.iter().enumerate() {
@@ -236,7 +255,6 @@ fn group_section(
                 .take_while(|r| r.shift == a.shift)
                 .count();
 
-            s.push_str(&format!("\\rowcolor{{{shade}}}\n"));
             // Week number, centred over the whole week.
             if last_of_week {
                 s.push_str(&merged(
@@ -290,21 +308,23 @@ fn group_section(
             }
 
             if last_of_week {
-                s.push_str(" \\\\\n\\arrayrulecolor{weekrule}\\hline\n");
+                s.push_str(&format!(" \\\\\n{HEAVY_RULE}"));
             } else {
-                // A hairline under the cells that change; the merged
-                // cells get one in their own shade, so it doesn't show.
-                let merged = if last_of_shift { 1 } else { 2 };
-                let hidden = format!(">{{\\arrayrulecolor{{{shade}}}}}-").repeat(merged);
-                let visible = ">{\\arrayrulecolor{hair}}-".repeat(cols - merged);
+                // Inside a week: dashed between its shifts, dotted between the
+                // slots of a shift — under the cells that change only, so the
+                // merged week (and shift) cells stay one box.
+                let (from, pattern) = if last_of_shift {
+                    (2, "[3pt/2pt]")
+                } else {
+                    (3, "[0.8pt/1.6pt]")
+                };
                 // No page break inside a week — after the row, nor after its
-                // hairline (itself a row of its own).
+                // line (itself a row of its own).
                 s.push_str(&format!(
-                    " \\\\*\n\\hhline{{{hidden}{visible}}}\n\\noalign{{\\penalty10000}}\n"
+                    " \\\\*\n\\cdashline{{{from}-{cols}}}{pattern}\n\\noalign{{\\penalty10000}}\n"
                 ));
             }
         }
-        block += 1;
         i = j;
     }
 
@@ -552,11 +572,12 @@ mod tests {
         // No page break between the shifts of a week; weeks shaded in turn.
         assert_eq!(tex.matches(r"\\*").count(), 3);
         assert_eq!(tex.matches(r"\noalign{\penalty10000}").count(), 3);
-        assert!(tex.contains(r"\rowcolor{shade}") && tex.contains(r"\rowcolor{white}"));
+        // Heavy rules between weeks, dashed between shifts, no filled rows.
+        assert!(tex.contains(r"\cdashline{2-4}[3pt/2pt]"), "{tex}");
+        assert!(!tex.contains(r"\rowcolor"));
         // Open turns get a box to tick on paper; nothing is told by colour
         // alone, and the header is no dark bar.
         assert_eq!(tex.matches(r"\tickbox").count(), 6 + 2, "{tex}");
-        assert!(!tex.contains(r"\rowcolor{accent}"));
     }
 
     #[test]
@@ -577,13 +598,7 @@ mod tests {
                 "warm-up lacks \\fa{icon}"
             );
         }
-        for used in [
-            r"\weekno{",
-            r"\tickbox",
-            r"\multirow",
-            r"\hhline",
-            r"\rowcolor",
-        ] {
+        for used in [r"\weekno{", r"\tickbox", r"\multirow", r"\cdashline"] {
             assert!(warmup.contains(used), "warm-up lacks {used}");
         }
     }

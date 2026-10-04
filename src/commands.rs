@@ -1,7 +1,12 @@
 use anyhow::Result;
 use chrono::Utc;
 use matrix_sdk::{
-    ruma::{events::room::message::RoomMessageEventContent, OwnedEventId, OwnedUserId},
+    ruma::{
+        events::room::message::{
+            Relation, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
+        },
+        OwnedUserId,
+    },
     Room,
 };
 use mxbot_common::matrix_sdk;
@@ -34,8 +39,10 @@ mod swaps;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use assignments::cmd_next;
 use assignments::*;
 use exports::*;
+pub(crate) use exports::{cmd_pdf, plan_text};
 pub(crate) use helpers::*;
 use maintenance::*;
 use member::*;
@@ -72,13 +79,16 @@ fn tokenize(line: &str) -> Vec<String> {
     tokens
 }
 
+/// How an answer relates to what it answers: a reply, or a reply in the
+/// thread the command was written in.
+pub type Answer = Relation<RoomMessageEventContentWithoutRelation>;
+
 pub async fn handle(
     ctx: &BotContext,
     sender: &OwnedUserId,
     room: &Room,
     body: &str,
-    event_id: OwnedEventId,
-    thread_root: OwnedEventId,
+    answer_to: Answer,
 ) -> Result<Option<RoomMessageEventContent>> {
     let mut tokens = tokenize(body);
     let cmd_owned = if tokens.is_empty() {
@@ -150,13 +160,12 @@ pub async fn handle(
                 .ok_or_else(|| anyhow::anyhow!("Cleaning room unavailable"))?;
             return cmd_announceweek(ctx, sender, &main).await;
         }
-        ("!plan", Some("pdf")) => {
-            return cmd_pdf(ctx, sender, room, rest, event_id, thread_root).await
-        }
+        ("!plan", Some("pdf")) => return cmd_pdf(ctx, sender, room, rest, Some(answer_to)).await,
         ("!mygroups", _) => return cmd_mygroups(ctx, sender, room).await,
+        ("!help", Some("post")) => return cmd_help_post(ctx, sender, room).await,
         ("!member", Some("welcome")) => return cmd_member_welcome(ctx, sender, room, rest).await,
         ("!ical", Some("revoke")) => return cmd_icalrevoke(ctx, sender, rest).await,
-        ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, room, rest).await,
+        ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, rest).await,
         ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
         ("!member", Some("link")) => {
             let s = cmd_linkmatrix(ctx, sender, room, rest).await?;
@@ -402,7 +411,7 @@ fn help_text() -> String {
 👥 !mygroups · join or leave groups\n\
 ✅ !done · done! (or ✅ on the plan)\n\
 🔄 !swap @user · ask for cover\n\
-🗓 !ical · your private calendar\n\
+🗓 !ical · your calendar\n\
 📄 !plan pdf · printable plan\n\n\
 ❓ !help more · !help admin"
         .into()
@@ -419,11 +428,11 @@ fn more_help_text() -> String {
 !groups [group] · groups, members, rooms\n\
 !stats · cleaning history\n\
 !plan pdf next 20 · a PDF from next week on · history = past weeks\n\
-!ical reset · a new private calendar link (the old one stops working)\n\n\
+!ical reset · a new calendar link (the old one stops working)\n\n\
 👥 In !mygroups, tap a number to join that group — tap it again to leave. \
 ✅ marks the groups you're in.\n\
-🔒 !next, !plan, !mygroups, !done and !ical also work in an encrypted private chat with me \
-— if I don't join when you invite me, ask an admin."
+🔒 !next, !plan, !mygroups, !done and !ical also work in a private chat with me \
+— tap 💬 on the help board and I'll invite you."
         .into()
 }
 
@@ -435,6 +444,7 @@ fn admin_help_text() -> String {
 !member remove <@user:server | name> <group>
 !member link <name> <@user:server> · connect a name-only person to Matrix
 !member welcome <person> · send them the welcome and group list again
+!help post · post the help board (buttons for everyone) in the cleaning room
 !member away <person> [weeks] · skip in new rotation picks (default 4)
 !member back <person>
 

@@ -3,8 +3,8 @@
 \usepackage{longtable}
 \usepackage{array}
 \usepackage{multirow}
-\usepackage{hhline}
 \usepackage[table]{xcolor}
+\usepackage{arydshln}
 \usepackage{tikz}
 \usepackage{fontawesome5}
 \usepackage[T1]{fontenc}
@@ -24,9 +24,13 @@
 \definecolor{accent}{HTML}{2F6F73}
 \definecolor{ink}{HTML}{1F2933}
 \definecolor{muted}{HTML}{6B7785}
-\definecolor{shade}{HTML}{EEF3F5}
-\definecolor{hair}{HTML}{D3DCE1}
 \definecolor{weekrule}{HTML}{7D8B96}
+\arrayrulecolor{black}
+% Horizontal rules take no height of their own: then nothing between two rows
+% of a week is a place to break the page (see `group_section`).
+\ADLnullwidehline
+\setlength{\dashlinedash}{3pt}
+\setlength{\dashlinegap}{2pt}
 \color{ink}
 % The week number in a ring; small enough not to make its row taller.
 \newcommand{\weekno}[1]{\tikz[baseline=(n.base)]\node[circle, draw=accent,
@@ -43,24 +47,34 @@
 {\fontsize{20}{24}\selectfont\bfseries\color{accent} \faBroom\enspace Warm-up}\par
 {\small\color{muted} 1 Jan -- 7 Jan 2026 \enspace$\cdot$\enspace Weekly}\par
 {\small \textbf{Slot}\enspace {\color{accent}\faToilet}\hspace{0.3em}Toilet\quad {\color{accent}\faShower}\hspace{0.3em}Shower\quad {\color{accent}\faUtensils}\hspace{0.3em}Kitchen\quad {\color{accent}\faBroom}\hspace{0.3em}Hall}\par
-\begin{longtable}{>{\centering\arraybackslash}m{12mm}>{\raggedright\arraybackslash}m{42mm}>{\raggedright\arraybackslash}m{26mm}>{\raggedright\arraybackslash}m{65mm}>{\raggedright\arraybackslash}m{20mm}}
+\begin{longtable}{!{\color{black}\vrule width 1.2pt}>{\centering\arraybackslash}m{12mm}!{\color{black!45}\vrule width 0.4pt}>{\raggedright\arraybackslash}m{41mm}!{\color{black!45}\vrule width 0.4pt}>{\raggedright\arraybackslash}m{25mm}!{\color{black!45}\vrule width 0.4pt}>{\raggedright\arraybackslash}m{63mm}!{\color{black!45}\vrule width 0.4pt}>{\raggedright\arraybackslash}m{20mm}!{\color{black}\vrule width 1.2pt}}
+\noalign{\global\arrayrulewidth=1.2pt}\hline
+\noalign{\global\arrayrulewidth=0.5pt}
 \textcolor{accent}{\bfseries Week} & \textcolor{accent}{\bfseries Dates} & \textcolor{accent}{\bfseries Slot} & \textcolor{accent}{\bfseries Responsible} & \textcolor{accent}{\bfseries Done on} \\
-\noalign{\global\arrayrulewidth=1.2pt}\arrayrulecolor{accent}\hline
-\noalign{\global\arrayrulewidth=0.4pt}
+\noalign{\global\arrayrulewidth=1.2pt}\hline
+\noalign{\global\arrayrulewidth=0.5pt}
 \endfirsthead
 \multicolumn{5}{l}{\small\color{muted} Warm-up (continued)} \\[1mm]
 \endhead
-\rowcolor{shade}
- & Mon--Wed & A & Zoë {\scriptsize\color{muted} $\cdot$ done by Ann \textperiodcentered{} imported} & {\color{accent}\faCheck}\enspace{\small 1 Jan} \\*
-\hhline{>{\arrayrulecolor{shade}}->{\arrayrulecolor{hair}}----}
+\noalign{\global\arrayrulewidth=1.2pt}\hline
+\noalign{\global\arrayrulewidth=0.5pt}
+\endfoot
+\endlastfoot
+ & \multirow{-1}{=}{Mon--Wed} & A & Zoë {\scriptsize\color{muted} $\cdot$ done by Ann \textperiodcentered{} imported} & {\color{accent}\faCheck}\enspace{\small 1 Jan} \\*
+\cdashline{3-5}[0.8pt/1.6pt]
 \noalign{\penalty10000}
-\rowcolor{shade}
-\multirow{-2}{*}{\weekno{1}} & \multirow{-1}{=}{Thu--Sun} & B & Stra{\ss}e \guillemotleft{}\texteuro{}\guillemotright{} & {\small\color{muted}\itshape -- skipped} \\
-\arrayrulecolor{weekrule}\hline
-\multicolumn{5}{l}{\cellcolor{white}\bfseries\color{accent} 2027} \\
-\rowcolor{white}
+ & & B & Bob & \tickbox \\*
+\cdashline{2-5}[3pt/2pt]
+\noalign{\penalty10000}
+\multirow{-3}{*}{\weekno{1}} & Thu--Sun & C & Stra{\ss}e \guillemotleft{}\texteuro{}\guillemotright{} & {\small\color{muted}\itshape -- skipped} \\
+\noalign{\global\arrayrulewidth=1.2pt}\hline
+\noalign{\global\arrayrulewidth=0.5pt}
+\multicolumn{5}{!{\color{black}\vrule width 1.2pt}l!{\color{black}\vrule width 1.2pt}}{\bfseries\color{accent} 2027} \\
+\noalign{\global\arrayrulewidth=1.2pt}\hline
+\noalign{\global\arrayrulewidth=0.5pt}
 \weekno{2} & 4 -- 10 Jan & C & $\times$ $\div$ \dots{} \S{} \textdegree{} \pounds{} & \tickbox \\
-\arrayrulecolor{weekrule}\hline
+\noalign{\global\arrayrulewidth=1.2pt}\hline
+\noalign{\global\arrayrulewidth=0.5pt}
 \end{longtable}
 
 \vspace{2.5mm}{\scriptsize\color{muted} \tickbox\ tick it when it's done \enspace {\color{accent}\faCheck}\ done \enspace -- skipped \hfill Thanks for keeping the house lovely \faHeart[regular] \enspace$\cdot$\enspace Generated 1 Jan 2026}

@@ -11,6 +11,7 @@ use mxbot_common::{
         ruma::{
             events::{
                 reaction::OriginalSyncReactionEvent,
+                relation::{Reply, Thread},
                 room::{
                     member::{MembershipState, OriginalSyncRoomMemberEvent},
                     message::{
@@ -20,11 +21,10 @@ use mxbot_common::{
                     redaction::OriginalSyncRoomRedactionEvent,
                 },
             },
-            OwnedEventId, OwnedRoomId, OwnedUserId,
+            OwnedRoomId, OwnedUserId,
         },
         Client, Room, RoomState,
     },
-    send::{in_thread, thread_root},
     Bot,
 };
 use tokio::sync::Mutex;
@@ -35,6 +35,7 @@ mod commands;
 mod config;
 mod domain;
 mod format;
+mod help_board;
 mod http;
 mod ical;
 mod onboarding;
@@ -66,8 +67,17 @@ fn migrate_rhythms(state: &mut State, interval_weeks: u32) -> bool {
     changed
 }
 
-fn thread_reply(text: &str, root: OwnedEventId, reply_to: OwnedEventId) -> RoomMessageEventContent {
-    in_thread(format::mentionify(text), root, reply_to)
+/// How the bot answers a message: as a plain reply, visible in the room in
+/// every client — or, when it was written in a thread, in that thread.
+/// (Answers used to go into a thread always, which some clients tuck away
+/// behind a reply counter.)
+fn answer_relation(ev: &OriginalSyncRoomMessageEvent) -> commands::Answer {
+    match &ev.content.relates_to {
+        Some(Relation::Thread(thread)) => {
+            Relation::Thread(Thread::reply(thread.event_id.clone(), ev.event_id.clone()))
+        }
+        _ => Relation::Reply(Reply::with_event_id(ev.event_id.clone())),
+    }
 }
 
 #[derive(Clone)]
@@ -250,7 +260,7 @@ async fn main() -> Result<()> {
                 }
                 let _operation = ctx.operations.lock().await;
 
-                let thread_root = thread_root(&ev);
+                let answer_to = answer_relation(&ev);
 
                 let mut replies: Vec<RoomMessageEventContent> = Vec::new();
                 for (index, line) in cmd_lines.into_iter().enumerate() {
@@ -264,16 +274,7 @@ async fn main() -> Result<()> {
                         }
                         state.active_command = Some(key.clone());
                     }
-                    match commands::handle(
-                        &ctx,
-                        &ev.sender,
-                        &room,
-                        line,
-                        ev.event_id.clone(),
-                        thread_root.clone(),
-                    )
-                    .await
-                    {
+                    match commands::handle(&ctx, &ev.sender, &room, line, answer_to.clone()).await {
                         Ok(Some(reply)) => replies.push(reply),
                         Err(e) if e.is::<mxbot_common::admin::NotAdmin>() => replies.push(
                             format::mentionify("❌ This command requires admin privileges."),
@@ -318,7 +319,7 @@ async fn main() -> Result<()> {
                             format::mentionify(&joined)
                         };
                         if !private {
-                            content = in_thread(content, thread_root, ev.event_id.clone());
+                            content.relates_to = Some(answer_to);
                         }
                         r.send(format::intentional(content)).await.ok();
                     }
@@ -419,6 +420,31 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                // ── Help board button ─────────────────────────────────────────
+                let on_board = room.room_id() == ctx.room_id
+                    && ctx.state.lock().await.help_boards.contains(&reacted_to);
+                if on_board {
+                    let Some(action) = help_board::action_for(&emoji_key) else {
+                        return;
+                    };
+                    {
+                        // Once per tap, also when delivered again later.
+                        let mut state = ctx.state.lock().await;
+                        if !state.help_taps.insert(ev.event_id.to_string()) {
+                            return;
+                        }
+                        if let Err(e) = state.save(&ctx.state_path).await {
+                            error!("Failed to save a help board tap: {e}");
+                            return;
+                        }
+                    }
+                    let board = ev.content.relates_to.event_id.clone();
+                    help_board::run(&ctx, &client, &room, &board, &ev.sender, action).await;
+                    // Take the button press back, so it can be pressed again.
+                    onboarding::consume_tap(&room, &ev.event_id, &bot_user_id).await;
+                    return;
+                }
+
                 if room.room_id() != ctx.room_id || emoji_key != "✅" {
                     return;
                 }
@@ -448,15 +474,15 @@ async fn main() -> Result<()> {
                     Ok(reactions::PlanDone::Seen) => {}
                     Ok(reactions::PlanDone::NothingOpen) => {
                         drop(state);
-                        let root = ev.content.relates_to.event_id.clone();
+                        // Said to them, as a reply to what they reacted on.
+                        let mut content = format::intentional(format::mentionify(&format!(
+                            "{sender_mxid} — you have no open turn this week, nothing to mark."
+                        )));
+                        content.relates_to = Some(Relation::Reply(Reply::with_event_id(
+                            ev.content.relates_to.event_id.clone(),
+                        )));
                         if let Some(r) = client.get_room(&ctx.room_id) {
-                            r.send(thread_reply(
-                                "You have no open turn this week — nothing to mark.",
-                                root.clone(),
-                                root,
-                            ))
-                            .await
-                            .ok();
+                            r.send(content).await.ok();
                         }
                     }
                     Ok(reactions::PlanDone::Marked) => {
@@ -557,6 +583,8 @@ async fn main() -> Result<()> {
                 }
                 let _operation = ctx.operations.lock().await;
                 onboarding::welcome_if_new(&ctx, &room, &ev.state_key).await;
+                // Someone accepting the private chat the bot opened for them.
+                help_board::greet_on_join(&ctx, &room, &ev.state_key).await;
             }
         }
     });

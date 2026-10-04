@@ -101,6 +101,14 @@ pub enum ReminderKind {
     WeeklySummary,
 }
 
+/// A private chat the bot opened for someone.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PrivateChat {
+    pub room_id: String,
+    /// They joined and were greeted; until then it's an open invite.
+    pub greeted: bool,
+}
+
 /// A reminder message the bot sent, kept up to date as people finish.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ReminderMessage {
@@ -157,7 +165,7 @@ pub struct GroupSelector {
     /// memberships change after that, the feedback is out of date.
     #[serde(default)]
     pub feedback_at: Option<usize>,
-    /// Only set in a verified private room.
+    /// The user's calendar feed, when feeds are set up.
     #[serde(default)]
     pub calendar_url: Option<String>,
     #[serde(default)]
@@ -312,6 +320,15 @@ pub struct State {
     /// recorded as sent so a retry sends the very same message.
     #[serde(default)]
     pub pending_welcomes: HashMap<String, GroupSelector>,
+    /// Help boards (`!help post`) by event ID: reactions on them are buttons.
+    #[serde(default)]
+    pub help_boards: HashSet<String>,
+    /// Help board taps already carried out, by reaction event ID.
+    #[serde(default)]
+    pub help_taps: RecentIds,
+    /// Private chats the bot opened (help board 💬), by Matrix user.
+    #[serde(default)]
+    pub private_chats: HashMap<String, PrivateChat>,
     /// Live group selectors by event ID — the latest one per user.
     #[serde(default)]
     pub group_selectors: HashMap<String, GroupSelector>,
