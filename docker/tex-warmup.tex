@@ -1,7 +1,12 @@
 \documentclass[a4paper]{article}
-\usepackage[a4paper, top=12mm, bottom=12mm, left=14mm, right=14mm]{geometry}
+\usepackage[a4paper, top=14mm, bottom=14mm, left=14mm, right=14mm]{geometry}
 \usepackage{longtable}
 \usepackage{array}
+\usepackage{multirow}
+\usepackage{hhline}
+\usepackage[table]{xcolor}
+\usepackage{tikz}
+\usepackage{fontawesome5}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{lmodern}
@@ -10,6 +15,53 @@
 \usepackage{microtype}
 \usepackage{amssymb}
 \pagenumbering{gobble}
+\setlength{\parindent}{0pt}
+\setlength{\tabcolsep}{4.5pt}
+\renewcommand{\arraystretch}{1.6}
+\setlength{\LTpre}{0pt}
+\setlength{\LTpost}{0pt}
+\setlength{\arrayrulewidth}{0.4pt}
+\definecolor{accent}{HTML}{2F6F73}
+\definecolor{ink}{HTML}{1F2933}
+\definecolor{muted}{HTML}{6B7785}
+\definecolor{shade}{HTML}{EEF3F5}
+\definecolor{hair}{HTML}{D3DCE1}
+\definecolor{weekrule}{HTML}{7D8B96}
+\color{ink}
+% The week number in a ring; small enough not to make its row taller.
+\newcommand{\weekno}[1]{\tikz[baseline=(n.base)]\node[circle, draw=accent,
+  line width=0.7pt, inner sep=0pt, minimum size=5.6mm, font=\small\bfseries] (n) {#1};}
+% An empty box to tick by hand on the printed plan.
+\newcommand{\tickbox}{{\color{weekrule}\faSquare[regular]}}
+
+% Docker build only: tectonic fetches everything this uses into its cache, so
+% the bot renders PDFs offline. It starts with the renderer's preamble
+% (src/pdf.rs, PREAMBLE — a test keeps them equal) and uses every package,
+% font and icon the renderer can.
 \begin{document}
-warmup
+\fontsize{10}{13}\selectfont
+{\fontsize{20}{24}\selectfont\bfseries\color{accent} \faBroom\enspace Warm-up}\par
+{\small\color{muted} 1 Jan -- 7 Jan 2026 \enspace$\cdot$\enspace Weekly}\par
+{\small \textbf{Slot}\enspace {\color{accent}\faToilet}\hspace{0.3em}Toilet\quad {\color{accent}\faShower}\hspace{0.3em}Shower\quad {\color{accent}\faUtensils}\hspace{0.3em}Kitchen\quad {\color{accent}\faBroom}\hspace{0.3em}Hall}\par
+\begin{longtable}{>{\centering\arraybackslash}m{12mm}>{\raggedright\arraybackslash}m{42mm}>{\raggedright\arraybackslash}m{26mm}>{\raggedright\arraybackslash}m{65mm}>{\raggedright\arraybackslash}m{20mm}}
+\textcolor{accent}{\bfseries Week} & \textcolor{accent}{\bfseries Dates} & \textcolor{accent}{\bfseries Slot} & \textcolor{accent}{\bfseries Responsible} & \textcolor{accent}{\bfseries Done on} \\
+\noalign{\global\arrayrulewidth=1.2pt}\arrayrulecolor{accent}\hline
+\noalign{\global\arrayrulewidth=0.4pt}
+\endfirsthead
+\multicolumn{5}{l}{\small\color{muted} Warm-up (continued)} \\[1mm]
+\endhead
+\rowcolor{shade}
+ & Mon--Wed & A & Zoë {\scriptsize\color{muted} $\cdot$ done by Ann \textperiodcentered{} imported} & {\color{accent}\faCheck}\enspace{\small 1 Jan} \\*
+\hhline{>{\arrayrulecolor{shade}}->{\arrayrulecolor{hair}}----}
+\noalign{\penalty10000}
+\rowcolor{shade}
+\multirow{-2}{*}{\weekno{1}} & \multirow{-1}{=}{Thu--Sun} & B & Stra{\ss}e \guillemotleft{}\texteuro{}\guillemotright{} & {\small\color{muted}\itshape -- skipped} \\
+\arrayrulecolor{weekrule}\hline
+\multicolumn{5}{l}{\cellcolor{white}\bfseries\color{accent} 2027} \\
+\rowcolor{white}
+\weekno{2} & 4 -- 10 Jan & C & $\times$ $\div$ \dots{} \S{} \textdegree{} \pounds{} & \tickbox \\
+\arrayrulecolor{weekrule}\hline
+\end{longtable}
+
+\vspace{2.5mm}{\scriptsize\color{muted} \tickbox\ tick it when it's done \enspace {\color{accent}\faCheck}\ done \enspace -- skipped \hfill Thanks for keeping the house lovely \faHeart[regular] \enspace$\cdot$\enspace Generated 1 Jan 2026}
 \end{document}

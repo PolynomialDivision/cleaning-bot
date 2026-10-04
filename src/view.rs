@@ -125,18 +125,36 @@ pub fn rooms(names: &[String]) -> String {
         .join(" · ")
 }
 
-/// What kind of room a name is, as an icon (English or German names).
-fn room_icon(name: &str) -> &'static str {
+/// What kind of room a name is (English or German names) — for its icon
+/// here and in the PDF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKind {
+    Toilet,
+    Shower,
+    Kitchen,
+    Other,
+}
+
+pub fn room_kind(name: &str) -> RoomKind {
     let name = name.to_lowercase();
     let any = |words: &[&str]| words.iter().any(|w| name.contains(w));
     if any(&["toilet", "wc", "klo"]) {
-        "🚽"
+        RoomKind::Toilet
     } else if any(&["shower", "dusch"]) {
-        "🚿"
+        RoomKind::Shower
     } else if any(&["kitchen", "küche", "kueche"]) {
-        "🍳"
+        RoomKind::Kitchen
     } else {
-        "🧽"
+        RoomKind::Other
+    }
+}
+
+fn room_icon(name: &str) -> &'static str {
+    match room_kind(name) {
+        RoomKind::Toilet => "🚽",
+        RoomKind::Shower => "🚿",
+        RoomKind::Kitchen => "🍳",
+        RoomKind::Other => "🧽",
     }
 }
 

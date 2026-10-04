@@ -20,6 +20,8 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \usepackage{multirow}
 \usepackage{hhline}
 \usepackage[table]{xcolor}
+\usepackage{tikz}
+\usepackage{fontawesome5}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{lmodern}
@@ -41,6 +43,11 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \definecolor{hair}{HTML}{D3DCE1}
 \definecolor{weekrule}{HTML}{7D8B96}
 \color{ink}
+% The week number in a ring; small enough not to make its row taller.
+\newcommand{\weekno}[1]{\tikz[baseline=(n.base)]\node[circle, draw=accent,
+  line width=0.7pt, inner sep=0pt, minimum size=5.6mm, font=\small\bfseries] (n) {#1};}
+% An empty box to tick by hand on the printed plan.
+\newcommand{\tickbox}{{\color{weekrule}\faSquare[regular]}}
 "#;
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -95,13 +102,17 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
 
 // ── Per-group section ─────────────────────────────────────────────────────────
 
+// Made to be printed — in black and white, too: no dark fills, and nothing
+// told by colour alone (done is a tick, skipped a dash).
+//
 // Separators, from strong to faint: a darker rule between weeks (which also
-// alternate white and shaded), a hairline between the shifts of a week, and
-// one between the slots of a shift that leaves the shift's dates merged.
-// The week number and the dates are centred over their rows (`\multirow`
-// with a negative count, placed in the block's last row so the shading of
-// later rows can't paint over it), so every row has the same height.
-// Rows inside a week end in `\\*`: a week never breaks across pages.
+// alternate white and lightly shaded), a hairline between the shifts of a
+// week, and one between the slots of a shift that leaves the shift's dates
+// merged. The week number and the dates are centred over their rows
+// (`\multirow` with a negative count, placed in the block's last row so the
+// shading of later rows can't paint over it), so every row has the same
+// height. Rows inside a week end in `\\*`: a week never breaks across pages.
+// An open turn has an empty box to tick, done ones a tick and the date.
 
 fn group_section(
     group_name: &str,
@@ -111,8 +122,8 @@ fn group_section(
     rows: &[&crate::schedule::AssignmentInstance],
 ) -> String {
     let (fsize, fskip) = font_size_for_rows(rows.len());
-    let with_area = rows.iter().any(|a| a.slot_name.is_some());
-    let cols = if with_area { 6 } else { 5 };
+    let with_slot = rows.iter().any(|a| a.slot_name.is_some());
+    let cols = if with_slot { 5 } else { 4 };
     let mut s = String::new();
 
     // Set section font size without a grouping wrapper (longtable cannot be
@@ -120,71 +131,69 @@ fn group_section(
     // \fontsize\selectfont, which is fine since each section is on its own page.
     s.push_str(&format!("\\fontsize{{{fsize}}}{{{fskip}}}\\selectfont\n"));
 
-    // Title and subtitle.
+    // Title, subtitle, and the rooms with their icons.
     s.push_str(&format!(
-        "{{\\fontsize{{20}}{{24}}\\selectfont\\bfseries\\color{{accent}} {}}}\\par\n\\vspace{{1.5mm}}\n",
+        "{{\\fontsize{{20}}{{24}}\\selectfont\\bfseries\\color{{accent}} \\faBroom\\enspace {}}}\\par\n\\vspace{{1.5mm}}\n",
         tex_esc(group_name),
     ));
-    let mut subtitle = vec![tex_esc(date_range), tex_esc(&capitalized(rhythm))];
-    let rooms = rows
-        .first()
-        .map(|a| a.room_names.clone())
-        .unwrap_or_default();
-    if !with_area && !rooms.is_empty() {
-        subtitle.push(tex_esc(&rooms.join(", ")));
-    }
     s.push_str(&format!(
-        "{{\\small\\color{{muted}} {}}}\\par\n",
-        subtitle.join(" \\enspace$\\cdot$\\enspace "),
+        "{{\\small\\color{{muted}} {} \\enspace$\\cdot$\\enspace {}}}\\par\n",
+        tex_esc(date_range),
+        tex_esc(&capitalized(rhythm)),
     ));
     // A slot's rooms are the same every week: listed once, up here, so each
     // row stays one line.
-    let mut slot_rooms: Vec<String> = Vec::new();
+    let mut room_lines: Vec<String> = Vec::new();
     for a in rows {
-        if let Some(slot) = &a.slot_name {
-            let line = format!(
-                "\\textbf{{{}}} {}",
-                tex_esc(slot),
-                tex_esc(&a.room_names.join(", "))
-            );
-            if !a.room_names.is_empty() && !slot_rooms.contains(&line) {
-                slot_rooms.push(line);
-            }
+        if a.room_names.is_empty() {
+            continue;
+        }
+        let rooms = rooms_with_icons(&a.room_names);
+        let line = match &a.slot_name {
+            Some(slot) => format!("\\textbf{{{}}}\\enspace {rooms}", tex_esc(slot)),
+            None => rooms,
+        };
+        if !room_lines.contains(&line) {
+            room_lines.push(line);
         }
     }
-    if !slot_rooms.is_empty() {
+    if !room_lines.is_empty() {
         s.push_str(&format!(
-            "\\vspace{{0.5mm}}{{\\small\\color{{muted}} {}}}\\par\n",
-            slot_rooms.join(" \\enspace$\\cdot$\\enspace "),
+            "\\vspace{{1mm}}{{\\small {}}}\\par\n",
+            room_lines.join("\\qquad "),
         ));
     }
     s.push_str("\\vspace{4mm}\n");
 
     // Column widths (A4 182 mm text width, 4.5 pt padding each side).
     let mut spec = String::from(
-        ">{\\centering\\arraybackslash}m{11mm}>{\\raggedright\\arraybackslash}m{42mm}",
+        ">{\\centering\\arraybackslash}m{12mm}>{\\raggedright\\arraybackslash}m{42mm}",
     );
-    if with_area {
+    if with_slot {
         spec.push_str(
-            ">{\\raggedright\\arraybackslash}m{26mm}>{\\raggedright\\arraybackslash}m{56mm}",
+            ">{\\raggedright\\arraybackslash}m{26mm}>{\\raggedright\\arraybackslash}m{65mm}",
         );
     } else {
-        spec.push_str(">{\\raggedright\\arraybackslash}m{85mm}");
+        spec.push_str(">{\\raggedright\\arraybackslash}m{94mm}");
     }
-    spec.push_str(">{\\centering\\arraybackslash}m{6mm}>{\\raggedright\\arraybackslash}m{17mm}");
+    spec.push_str(">{\\raggedright\\arraybackslash}m{20mm}");
     s.push_str(&format!("\\begin{{longtable}}{{{spec}}}\n"));
 
+    // A light header with a strong line under it — no ink-heavy bar.
     let header = {
         let mut cells = vec!["Week", "Dates"];
-        if with_area {
+        if with_slot {
             cells.push("Slot");
         }
-        cells.extend(["Responsible", "$\\checkmark$", "Done on"]);
+        cells.extend(["Responsible", "Done on"]);
         let cells: Vec<String> = cells
             .iter()
-            .map(|c| format!("\\textcolor{{white}}{{\\bfseries {c}}}"))
+            .map(|c| format!("\\textcolor{{accent}}{{\\bfseries {c}}}"))
             .collect();
-        format!("\\rowcolor{{accent}}\n{} \\\\\n", cells.join(" & "))
+        format!(
+            "{} \\\\\n\\noalign{{\\global\\arrayrulewidth=1.2pt}}\\arrayrulecolor{{accent}}\\hline\n\\noalign{{\\global\\arrayrulewidth=0.4pt}}\n",
+            cells.join(" & ")
+        )
     };
     s.push_str(&header);
     s.push_str("\\endfirsthead\n");
@@ -233,7 +242,7 @@ fn group_section(
                 s.push_str(&merged(
                     week.len(),
                     "*",
-                    &format!("\\large\\bfseries {}", a.iso_week),
+                    &format!("\\weekno{{{}}}", a.iso_week),
                 ));
             }
             s.push_str(" & ");
@@ -242,7 +251,7 @@ fn group_section(
                 s.push_str(&merged(shift_rows, "=", &tex_esc(&a.period_label)));
             }
             s.push_str(" & ");
-            if with_area {
+            if with_slot {
                 if let Some(slot) = &a.slot_name {
                     s.push_str(&tex_esc(slot));
                 }
@@ -266,19 +275,18 @@ fn group_section(
                 ));
             }
             s.push_str(" & ");
+            // Done on: the date with a tick, "skipped", or a box to tick.
             if a.is_skipped {
-                s.push_str("{\\color{muted}--}");
-            } else if a.is_completed {
-                s.push_str("{\\color{accent}$\\checkmark$}");
-            }
-            s.push_str(" & ");
-            if a.is_skipped {
-                s.push_str("{\\small\\color{muted}\\itshape skipped}");
+                s.push_str("{\\small\\color{muted}\\itshape -- skipped}");
             } else if let Some(date) = a.completed_at {
                 s.push_str(&format!(
-                    "{{\\small {}}}",
+                    "{{\\color{{accent}}\\faCheck}}\\enspace{{\\small {}}}",
                     tex_esc(&date.format("%-d %b").to_string())
                 ));
+            } else if a.is_completed {
+                s.push_str("{\\color{accent}\\faCheck}");
+            } else {
+                s.push_str("\\tickbox");
             }
 
             if last_of_week {
@@ -302,13 +310,37 @@ fn group_section(
 
     s.push_str("\\end{longtable}\n\n");
 
-    // Legend.
+    // How to use it, a thank-you, and when it was made.
     s.push_str(&format!(
-        "\\vspace{{2mm}}{{\\scriptsize\\color{{muted}} $\\checkmark$ done \\enspace -- skipped \\hfill Generated {}}}\n",
+        "\\vspace{{2.5mm}}{{\\scriptsize\\color{{muted}} \\tickbox\\ tick it when it's done \
+         \\enspace {{\\color{{accent}}\\faCheck}}\\ done \\enspace -- skipped \
+         \\hfill Thanks for keeping the house lovely \\faHeart[regular] \\enspace$\\cdot$\\enspace Generated {}}}\n",
         tex_esc(generated)
     ));
 
     s
+}
+
+/// "\faToilet Scharni Toilet \faShower Shower Room" — each room with the
+/// icon of its kind, as in the chat.
+fn rooms_with_icons(rooms: &[String]) -> String {
+    use crate::view::RoomKind;
+    rooms
+        .iter()
+        .map(|room| {
+            let icon = match crate::view::room_kind(room) {
+                RoomKind::Toilet => "\\faToilet",
+                RoomKind::Shower => "\\faShower",
+                RoomKind::Kitchen => "\\faUtensils",
+                RoomKind::Other => "\\faBroom",
+            };
+            format!(
+                "{{\\color{{accent}}{icon}}}\\hspace{{0.3em}}{}",
+                tex_esc(room)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\\quad ")
 }
 
 /// `content` centred over the `rows` rows ending here (a negative
@@ -512,7 +544,7 @@ mod tests {
         // Two shifts a week: the week number centred over both rows, each
         // shift's dates on its own row, no line break making a row taller.
         assert_eq!(
-            tex.matches(r"\multirow{-2}{*}{\large\bfseries").count(),
+            tex.matches(r"\multirow{-2}{*}{\weekno{").count(),
             3,
             "{tex}"
         );
@@ -521,6 +553,39 @@ mod tests {
         assert_eq!(tex.matches(r"\\*").count(), 3);
         assert_eq!(tex.matches(r"\noalign{\penalty10000}").count(), 3);
         assert!(tex.contains(r"\rowcolor{shade}") && tex.contains(r"\rowcolor{white}"));
+        // Open turns get a box to tick on paper; nothing is told by colour
+        // alone, and the header is no dark bar.
+        assert_eq!(tex.matches(r"\tickbox").count(), 6 + 2, "{tex}");
+        assert!(!tex.contains(r"\rowcolor{accent}"));
+    }
+
+    #[test]
+    fn the_docker_warmup_uses_what_the_renderer_uses() {
+        // The image renders offline from a cache filled by compiling
+        // docker/tex-warmup.tex: it must load the same packages and use
+        // every icon, or PDFs fail in production only.
+        let warmup = include_str!("../docker/tex-warmup.tex");
+        assert!(warmup.starts_with(PREAMBLE), "warm-up preamble differs");
+        let source = include_str!("pdf.rs");
+        for icon in source.split("\\\\fa").skip(1).map(|rest| {
+            rest.split(|c: char| !c.is_ascii_alphabetic())
+                .next()
+                .unwrap()
+        }) {
+            assert!(
+                warmup.contains(&format!("\\fa{icon}")),
+                "warm-up lacks \\fa{icon}"
+            );
+        }
+        for used in [
+            r"\weekno{",
+            r"\tickbox",
+            r"\multirow",
+            r"\hhline",
+            r"\rowcolor",
+        ] {
+            assert!(warmup.contains(used), "warm-up lacks {used}");
+        }
     }
 
     #[test]

@@ -173,11 +173,15 @@ welcome shows the link directly.
 `!plan pdf [N] [group]` renders N weeks from this one (default 8); `!plan pdf
 next [N] [group]` N weeks from next week on; `!plan pdf history [N] [group]`
 the last N weeks up to this one. Weeks alternate white and shaded and never
-break across pages; a slot's rooms are listed once under the title. Both show the time
+break across pages; a slot's rooms are listed once under the title, with
+icons. It is made to be printed, in black and white too: open turns have a
+box to tick by hand, done ones a tick and the date. Both show the time
 windows, who was responsible, who actually cleaned if that was someone else,
 the date it was done, and whether a turn was assigned, imported, taken over
 or swapped. A skipped turn shows `--`, not a tick. Disabled groups are left
-out. Rendering runs `tectonic` with a 60-second limit.
+out. Rendering runs `tectonic` with a 60-second limit; the Docker image fills
+tectonic's cache at build time from `docker/tex-warmup.tex`, which must use
+everything the renderer does (a test checks).
 
 The PDF fonts cover Latin-1 (German, French, Scandinavian, …) and common
 punctuation. Other characters — Polish ł, Cyrillic, Greek, emoji — are
