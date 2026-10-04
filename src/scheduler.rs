@@ -508,7 +508,12 @@ pub(crate) async fn send_reminder(
     turns: Vec<(crate::domain::GroupId, u8)>,
     txn_id: Option<String>,
 ) -> anyhow::Result<Option<OwnedEventId>> {
-    let Some((text, mxids)) = reminder_text(&*ctx.state.lock().await, note, week, &turns) else {
+    let rendered = {
+        let state = ctx.state.lock().await;
+        let link = plan_permalink(ctx, &state, week);
+        reminder_text(&state, note, week, &turns, link.as_deref())
+    };
+    let Some((text, mxids)) = rendered else {
         return Ok(None);
     };
     let mut send = room.send(mention_message(&text, &mxids, room).await);
@@ -549,6 +554,54 @@ pub(crate) async fn send_reminder(
     Ok(Some(event_id))
 }
 
+/// A link to the plan message of `week` — `None` before it is posted.
+fn plan_permalink(
+    ctx: &BotContext,
+    state: &crate::state::State,
+    (year, week): (i32, u32),
+) -> Option<String> {
+    let event_id = state
+        .weekly_plan_canonical
+        .get(&format!("{year}-W{week:02}"))?;
+    // The bot's own server surely knows the room.
+    let via = ctx
+        .config
+        .matrix
+        .user_id
+        .split_once(':')
+        .map(|(_, server)| server);
+    Some(permalink(ctx.room_id.as_str(), event_id, via))
+}
+
+/// `https://matrix.to/#/<room>/<event>?via=<server>`: clients open it at
+/// that message (Element, FluffyChat). IDs are percent-encoded as matrix.to
+/// expects — older event IDs may contain `/` or `+`.
+fn permalink(room_id: &str, event_id: &str, via: Option<&str>) -> String {
+    let encode = |id: &str| {
+        id.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-._~!$:@".contains(c) {
+                    c.to_string()
+                } else {
+                    let mut buf = [0u8; 4];
+                    c.encode_utf8(&mut buf)
+                        .bytes()
+                        .map(|b| format!("%{b:02X}"))
+                        .collect()
+                }
+            })
+            .collect::<String>()
+    };
+    let via = via
+        .map(|server| format!("?via={}", encode(server)))
+        .unwrap_or_default();
+    format!(
+        "https://matrix.to/#/{}/{}{via}",
+        encode(room_id),
+        encode(event_id)
+    )
+}
+
 /// Bring the reminders of `week` up to date — who is done, who is still
 /// open. The edits notify nobody.
 async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) {
@@ -559,7 +612,9 @@ async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) 
             .iter()
             .filter(|(_, r)| (r.iso_year, r.iso_week) == (year, week))
             .filter_map(|(id, r)| {
-                let (text, _) = reminder_text(&state, r.note, (year, week), &r.turns)?;
+                let link = plan_permalink(ctx, &state, (year, week));
+                let (text, _) =
+                    reminder_text(&state, r.note, (year, week), &r.turns, link.as_deref())?;
                 (text != r.rendered).then(|| (id.clone(), text))
             })
             .collect()
@@ -594,6 +649,8 @@ async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) 
 /// React ✅ here or on the plan when it's done.
 /// ```
 ///
+/// "the plan" links to that week's plan message (`plan_link`), if any.
+///
 /// Once everyone is done: "✨ All done — thanks!" over the ✅ line. `None`
 /// when none of the turns has anyone assigned.
 pub(crate) fn reminder_text(
@@ -601,6 +658,7 @@ pub(crate) fn reminder_text(
     note: ReminderNote,
     week: (i32, u32),
     turns: &[(crate::domain::GroupId, u8)],
+    plan_link: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
     let snapshot = crate::schedule::build_schedule_from(state, week, 1);
     let duties: Vec<_> = snapshot
@@ -655,7 +713,8 @@ pub(crate) fn reminder_text(
         lines.push(format!("✅ {}", done.join(" · ")));
     }
     if !open.is_empty() {
-        lines.push("React ✅ here or on the plan when it's done.".to_owned());
+        let plan = plan_link.map_or_else(|| "the plan".to_owned(), |l| format!("[the plan]({l})"));
+        lines.push(format!("React ✅ here or on {plan} when it's done."));
     }
     mxids.sort();
     mxids.dedup();
@@ -1092,7 +1151,7 @@ mod tests {
         state.cleaning_groups = vec![floor, kitchen, hall.clone()];
 
         let (text, mxids) =
-            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns).unwrap();
+            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns, None).unwrap();
         assert_eq!(
             text,
             "⏰ Still open, ends today: @alice:example.org (Floor · Scharni) · \
@@ -1100,6 +1159,45 @@ mod tests {
              React ✅ here or on the plan when it's done."
         );
         assert_eq!(mxids, ["@alice:example.org", "@bob:example.org"]);
+
+        // With the plan posted, "the plan" links to it.
+        let link = permalink("!room:example.org", "$ab/c+d", Some("example.org"));
+        assert_eq!(
+            link,
+            "https://matrix.to/#/!room:example.org/$ab%2Fc%2Bd?via=example.org"
+        );
+        let (text, _) = reminder_text(
+            &state,
+            ReminderNote::EndsToday,
+            (year, week),
+            &turns,
+            Some(&link),
+        )
+        .unwrap();
+        assert!(
+            text.ends_with(&format!(
+                "React ✅ here or on [the plan]({link}) when it's done."
+            )),
+            "{text}"
+        );
+        let content = crate::format::intentional(crate::format::mentionify(&text));
+        let html = &content.msgtype;
+        let html = match html {
+            matrix_sdk::ruma::events::room::message::MessageType::Text(t) => {
+                t.formatted.as_ref().unwrap().body.clone()
+            }
+            _ => unreachable!(),
+        };
+        assert!(
+            html.contains(&format!(r#"<a href="{link}">the plan</a>"#)),
+            "{html}"
+        );
+        // The link pings nobody.
+        assert_eq!(
+            content.mentions.unwrap().user_ids.len(),
+            2,
+            "only Alice and Bob, who are open"
+        );
 
         // Alice is done: she moves to the ✅ line, as a pill that pings nobody.
         state
@@ -1114,7 +1212,7 @@ mod tests {
             })
             .unwrap();
         let (text, mxids) =
-            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns).unwrap();
+            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns, None).unwrap();
         assert!(
             text.contains(
                 "\n✅ [alice](https://matrix.to/#/@alice:example.org) (Floor · Scharni)\n"
@@ -1156,7 +1254,7 @@ mod tests {
             }
         }
         let (text, mxids) =
-            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns).unwrap();
+            reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns, None).unwrap();
         assert!(text.starts_with("✨ All done — thanks!\n✅ "), "{text}");
         assert!(!text.contains("React"), "{text}");
         assert!(mxids.is_empty());
@@ -1166,7 +1264,8 @@ mod tests {
             &state,
             ReminderNote::StillOpen,
             (year, week),
-            &[(hall.id, 0)]
+            &[(hall.id, 0)],
+            None
         )
         .is_none());
     }
