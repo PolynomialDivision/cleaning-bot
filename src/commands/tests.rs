@@ -5812,7 +5812,9 @@ fn shared_snapshot_keeps_completion_author_dates_windows_and_imports_in_exports(
     );
     let tex = crate::pdf::render_tex(&snapshot);
     assert!(
-        tex.contains("Done by cleo") && tex.contains("imported") && tex.contains("30 Sep 2026")
+        tex.contains(r"done by cleo \textperiodcentered{} imported")
+            && tex.contains("{\\small 30 Sep}"),
+        "{tex}"
     );
     let ics = crate::ical::render_ics(&snapshot, &ids[0]);
     assert!(!ics.contains("STATUS:COMPLETED"));

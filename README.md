@@ -170,8 +170,10 @@ welcome shows the link directly.
 
 ### PDF
 
-`!plan pdf [N] [group]` renders the next N weeks (default 8); `!plan pdf
-history [N] [group]` the last N weeks up to this one. Both show the time
+`!plan pdf [N] [group]` renders N weeks from this one (default 8); `!plan pdf
+next [N] [group]` N weeks from next week on; `!plan pdf history [N] [group]`
+the last N weeks up to this one. Weeks alternate white and shaded and never
+break across pages; a slot's rooms are listed once under the title. Both show the time
 windows, who was responsible, who actually cleaned if that was someone else,
 the date it was done, and whether a turn was assigned, imported, taken over
 or swapped. A skipped turn shows `--`, not a tick. Disabled groups are left

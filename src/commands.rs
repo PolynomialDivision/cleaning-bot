@@ -418,7 +418,7 @@ fn more_help_text() -> String {
 !join <group> · !leave <group> · without the number buttons\n\
 !groups [group] · groups, members, rooms\n\
 !stats · cleaning history\n\
-!plan pdf history · the past weeks as a PDF\n\
+!plan pdf next 20 · a PDF from next week on · history = past weeks\n\
 !ical reset · a new private calendar link (the old one stops working)\n\n\
 👥 In !mygroups, tap a number to join that group — tap it again to leave. \
 ✅ marks the groups you're in.\n\
@@ -446,7 +446,7 @@ fn admin_help_text() -> String {
 !plan unassign <group> [slot] [week N] [on <day>]
 !plan reset <group> · redistribute future weeks from the rotation
 !plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
-!plan pdf [history] [N] [group] · printable plan or history
+!plan pdf [next | history] [N] [group] · printable plan (next = from next week)
 
 **Groups**
 !groups <group> · details: rhythm, turn order, slots, rooms, weights

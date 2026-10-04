@@ -14,9 +14,12 @@ use crate::schedule::ScheduleSnapshot;
 // ── LaTeX preamble ────────────────────────────────────────────────────────────
 
 const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
-\usepackage[a4paper, top=12mm, bottom=12mm, left=14mm, right=14mm]{geometry}
+\usepackage[a4paper, top=14mm, bottom=14mm, left=14mm, right=14mm]{geometry}
 \usepackage{longtable}
 \usepackage{array}
+\usepackage{multirow}
+\usepackage{hhline}
+\usepackage[table]{xcolor}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{lmodern}
@@ -26,18 +29,24 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \usepackage{amssymb}
 \pagenumbering{gobble}
 \setlength{\parindent}{0pt}
-\setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{1.3}
-% Remove longtable's default \bigskip spacing around the table.
-\setlength{\LTpre}{2pt}
+\setlength{\tabcolsep}{4.5pt}
+\renewcommand{\arraystretch}{1.6}
+\setlength{\LTpre}{0pt}
 \setlength{\LTpost}{0pt}
-
+\setlength{\arrayrulewidth}{0.4pt}
+\definecolor{accent}{HTML}{2F6F73}
+\definecolor{ink}{HTML}{1F2933}
+\definecolor{muted}{HTML}{6B7785}
+\definecolor{shade}{HTML}{EEF3F5}
+\definecolor{hair}{HTML}{D3DCE1}
+\definecolor{weekrule}{HTML}{7D8B96}
+\color{ink}
 "#;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
-    let generated = snapshot.state_timestamp.format("%d %b %Y").to_string();
+    let generated = snapshot.state_timestamp.format("%-d %b %Y").to_string();
 
     // Groups in first-appearance order.
     let mut group_order: Vec<(String, String)> = Vec::new();
@@ -62,8 +71,8 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
         let date_range = match (rows.first(), rows.last()) {
             (Some(f), Some(l)) if f.start != l.end => format!(
                 "{} -- {}",
-                f.start.format("%d %b %Y"),
-                l.end.format("%d %b %Y")
+                f.start.format("%-d %b %Y"),
+                l.end.format("%-d %b %Y")
             ),
             (Some(f), _) => f.period_label.clone(),
             _ => String::new(),
@@ -86,6 +95,14 @@ pub fn render_tex(snapshot: &ScheduleSnapshot) -> String {
 
 // ── Per-group section ─────────────────────────────────────────────────────────
 
+// Separators, from strong to faint: a darker rule between weeks (which also
+// alternate white and shaded), a hairline between the shifts of a week, and
+// one between the slots of a shift that leaves the shift's dates merged.
+// The week number and the dates are centred over their rows (`\multirow`
+// with a negative count, placed in the block's last row so the shading of
+// later rows can't paint over it), so every row has the same height.
+// Rows inside a week end in `\\*`: a week never breaks across pages.
+
 fn group_section(
     group_name: &str,
     date_range: &str,
@@ -94,6 +111,8 @@ fn group_section(
     rows: &[&crate::schedule::AssignmentInstance],
 ) -> String {
     let (fsize, fskip) = font_size_for_rows(rows.len());
+    let with_area = rows.iter().any(|a| a.slot_name.is_some());
+    let cols = if with_area { 6 } else { 5 };
     let mut s = String::new();
 
     // Set section font size without a grouping wrapper (longtable cannot be
@@ -101,172 +120,227 @@ fn group_section(
     // \fontsize\selectfont, which is fine since each section is on its own page.
     s.push_str(&format!("\\fontsize{{{fsize}}}{{{fskip}}}\\selectfont\n"));
 
-    // Section heading: bold, with a rule underneath.
+    // Title and subtitle.
     s.push_str(&format!(
-        "{{\\fontsize{{14}}{{17}}\\selectfont\\bfseries {}}}\\\\\n",
+        "{{\\fontsize{{20}}{{24}}\\selectfont\\bfseries\\color{{accent}} {}}}\\par\n\\vspace{{1.5mm}}\n",
         tex_esc(group_name),
     ));
-    s.push_str("\\vspace{0.5mm}\\rule{\\linewidth}{0.6pt}\\\\\n");
-
-    // Subtitle: date range · rhythm · generated (small, italic).
+    let mut subtitle = vec![tex_esc(date_range), tex_esc(&capitalized(rhythm))];
+    let rooms = rows
+        .first()
+        .map(|a| a.room_names.clone())
+        .unwrap_or_default();
+    if !with_area && !rooms.is_empty() {
+        subtitle.push(tex_esc(&rooms.join(", ")));
+    }
     s.push_str(&format!(
-        "{{\\fontsize{{7.5}}{{9.5}}\\selectfont\\itshape \
-         {} $\\cdot$ Cleaned {} $\\cdot$ Generated {}}}\n",
-        tex_esc(date_range),
-        tex_esc(rhythm),
-        tex_esc(generated),
+        "{{\\small\\color{{muted}} {}}}\\par\n",
+        subtitle.join(" \\enspace$\\cdot$\\enspace "),
     ));
-    s.push_str("\\vspace{2mm}\n\n");
+    // A slot's rooms are the same every week: listed once, up here, so each
+    // row stays one line.
+    let mut slot_rooms: Vec<String> = Vec::new();
+    for a in rows {
+        if let Some(slot) = &a.slot_name {
+            let line = format!(
+                "\\textbf{{{}}} {}",
+                tex_esc(slot),
+                tex_esc(&a.room_names.join(", "))
+            );
+            if !a.room_names.is_empty() && !slot_rooms.contains(&line) {
+                slot_rooms.push(line);
+            }
+        }
+    }
+    if !slot_rooms.is_empty() {
+        s.push_str(&format!(
+            "\\vspace{{0.5mm}}{{\\small\\color{{muted}} {}}}\\par\n",
+            slot_rooms.join(" \\enspace$\\cdot$\\enspace "),
+        ));
+    }
+    s.push_str("\\vspace{4mm}\n");
 
-    // Column widths (total ≈ 182 mm = A4 210 mm − 28 mm margins):
-    //   13 + 28 + 45 + 45 + 9 + 24 = 164 mm content
-    //   + 6 cols × 2 × 4 pt tabcolsep ≈ 17 mm padding  ≈ 181 mm
-    let col_spec = concat!(
-        "|>{\\centering\\arraybackslash}p{13mm}",
-        "|>{\\raggedright\\arraybackslash}p{28mm}",
-        "|>{\\raggedright\\arraybackslash}p{45mm}",
-        "|>{\\raggedright\\arraybackslash}p{45mm}",
-        "|>{\\centering\\arraybackslash}p{9mm}",
-        "|p{24mm}|"
+    // Column widths (A4 182 mm text width, 4.5 pt padding each side).
+    let mut spec = String::from(
+        ">{\\centering\\arraybackslash}m{11mm}>{\\raggedright\\arraybackslash}m{42mm}",
     );
-    s.push_str(&format!("\\begin{{longtable}}{{{col_spec}}}\n"));
+    if with_area {
+        spec.push_str(
+            ">{\\raggedright\\arraybackslash}m{26mm}>{\\raggedright\\arraybackslash}m{56mm}",
+        );
+    } else {
+        spec.push_str(">{\\raggedright\\arraybackslash}m{85mm}");
+    }
+    spec.push_str(">{\\centering\\arraybackslash}m{6mm}>{\\raggedright\\arraybackslash}m{17mm}");
+    s.push_str(&format!("\\begin{{longtable}}{{{spec}}}\n"));
 
-    // ── First-page header ────────────────────────────────────────────────────
-    s.push_str("\\hline\n");
-    s.push_str(
-        "\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
-                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n",
-    );
-    s.push_str("\\hline\\hline\n");
+    let header = {
+        let mut cells = vec!["Week", "Dates"];
+        if with_area {
+            cells.push("Slot");
+        }
+        cells.extend(["Responsible", "$\\checkmark$", "Done on"]);
+        let cells: Vec<String> = cells
+            .iter()
+            .map(|c| format!("\\textcolor{{white}}{{\\bfseries {c}}}"))
+            .collect();
+        format!("\\rowcolor{{accent}}\n{} \\\\\n", cells.join(" & "))
+    };
+    s.push_str(&header);
     s.push_str("\\endfirsthead\n");
-
-    // ── Continuation header (repeated on every subsequent page) ──────────────
     s.push_str(&format!(
-        "\\multicolumn{{6}}{{l}}{{\\small\\itshape {} (continued)}} \\\\\n",
+        "\\multicolumn{{{cols}}}{{l}}{{\\small\\color{{muted}} {} (continued)}} \\\\[1mm]\n",
         tex_esc(group_name),
     ));
-    s.push_str("\\hline\n");
-    s.push_str(
-        "\\textbf{Week} & \\textbf{Dates} & \\textbf{Area / Rooms} & \
-                \\textbf{Responsible} & $\\checkmark$ & \\textbf{Date} \\\\\n",
-    );
-    s.push_str("\\hline\\hline\n");
+    s.push_str(&header);
     s.push_str("\\endhead\n");
 
-    // ── Empty footer / last-footer (rows already end with \hline) ────────────
-    s.push_str("\\endfoot\n");
-    s.push_str("\\endlastfoot\n");
-
-    // ── Data rows ─────────────────────────────────────────────────────────────
-    // Group consecutive rows that share the same (iso_year, iso_week).
-    // The week number and date range are printed only on the first row of each
-    // group; subsequent rows leave those cells blank so the group reads as a
-    // visual unit.  A full \hline closes the group; within the group only
-    // columns 3–6 get a \cline so columns 1–2 appear merged across the rows.
+    // ── One block per week ────────────────────────────────────────────────────
     let mut i = 0;
+    let mut block = 0;
+    let mut year = rows.first().map(|a| a.iso_year);
     while i < rows.len() {
         let key = (rows[i].iso_year, rows[i].iso_week);
         let mut j = i + 1;
         while j < rows.len() && (rows[j].iso_year, rows[j].iso_week) == key {
             j += 1;
         }
+        let week = &rows[i..j];
+        let shade = if block % 2 == 1 { "shade" } else { "white" };
 
-        for (offset, &a) in rows[i..j].iter().enumerate() {
-            if offset == 0 {
-                s.push_str(&format!(
-                    "\\textbf{{{}}}{{\\newline{{\\tiny {}}}}}",
-                    a.iso_week, a.iso_year,
-                ));
-                s.push_str(" & ");
-                s.push_str(&tex_esc(&a.period_label));
-            } else if rows[i + offset - 1].shift != a.shift {
-                // A new shift within the same week: its own dates.
-                s.push_str(" & ");
-                s.push_str(&tex_esc(&a.period_label));
-            } else {
-                // Blank week and date cells — visual merge with the row above.
-                s.push_str(" & ");
-            }
-            s.push_str(" & ");
-
-            // Area / rooms cell.
-            let area = match &a.slot_name {
-                Some(slot) if !a.room_names.is_empty() => format!(
-                    "{}\\newline{{\\tiny {}}}",
-                    tex_esc(slot),
-                    tex_esc(&a.room_names.join(", ")),
-                ),
-                // No sub-rooms: render at a readable size regardless of the
-                // table's scaled-down font.
-                Some(slot) => format!("{{\\fontsize{{10}}{{13}}\\selectfont {}}}", tex_esc(slot),),
-                None if !a.room_names.is_empty() => {
-                    format!("{{\\tiny {}}}", tex_esc(&a.room_names.join(", ")),)
-                }
-                None => String::new(),
-            };
-            s.push_str(&area);
-            s.push_str(" & ");
-
-            // Responsible.
-            s.push_str(&tex_esc(a.assignee_name()));
-            if let Some(by) = &a.completed_by {
-                if !a.is_skipped && by != a.assignee_name() {
-                    s.push_str(&format!("\\newline{{\\tiny Done by {}}}", tex_esc(by)));
-                }
-            }
-            if let Some(source) = crate::view::source_note(&a.source) {
-                s.push_str(&format!("\\newline{{\\tiny {}}}", tex_esc(source)));
-            }
-            s.push_str(" & ");
-
-            // ✓ cell: show checkmark when done, leave empty when pending.
-            if a.is_skipped {
-                s.push_str("--");
-            } else if a.is_completed {
-                s.push_str("$\\checkmark$");
-            }
-            s.push_str(" & ");
-
-            // Date cell: completion date when known, otherwise blank for manual entry.
-            if let Some(date) = a.completed_at {
-                s.push_str(&tex_esc(&date.format("%-d %b %Y").to_string()));
-            }
-            s.push_str(" \\\\\n");
-
-            if offset == j - i - 1 {
-                s.push_str("\\hline\n");
-            } else {
-                // Partial rule: separate the slot rows but keep Week/Dates
-                // visually grouped (no line under columns 1–2).
-                s.push_str("\\cline{3-6}\n");
-            }
+        // A new year gets its own small heading row.
+        if year != Some(key.0) {
+            year = Some(key.0);
+            s.push_str(&format!(
+                "\\multicolumn{{{cols}}}{{l}}{{\\cellcolor{{white}}\\bfseries\\color{{accent}} {}}} \\\\\n",
+                key.0
+            ));
+            s.push_str("\\arrayrulecolor{weekrule}\\hline\n");
         }
 
+        for (k, &a) in week.iter().enumerate() {
+            let last_of_week = k + 1 == week.len();
+            let last_of_shift = last_of_week || week[k + 1].shift != a.shift;
+            let shift_rows = week[..=k]
+                .iter()
+                .rev()
+                .take_while(|r| r.shift == a.shift)
+                .count();
+
+            s.push_str(&format!("\\rowcolor{{{shade}}}\n"));
+            // Week number, centred over the whole week.
+            if last_of_week {
+                s.push_str(&merged(
+                    week.len(),
+                    "*",
+                    &format!("\\large\\bfseries {}", a.iso_week),
+                ));
+            }
+            s.push_str(" & ");
+            // Dates, centred over the shift's rows.
+            if last_of_shift {
+                s.push_str(&merged(shift_rows, "=", &tex_esc(&a.period_label)));
+            }
+            s.push_str(" & ");
+            if with_area {
+                if let Some(slot) = &a.slot_name {
+                    s.push_str(&tex_esc(slot));
+                }
+                s.push_str(" & ");
+            }
+            // Who, and anything worth knowing about how.
+            s.push_str(&tex_esc(a.assignee_name()));
+            let mut notes = Vec::new();
+            if let Some(by) = a
+                .completed_by
+                .as_ref()
+                .filter(|by| !a.is_skipped && by.as_str() != a.assignee_name())
+            {
+                notes.push(format!("done by {by}"));
+            }
+            notes.extend(crate::view::source_note(&a.source).map(str::to_owned));
+            if !notes.is_empty() {
+                s.push_str(&format!(
+                    " {{\\scriptsize\\color{{muted}} $\\cdot$ {}}}",
+                    tex_esc(&notes.join(" · "))
+                ));
+            }
+            s.push_str(" & ");
+            if a.is_skipped {
+                s.push_str("{\\color{muted}--}");
+            } else if a.is_completed {
+                s.push_str("{\\color{accent}$\\checkmark$}");
+            }
+            s.push_str(" & ");
+            if a.is_skipped {
+                s.push_str("{\\small\\color{muted}\\itshape skipped}");
+            } else if let Some(date) = a.completed_at {
+                s.push_str(&format!(
+                    "{{\\small {}}}",
+                    tex_esc(&date.format("%-d %b").to_string())
+                ));
+            }
+
+            if last_of_week {
+                s.push_str(" \\\\\n\\arrayrulecolor{weekrule}\\hline\n");
+            } else {
+                // A hairline under the cells that change; the merged
+                // cells get one in their own shade, so it doesn't show.
+                let merged = if last_of_shift { 1 } else { 2 };
+                let hidden = format!(">{{\\arrayrulecolor{{{shade}}}}}-").repeat(merged);
+                let visible = ">{\\arrayrulecolor{hair}}-".repeat(cols - merged);
+                // No page break inside a week — after the row, nor after its
+                // hairline (itself a row of its own).
+                s.push_str(&format!(
+                    " \\\\*\n\\hhline{{{hidden}{visible}}}\n\\noalign{{\\penalty10000}}\n"
+                ));
+            }
+        }
+        block += 1;
         i = j;
     }
 
     s.push_str("\\end{longtable}\n\n");
 
     // Legend.
-    s.push_str(
-        "{\\fontsize{6.5}{8}\\selectfont\\hfill \
-         $\\checkmark$ = done; -- = skipped}\n",
-    );
+    s.push_str(&format!(
+        "\\vspace{{2mm}}{{\\scriptsize\\color{{muted}} $\\checkmark$ done \\enspace -- skipped \\hfill Generated {}}}\n",
+        tex_esc(generated)
+    ));
 
     s
 }
 
+/// `content` centred over the `rows` rows ending here (a negative
+/// `\multirow`, see above) — or just the content in a row of its own,
+/// which `\multirow` would set a little off the line.
+fn merged(rows: usize, width: &str, content: &str) -> String {
+    if rows > 1 {
+        format!("\\multirow{{-{rows}}}{{{width}}}{{{content}}}")
+    } else {
+        content.to_owned()
+    }
+}
+
+/// "weekly" → "Weekly".
+fn capitalized(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Select LaTeX font size based on row count so all rows fit on one A4 page.
+/// The table's font size for a group of `n` rows.
 ///
 /// Returns (font_size_pt, baseline_skip_pt).
 fn font_size_for_rows(n: usize) -> (&'static str, &'static str) {
+    // Long plans go onto more pages rather than into ever smaller print.
     match n {
-        0..=25 => ("10", "13"),
-        26..=34 => ("9", "11"),
-        35..=45 => ("8", "10"),
-        _ => ("7", "9"),
+        0..=30 => ("10", "13"),
+        _ => ("9", "11"),
     }
 }
 
@@ -385,7 +459,7 @@ mod tests {
             tex.contains("Responsible"),
             "column headers must be in English"
         );
-        assert!(tex.contains("Area / Rooms"));
+        assert!(tex.contains("Done on"));
         assert!(!tex.contains("Putzplan"));
     }
 
@@ -420,6 +494,33 @@ mod tests {
         assert_eq!(tex_esc("a#b"), r"a\#b");
         assert_eq!(tex_esc("25 \u{2013} 31 May"), "25 -- 31 May");
         assert_eq!(tex_esc("Mon\u{2014}Fri"), "Mon---Fri");
+    }
+
+    #[test]
+    fn a_week_is_one_block_with_its_number_centred_and_never_split() {
+        let mut st = State::default();
+        st.created_at = Some(Utc::now());
+        let mut g = CleaningGroup::new("Bath");
+        for name in ["Ann", "Ben", "Cat"] {
+            let p = Person::new_named(name);
+            g.member_ids.push(p.id.clone());
+            st.persons.push(p);
+        }
+        g.rhythm.shift_starts = vec![0, 3];
+        st.cleaning_groups.push(g);
+        let tex = render_tex(&build_schedule(&st, 3));
+        // Two shifts a week: the week number centred over both rows, each
+        // shift's dates on its own row, no line break making a row taller.
+        assert_eq!(
+            tex.matches(r"\multirow{-2}{*}{\large\bfseries").count(),
+            3,
+            "{tex}"
+        );
+        assert!(!tex.contains(r"\newline"));
+        // No page break between the shifts of a week; weeks shaded in turn.
+        assert_eq!(tex.matches(r"\\*").count(), 3);
+        assert_eq!(tex.matches(r"\noalign{\penalty10000}").count(), 3);
+        assert!(tex.contains(r"\rowcolor{shade}") && tex.contains(r"\rowcolor{white}"));
     }
 
     #[test]

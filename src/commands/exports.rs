@@ -50,7 +50,7 @@ pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
     lines.join("\n")
 }
 
-// ── !plan pdf [history] [N] [group] ─────────────────────────────────────────────
+// ── !plan pdf [history | next] [N] [group] ─────────────────────────────────────────────
 
 pub(crate) async fn cmd_pdf(
     ctx: &BotContext,
@@ -61,9 +61,17 @@ pub(crate) async fn cmd_pdf(
     thread_root: OwnedEventId,
 ) -> Result<Option<RoomMessageEventContent>> {
     let _ = sender;
-    let history = args.first() == Some(&"history");
-    let args = if history { &args[1..] } else { args };
-    // !plan pdf [weeks] [group name]
+    // `history`: the weeks up to this one; `next`: from next week on.
+    let history = args
+        .first()
+        .is_some_and(|a| a.eq_ignore_ascii_case("history"));
+    let from_next = args.first().is_some_and(|a| a.eq_ignore_ascii_case("next"));
+    let args = if history || from_next {
+        &args[1..]
+    } else {
+        args
+    };
+    // !plan pdf [history | next] [weeks] [group name]
     // First arg: either a number (weeks) or start of group name.
     let (n, group_filter) = {
         let weeks = args.first().and_then(|s| s.parse::<usize>().ok());
@@ -92,9 +100,11 @@ pub(crate) async fn cmd_pdf(
 
     let (tex, file_name) = {
         let state = ctx.state.lock().await;
+        let (y, w) = current_iso_week();
         let mut snapshot = if history {
-            let (y, w) = current_iso_week();
             crate::schedule::build_schedule_from(&state, add_weeks(y, w, -(n as i64 - 1)), n)
+        } else if from_next {
+            crate::schedule::build_schedule_from(&state, add_weeks(y, w, 1), n)
         } else {
             build_schedule(&state, n)
         };
