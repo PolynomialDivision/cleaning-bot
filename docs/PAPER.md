@@ -189,23 +189,30 @@ new fields load as layout version 1. The form does not change group frequency.
 5. Find the four corner targets (nested square / white disc / dot; QR
    finder patterns have different proportions), at three levels of
    strictness, in the photo and with its light evened out: in a small,
-   compressed or dim photo a 5 mm target's white disc and dot blur. The QR
+   compressed or dim photo a 5 mm target's white disc and dot blur, and in
+   a photo taken at a slant the far ones are squashed (up to 2.5:1). The QR
    code, at a known place near the bottom-right target, picks the four that
    belong to this page (a neighbouring sheet in the photo has targets too)
    and fixes the orientation. If only three are found (one in a shadow), the
    fourth follows from them and the QR code. Normalize perspective to A4 at
    6 pixels/mm (from the evened-out photo). Reject too small or too steep
    photos.
-6. Read each box the manifest names. A page that isn't flat (curled, wavy
-   where it hangs) moves boxes against the corners by 2–3 mm, so each box is
-   first looked for within 3 mm of its place, where all four sides of a
-   box-sized square are dark (a rule or a column line alone never passes;
-   boxes are 11 mm and more apart). The printed outline is found with a
+6. Read each box the manifest names. A page that isn't flat (curled, wavy,
+   crumpled) moves boxes against the corners by 3–4 mm, so each box is
+   first looked for within 5 mm of its place, where all four sides of a
+   box-sized square are dark (a rule or a column line alone never passes).
+   A page bent further (over the edge of a keyboard, say) can move boxes by
+   half a row and more, so that one could be found in the next row: then,
+   somewhere along that column, neighbouring boxes are found suddenly 11–13
+   mm closer together or further apart than printed (paper bends smoothly).
+   Every column and row is checked for that; where it happens, none of its
+   boxes is read (and the page is usually refused). The printed outline is found with a
    lighter threshold than ink: in a shrunk, compressed photo the 0.22 mm line
    of older sheets is only a pixel or two of grey. Then it is registered
    precisely (up to ±2 px, sub-pixel centre) and must be continuous on all
-   four sides, with clean paper around it — otherwise that duty is unclear
-   (shadow, fold, missing outline). Inside, away from the outline, the share
+   four sides, with clean paper around it (a stroke running out of the box
+   is fine; a fifth of the paper around it dark is not) — otherwise that
+   duty is unclear (shadow, fold, missing outline). Inside, away from the outline, the share
    of ink decides: under 0.8 % is blank; ink through the box's middle,
    spanning at least 40 % of it, is a mark (an X, a tick, a stroke); more
    than 55 %, or ink all across the box (three quarters of its 4×4 patches,
@@ -293,9 +300,10 @@ and scan them back:
   day; a dot and several marked days as unclear;
 - rotation 0/90/180/270/13°, perspective, JPEG, darker exposure;
 - empty pages, the second shift of a week, weekend days, a shadow over a
-  box (that duty unclear, the rest read), a band buckled further than a box
-  is looked for (those rows unclear), creases all over a page (refused as a
-  whole), a cropped or blurred photo, a lost corner target (read from three
+  box (that duty unclear, the rest read), a band of rows buckled sideways,
+  a crumpled page (sixty folds as soft shadows: the mark read, no fold), a
+  page bent by up to 4 mm (read) and by 7–13 mm, over half a row (refused,
+  never read into the wrong week), a cropped or blurred photo, a lost corner target (read from three
   and the QR code), an unrelated image, an old revision, two pages in one
   photo;
 - a wavy, curled page with a shadow over the QR corner, shrunk to 1200×1600
@@ -322,12 +330,17 @@ manifests, `paper-phone-simulation.jpg`.
   handwriting, OCR, HEIC-specific decoding and multiple-page extraction are not
   implemented. Three corner targets and the QR code must be visible.
 - The mark reader is a set of simple checks, not a calibrated model. It was
-  checked on five real phone photos, sent compressed by a chat app
-  (1200×1600): on a flat sheet every real mark (ballpoint and felt pen, small,
-  big, over the edge, with a tail) read correctly and every empty box as
-  empty; crumpled sheets and a very slanted photo with a corner target in a
-  shadow are refused as a whole (on those, creases read as marks); no mark
-  was ever applied to the wrong duty or day.
+  checked on sixteen real phone photos of four printed sheets, sent
+  compressed by a chat app (1200×1600). On the new sheets (6 mm boxes, black
+  only): flat sheets, also photographed at a slant, read completely —
+  every mark (small, big, over the edge, with a tail), every empty box, every
+  correction (box filled in); a crumpled sheet read completely but for one
+  box named as unclear. Refused, with a request to retake: a crumpled sheet
+  photographed at a slant, a sheet bent over a keyboard's edge, a sheet too
+  far away (its code a blur), a blurred photo, and a crumpled one whose code a
+  fold had warped. No photo ever put a mark on the wrong duty or day.
+- Creases and a straight stroke look alike: soft folds are not read as
+  marks, but dark lines drawn across a box are (any clear mark counts).
 - On sheets printed with 4.8 mm boxes, a big X with a thick pen (0.5 mm and
   more), blurred by a tilted photo, can fill the small box and read as taken
   back. It is named in the preview, never dropped silently. New sheets have

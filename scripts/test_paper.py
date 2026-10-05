@@ -92,6 +92,18 @@ def colours(pdf):
     return found
 
 
+def crumple(im,folds,seed,depth):
+    """`im` with `folds` creases as a photo shows them: a soft shadow on one
+    side of each, a bright ridge, fading out along it."""
+    a=np.asarray(im,dtype=float);h,w=a.shape;yy,xx=np.mgrid[0:h,0:w].astype(float);rng=np.random.default_rng(seed)
+    for _ in range(folds):
+        x0,y0=rng.uniform(0,w),rng.uniform(0,h);angle=rng.uniform(0,np.pi)
+        d=(xx-x0)*-np.sin(angle)+(yy-y0)*np.cos(angle)
+        reach=np.clip(1-np.abs((xx-x0)*np.cos(angle)+(yy-y0)*np.sin(angle))/rng.uniform(150,600),0,1)
+        a=a*(1-depth*reach/(1+np.exp(-d/3))*np.exp(-np.abs(d)/40))*(1+.06*reach*np.exp(-(d+2)**2/4))
+    return Image.fromarray(np.clip(a,0,255).astype(np.uint8))
+
+
 def encoded(im,jpeg=False):
     b=io.BytesIO();im.save(b,format='JPEG' if jpeg else 'PNG',**({'quality':78} if jpeg else {}));return b.getvalue()
 
@@ -252,23 +264,16 @@ class PaperTests(unittest.TestCase):
         f=row['fields'][0];d.rectangle((f['x']*6-30,f['y']*6-30,f['x']*6+30,f['y']*6+30),fill=110)
         result=paper.scan(encoded(im),self.doc)
         self.assertEqual((result.get('marks'),[u['row'] for u in result.get('unclear',[])]),([],['0-0']),result)
-        # A buckled page: a band of rows shifted sideways by 5mm, further
-        # than a box is looked for around its place: those rows are unclear,
-        # the rest of the page still reads.
-        im=self.marked();band=im.crop((0,300,1260,420));im.paste(band,(30,300))
+        # A buckled page: a band of rows shifted sideways by 4mm. Its boxes
+        # are found where they are; nothing is misread.
+        im=self.marked();band=im.crop((0,300,1260,420));im.paste(band,(24,300))
         result=paper.scan(encoded(im),self.doc)
         self.assertEqual(result.get('marks'),[dict(row='0-0',skipped=False,day='2026-09-28')],result)
-        rows=self.doc['pages'][0]['rows']
-        # (Rows whose boxes the band's edge cuts through as well.)
-        self.assertEqual({u['row'] for u in result['unclear']},
-                         {r['id'] for r in rows if 300/6<r['y']+2.4 and r['y']-2.4<420/6},result)
-        # Most of the page unclear (a crumpled sheet, creases everywhere):
-        # retake it, nothing read.
-        im=self.marked();d=ImageDraw.Draw(im);rng=np.random.default_rng(7)
-        for _ in range(120):
-            x0,y0=rng.uniform(80,1180),rng.uniform(150,1600);a=rng.uniform(0,np.pi)
-            d.line([(x0-200*np.cos(a),y0-200*np.sin(a)),(x0+200*np.cos(a),y0+200*np.sin(a))],fill=int(rng.uniform(90,160)),width=2)
-        self.assertIn('Too much of the page is unclear',paper.scan(encoded(im),self.doc).get('error',''))
+        # Crumpled: sixty folds, each a soft shadow with a bright ridge, the
+        # way they look in a photo. The mark is read; no fold is.
+        for seed in range(3):
+            result=paper.scan(encoded(crumple(self.marked(),60,seed,.3),jpeg=True),self.doc)
+            self.assertEqual(result.get('marks'),[dict(row='0-0',skipped=False,day='2026-09-28')],(seed,result))
         # A thick X that runs over the box frame still reads as an X.
         im=self.blank.copy();pen_x(im,row['fields'][0],width=3,r=14)
         result=paper.scan(encoded(im),self.doc)
@@ -443,6 +448,22 @@ class TickSheetTests(unittest.TestCase):
         result=paper.scan(encoded(photo.rotate(13,expand=True,fillcolor=220),jpeg=True),self.doc)
         done=[dict(row='t-3-1',skipped=False,day=None)]
         self.assertTrue(result.get('marks')==done or result.get('taken_back')==[dict(row='t-3-1',day=None)],result)
+
+    def test_a_bent_page_is_never_misread(self):
+        """Bent so far that boxes in the middle are off by over half a row:
+        refused (a box there could be found in the next row), never read
+        into the wrong week. Bent a little: read."""
+        marked={'t-3-1','t-8-2','t-10-0','t-12-3','t-15-1','t-19-2'}
+        for bend,readable in ((4,True),(7,False),(10,False),(13,False)):
+            im=self.blank.copy()
+            for rowid in marked:pen_x(im,self.field(rowid))
+            a=np.asarray(im,dtype=float);h,w=a.shape;yy,xx=np.mgrid[0:h,0:w].astype(float)
+            dy=bend*6*np.sin(np.pi*np.clip((yy-180)/(h-360),0,1))*np.sin(np.pi*xx/w)
+            a=a[np.clip(np.rint(yy+dy),0,h-1).astype(int),xx.astype(int)]
+            result=paper.scan(encoded(Image.fromarray(a.astype(np.uint8)),jpeg=True),self.doc)
+            got={m['row'] for m in result.get('marks',[])}
+            self.assertLessEqual(got,marked,(bend,result))
+            if readable: self.assertEqual(got,marked,(bend,result))
 
     def test_a_tick_counts_too(self):
         f=self.field('t-2-2');x,y=f['x']*6,f['y']*6;im=self.blank.copy()

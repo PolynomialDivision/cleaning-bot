@@ -264,7 +264,9 @@ def targets(im, dark, light, white_share, ring_share):
     candidates = []
     for outer in boxes:
         l,t,r,b,area,_,_ = outer; w,h = r-l+1,b-t+1
-        if not (12 <= min(w,h) and max(w,h) <= 85 and .6 < w/h < 1.67 and .25 < area/(w*h) < .9): continue
+        # Square, or squashed up to 2.5:1 where the photo looks at the page
+        # from a slant (the far targets of a sheet lying on a table).
+        if not (8 <= min(w,h) and 12 <= max(w,h) <= 85 and .4 < w/h < 2.5 and .25 < area/(w*h) < .9): continue
         for inner in boxes:
             il,it,ir,ib,n,sx,sy = inner
             if not (l < il <= ir < r and t < it <= ib < b and .012 < n/(w*h) < .085): continue
@@ -365,7 +367,9 @@ def flatten(im):
     return Image.fromarray(np.clip(np.asarray(im, dtype=float)/paper*235, 0, 255).astype(np.uint8))
 
 
-def normalize(im, found, page):
+def normalize(im, found, page, *more):
+    """`im` straightened to A4 at SCALE pixels/mm by the page's corner
+    targets (and `more` images of the same photo, the same way)."""
     if len(found) != 1: raise ValueError('Photograph only one page at a time')
     qr = np.array(found[0][1])
     # The identity QR is close to the bottom-right target, resolving all
@@ -380,8 +384,10 @@ def normalize(im, found, page):
     if np.linalg.norm(q-page['qr_center'])>3:
         raise ValueError('Corner marks and page code do not align')
     h = homography([(x*SCALE,y*SCALE) for x,y in anchors],dst)
-    return im.transform((210*SCALE,297*SCALE),Image.Transform.PERSPECTIVE,h,
-                        Image.Resampling.BICUBIC,fillcolor=255)
+    straight = [x.transform((210*SCALE,297*SCALE),Image.Transform.PERSPECTIVE,h,
+                            Image.Resampling.BICUBIC,fillcolor=255 if x is im else 0)
+                for x in (im, *more)]
+    return straight[0] if not more else straight
 
 
 #: Largest local shift (pixels, 1px = 1/SCALE mm) searched between where the
@@ -473,7 +479,10 @@ def box_state(arr, field):
             if best is None or score>best[0]:
                 best=(score,square,ring,white)
     (visible,_),square,ring,white=best
-    if white<120 or np.std(patch[ring])>32:
+    # Clean paper around the box: a stroke running out of it (a big X, a
+    # tail) darkens a narrow strip of this ring; a shadow, a fold or
+    # writing next to it much of it.
+    if white<120 or np.mean(patch[ring] < white*.7) > AROUND:
         raise Unclear('shadow or ink next to the box')
     if visible<OUTLINE:
         raise Unclear('box not clearly visible (fold, blur)')
@@ -493,27 +502,36 @@ def box_state(arr, field):
     return 'marked'
 
 
-#: How far a box may lie from where the manifest puts it (mm) — a page that
-#: isn't flat (curled at the top, wavy where it hangs) moves boxes by up to
-#: 2-3mm against the corners. Boxes are 11mm and more apart, so this never
-#: reaches the next one.
-DRIFT = 3
+#: How far a box may lie from where the manifest puts it (mm): a page that
+#: isn't flat (curled, wavy, crumpled) moves boxes by up to 3-4mm against
+#: the corners. A page bent more (over an edge, say) can move them by half a
+#: row and more, so a box may be found in the next row; `locate_all`
+#: catches that.
+DRIFT = 5
+#: Neighbouring boxes found closer together or further apart than this
+#: share of their distance on paper: one of them is another row's (or
+#: day's) box. (Paper bends smoothly, moving neighbours a millimetre or two
+#: against each other; where boxes start to be found in the next row or day,
+#: neighbours are suddenly 11-13mm off.)
+SPACING = .35
 
 
-def locate(arr, field):
-    """`field` moved to where its box outline actually is, within DRIFT:
-    where all four sides of a box-sized square are darkest (all four, so a
-    row's rule or a column line alone never passes for a box). Unchanged
-    when no outline stands out; `box_state` then says so."""
+def locate(arr, field, prior=(0., 0.)):
+    """`field` moved to where its box outline actually is, within DRIFT of
+    `prior` (mm, from where the manifest puts it): where all four sides of a
+    box-sized square are darkest (all four, so a row's rule or a column
+    line alone never passes for a box). None when no outline stands out."""
     half = field['size']/2*SCALE
     reach = int(DRIFT*SCALE)
-    x, y = field['x']*SCALE, field['y']*SCALE
+    x, y = (field['x']+prior[0])*SCALE, (field['y']+prior[1])*SCALE
     cx, cy = int(round(x)), int(round(y))
     edge = int(round(half))
     size = reach+edge+1
+    if cy-size < 0 or cx-size < 0:
+        return None
     patch = arr[cy-size:cy+size+1, cx-size:cx+size+1]
     if patch.shape != (2*size+1, 2*size+1):
-        return field
+        return None
     ink = patch < np.percentile(patch, 90)*OUTLINE_INK
     # A pixel's tolerance: on a wavy page a side is not one straight row.
     grown = ink.copy()
@@ -536,8 +554,37 @@ def locate(arr, field):
             if score > best:
                 best, shift = score, (dx, dy)
     if best < .5:
-        return field
-    return dict(field, x=field['x']+shift[0]/SCALE, y=field['y']+shift[1]/SCALE)
+        return None
+    return dict(field, x=field['x']+prior[0]+shift[0]/SCALE, y=field['y']+prior[1]+shift[1]/SCALE)
+
+
+def locate_all(arr, page):
+    """Where each box of `page` actually is: {field id: field moved there,
+    or None}. A box can be found in the wrong row (or day) only where the
+    page is bent so much that a whole run of boxes slides over by one; then
+    two neighbours land on one box or leave one out between them. So in
+    each column and each row the distances between neighbouring boxes must
+    be as printed; where they aren't, none of that column's or row's boxes
+    is trusted."""
+    fields = [f for row in page['rows'] for f in row['fields']]
+    found = {f['id']: locate(arr, f) for f in fields}
+    columns = {}
+    for f in fields:
+        columns.setdefault(round(f['x'], 1), []).append(f)
+    lines = [sorted(c, key=lambda f: f['y']) for c in columns.values()]
+    lines += [sorted(row['fields'], key=lambda f: f['x']) for row in page['rows']]
+    for line in lines:
+        for a, b in zip(line, line[1:]):
+            fa, fb = found[a['id']], found[b['id']]
+            if fa is None or fb is None:
+                continue
+            printed = (b['x']-a['x'], b['y']-a['y'])
+            seen = (fb['x']-fa['x'], fb['y']-fa['y'])
+            if math.dist(printed, seen) > SPACING*math.hypot(*printed):
+                for f in line:
+                    found[f['id']] = None
+                break
+    return found
 
 
 def spread(ink, square, edge):
@@ -553,6 +600,10 @@ def spread(ink, square, edge):
     return inked/16
 
 
+#: Largest share of the paper around a box that may be dark.
+AROUND = .2
+
+
 #: More unclear boxes than this share of a page, and the photo itself is
 #: the problem (crumpled, blurred, in shadow): retake it rather than list them.
 TOO_UNCLEAR = .25
@@ -566,13 +617,16 @@ def read_marks(im, page):
     records it in Matrix instead."""
     marks, unclear, taken_back = [], [], []
     arr = np.asarray(im, dtype=float)
+    where = locate_all(arr, page)
     boxes = sum(len(row['fields']) for row in page['rows'])
     bad = 0
     for row in page['rows']:
         marked, why = [], None
         for field in row['fields']:
             try:
-                state = box_state(arr, locate(arr, field))
+                if where[field['id']] is None:
+                    raise Unclear('box not clearly visible (fold, blur)')
+                state = box_state(arr, where[field['id']])
             except Unclear as e:
                 bad += 1; why = why or str(e); continue
             if state == 'marked':
