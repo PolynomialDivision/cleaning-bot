@@ -55,7 +55,9 @@ it. Notes are for humans and are not read.
 
 Send a photo as a Matrix **image** to the cleaning room or an authorized
 encrypted DM. Include the whole page with all four small corner targets. No
-command is needed. Unrelated images and unknown document IDs are ignored.
+command is needed. Unrelated images are ignored. A photo that clearly shows a
+sheet (three or four corner targets) but whose code can't be read gets an
+answer saying how to retake it, and so does a sheet the bot has no record of.
 
 Sheets printed with the first layout (four corner QR codes, circles to fill)
 still scan as before.
@@ -157,12 +159,23 @@ new fields load as layout version 1. The form does not change group frequency.
    small, tilted, compressed — straighten the page on its four corner targets
    (which don't depend on rotation), try the four orientations and read the
    QR from the straightened corner.
+   If the code or a corner target can't be found, the same is tried once
+   more with the light evened out (each pixel divided by the paper's
+   brightness around it): a shadow over a corner makes the paper there darker
+   than the fixed thresholds' "dark". Photos that read as they are never get
+   this step.
 5. Find exactly four corner targets (nested square / white disc / dot; QR
    finder patterns have different proportions). The QR near the bottom-right
    target fixes the orientation; its position must match the manifest after
    the homography. Normalize perspective to A4 at 6 pixels/mm. Reject too
    small or too steep photos.
-6. Read each box the manifest names. Its printed outline is registered locally
+6. Read each box the manifest names. A page that isn't flat (curled, wavy
+   where it hangs) moves boxes against the corners by 2–3 mm, so each box is
+   first looked for within 3 mm of its place, where all four sides of a
+   box-sized square are dark (a rule or a column line alone never passes;
+   boxes are 11 mm and more apart). The printed outline is found with a
+   lighter threshold than ink: in a shrunk, compressed photo the 0.22 mm line
+   is only a pixel or two of grey. Then it is registered precisely
    (up to ±2 px, sub-pixel centre) and must be continuous on all four sides,
    with a clean background around it — otherwise the whole scan is rejected
    (shadow, fold, missing outline). Inside, ignoring the outline: almost no
@@ -250,8 +263,12 @@ They render real PDFs, rasterize them, draw X marks with separate pen strokes
   three-armed marks, crossed-out X and scribbles (thin and medium pens) never;
 - rotation 0/90/180/270/13°, perspective, JPEG, darker exposure;
 - empty pages, the second shift of a week, weekend days, two marks for one duty, shadows over a box,
-  a buckled band, a cropped or blurred photo, missing targets, an unrelated
-  image, an old revision, two pages in one photo;
+  a band buckled further than a box is looked for, a cropped or blurred
+  photo, missing targets, an unrelated image, an old revision, two pages in
+  one photo;
+- a wavy, curled page with a shadow over the QR corner, shrunk to 1200×1600
+  and compressed the way chat apps send photos (read correctly); a sheet with
+  corner targets but no readable code (answered, not ignored);
 - a complete version-1 sheet (still scannable);
 - views of both styles: the notice on every page, no QR code or corner
   targets, a photo ignored (with `PAPER_VIEW_FIXTURE` also the Rust one);

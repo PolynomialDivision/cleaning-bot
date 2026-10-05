@@ -194,6 +194,23 @@ struct Scan {
     #[serde(default)]
     marks: Vec<Mark>,
     error: Option<String>,
+    /// Corner targets but no readable QR code: a sheet, badly photographed.
+    #[serde(default)]
+    unreadable: bool,
+}
+
+/// Tell `room` about a photo of a sheet that can't be used. Once per photo.
+async fn photo_problem(room: &Room, event: &OwnedEventId, text: &str) -> Result<()> {
+    let txn: mxbot_common::matrix_sdk::ruma::OwnedTransactionId =
+        format!("paper-{}", hash(event.as_str())).into();
+    room.send(crate::format::intentional(
+        mxbot_common::matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+            text,
+        ),
+    ))
+    .with_transaction_id(txn)
+    .await?;
+    Ok(())
 }
 fn hash(value: impl Serialize) -> String {
     hex::encode(Sha256::digest(
@@ -814,6 +831,12 @@ async fn authorized(ctx: &BotContext, room: &Room, user: &OwnedUserId) -> bool {
             })
         })
 }
+const UNREADABLE: &str = "📷 That looks like a cleaning plan, but I can't read its code \
+(bottom right). Please take the photo again: the whole page, flat, without shadow, \
+from closer — and send it in full quality, not compressed.";
+const UNKNOWN_SHEET: &str = "📷 I don't know this cleaning plan: it was printed by another \
+bot or before its records were reset. Print a fresh one with !plan pdf.";
+
 pub async fn image(
     ctx: &BotContext,
     room: &Room,
@@ -857,10 +880,15 @@ pub async fn image(
     }
     let identified: Scan = serde_json::from_slice(&worker("identify", &bytes, None).await?)?;
     let Some(id) = identified.document else {
+        // Any other picture: ignored. A sheet whose code can't be read: said.
+        if identified.unreadable {
+            photo_problem(room, event, UNREADABLE).await?;
+        }
         return Ok(());
     };
     let doc = ctx.state.lock().await.paper_documents.get(&id).cloned();
     let Some(doc) = doc else {
+        photo_problem(room, event, UNKNOWN_SHEET).await?;
         return Ok(());
     };
     let scanned: Scan = serde_json::from_slice(&worker("scan", &bytes, Some(&doc)).await?)?;

@@ -239,13 +239,49 @@ class PaperTests(unittest.TestCase):
         im=self.marked();d=ImageDraw.Draw(im)
         f=row['fields'][0];d.rectangle((f['x']*6-30,f['y']*6-30,f['x']*6+30,f['y']*6+30),fill=110)
         self.assertFalse(paper.scan(encoded(im),self.doc).get('marks'))
-        # A buckled page: a band of rows shifted sideways by 1mm.
-        im=self.marked();band=im.crop((0,300,1260,420));im.paste(band,(6,300))
+        # A buckled page: a band of rows shifted sideways by 5mm, further
+        # than a box is looked for around its place.
+        im=self.marked();band=im.crop((0,300,1260,420));im.paste(band,(30,300))
         self.assertFalse(paper.scan(encoded(im),self.doc).get('marks'))
         # A thick X that runs over the box frame still reads as an X.
         im=self.blank.copy();pen_x(im,row['fields'][0],width=3,r=14)
         result=paper.scan(encoded(im),self.doc)
         self.assertEqual(result.get('marks'),[dict(row='0-0',skipped=False,day='2026-09-28')],result)
+
+    def test_a_curled_page_in_shadow_sent_compressed(self):
+        """Like a real photo that first went unread: the page hangs wavy and
+        curled at the top (boxes up to 2mm off), a shadow lies over the QR
+        corner, and the chat app shrank it to 1200x1600 and compressed it."""
+        row,later=self.doc['pages'][0]['rows'][2],self.doc['pages'][0]['rows'][15]
+        im=self.blank.copy()
+        pen_x(im,row['fields'][1]);pen_x(im,later['fields'][0])
+        a=np.asarray(im,dtype=float);h,w=a.shape
+        yy,xx=np.mgrid[0:h,0:w].astype(float)
+        # Waves: rows bend up to 2mm (12px), more towards the top.
+        dy=12*np.sin(xx/w*np.pi*1.5)*(1-yy/h)+6*np.sin(yy/h*np.pi*3)
+        dx=4*np.sin(yy/h*np.pi*2)
+        src_y=np.clip(np.rint(yy+dy),0,h-1).astype(int);src_x=np.clip(np.rint(xx+dx),0,w-1).astype(int)
+        a=a[src_y,src_x]
+        # Shadow: the bottom-right third at 45%, with a soft edge.
+        shade=np.clip((xx/w+yy/h-1.15)/.15,0,1);a=a*(1-.55*shade)
+        page=Image.fromarray(a.astype(np.uint8))
+        # The page in the middle of a dark wall, then shrunk to 1200x1600.
+        photo=Image.new('L',(1700,2260),35);photo.paste(page,(220,240))
+        photo=photo.resize((1200,1600),Image.Resampling.LANCZOS)
+        data=encoded(photo,jpeg=True)
+        result=paper.scan(data,self.doc)
+        self.assertEqual(result.get('marks'),[dict(row=row['id'],skipped=False,day=row['fields'][1]['kind']),
+                                             dict(row=later['id'],skipped=False,day=later['fields'][0]['kind'])],result)
+        # The same photo with a phone-sized shadow over a box: said, not misread.
+        d=ImageDraw.Draw(photo);d.rectangle((560,300,760,420),fill=60)
+        self.assertFalse(paper.scan(encoded(photo,jpeg=True),self.doc).get('marks'))
+
+    def test_a_sheet_that_cannot_be_read_is_said_so(self):
+        """Corner targets but no readable QR code: the bot answers instead of
+        ignoring it like any other picture. Unrelated pictures stay ignored."""
+        im=self.blank.copy();ImageDraw.Draw(im).rectangle((1000,1560,1260,1782),fill=255)
+        self.assertEqual(paper.scan(encoded(im)),{'unreadable':True})
+        self.assertEqual(paper.scan(encoded(Image.new('L',(800,600),128))),{})
 
     def test_legacy_v1_sheet_still_scans(self):
         """A v1 plan printed before (four corner QR codes, filled circles)."""

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 import paper_v1 as legacy  # Also retains decoding of already printed v1 sheets.
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 import datetime
 import io
 
@@ -228,6 +228,14 @@ def fiducials(im):
     The small central dot determines the projective registration point. QR finder
     patterns have a much larger nested centre and do not meet these ratios.
     """
+    candidates = fiducial_candidates(im)
+    if len(candidates) != 4:
+        raise ValueError('Show all four corner marks on one flat page')
+    return candidates
+
+
+def fiducial_candidates(im):
+    """Every corner target `fiducials` can see, however many."""
     small = im.copy(); small.thumbnail((1500,2000))
     arr = np.asarray(small); boxes = components(arr < 125)
     candidates = []
@@ -245,9 +253,23 @@ def fiducials(im):
                                  for a in np.linspace(0,2*math.pi,24,endpoint=False)])
             if np.mean(samples(.21)>180)<.9 or np.mean(samples(.43)<125)<.7: continue
             candidates.append((x*im.width/small.width,y*im.height/small.height))
-    if len(candidates) != 4:
-        raise ValueError('Show all four corner marks on one flat page')
     return candidates
+
+
+def flatten(im):
+    """Even out uneven light — a phone's shadow over a corner, a lamp on one
+    side: divide each pixel by the paper's brightness around it. Without it,
+    paper in a shadow is darker than the fixed thresholds' "dark" and the QR
+    code and a corner target vanish. The neighbourhood (3% of the photo's
+    long side) is wider than any solid mark on the page, even when the page
+    fills the photo (a corner target is 5mm of 210mm), so ink never counts as
+    paper; smoothing it well keeps the paper's brightness across a shadow's
+    edge (checked on a real photo, a shadow over the QR corner)."""
+    small = im.resize((max(1, im.width//4), max(1, im.height//4)), Image.Resampling.BOX)
+    window = max(3, int(max(small.size)*.03)) | 1
+    paper = small.filter(ImageFilter.MaxFilter(window)).filter(ImageFilter.GaussianBlur(window*.75))
+    paper = np.maximum(np.asarray(paper.resize(im.size, Image.Resampling.BILINEAR), dtype=float), 1)
+    return Image.fromarray(np.clip(np.asarray(im, dtype=float)/paper*235, 0, 255).astype(np.uint8))
 
 
 def normalize(im, found, page):
@@ -277,6 +299,9 @@ def normalize(im, found, page):
 REGISTRATION = 2
 #: Share of positions along each printed box side that must show the line.
 OUTLINE = .8
+#: A pixel at most this bright (of the paper around it) belongs to a box's
+#: printed outline.
+OUTLINE_INK = .85
 #: Share of positions along each of the four X arms that must show ink.
 ARM = .7
 #: How far from the centre (mm) each X arm is checked.
@@ -394,11 +419,16 @@ def field_value(arr, field):
             ring=(square>half+.55)&(square<half+1.15)
             white=np.median(patch[ring])
             ink=patch < white*.70
+            # The printed outline is thin (0.22mm): in a small, compressed
+            # photo it is only a pixel or two of grey. It is found with a
+            # lighter threshold; what is drawn in the box is still read as
+            # ink only at the usual one.
+            line=patch < white*OUTLINE_INK
             along=abs(yy)<half-.3, abs(xx)<half-.3
-            sides=[continuity((abs(xx-half)<.3)&along[0],ink,1),
-                   continuity((abs(xx+half)<.3)&along[0],ink,1),
-                   continuity((abs(yy-half)<.3)&along[1],ink,0),
-                   continuity((abs(yy+half)<.3)&along[1],ink,0)]
+            sides=[continuity((abs(xx-half)<.3)&along[0],line,1),
+                   continuity((abs(xx+half)<.3)&along[0],line,1),
+                   continuity((abs(yy-half)<.3)&along[1],line,0),
+                   continuity((abs(yy+half)<.3)&along[1],line,0)]
             score=(min(sides),-abs(ox)-abs(oy))
             if best is None or score>best[0]:
                 best=(score,xx,yy,square,ring,white,ink,(ox,oy))
@@ -437,10 +467,57 @@ def field_value(arr, field):
     raise ValueError(UNCLEAR)
 
 
+#: How far a box may lie from where the manifest puts it (mm) — a page that
+#: isn't flat (curled at the top, wavy where it hangs) moves boxes by up to
+#: 2-3mm against the corners. Boxes are 11mm and more apart, so this never
+#: reaches the next one.
+DRIFT = 3
+
+
+def locate(arr, field):
+    """`field` moved to where its box outline actually is, within DRIFT:
+    where all four sides of a box-sized square are darkest (all four, so a
+    row's rule or a column line alone never passes for a box). Unchanged
+    when no outline stands out; `field_value` then says so."""
+    half = field['size']/2*SCALE
+    reach = int(DRIFT*SCALE)
+    x, y = field['x']*SCALE, field['y']*SCALE
+    cx, cy = int(round(x)), int(round(y))
+    edge = int(round(half))
+    size = reach+edge+1
+    patch = arr[cy-size:cy+size+1, cx-size:cx+size+1]
+    if patch.shape != (2*size+1, 2*size+1):
+        return field
+    ink = patch < np.percentile(patch, 90)*OUTLINE_INK
+    # A pixel's tolerance: on a wavy page a side is not one straight row.
+    grown = ink.copy()
+    grown[1:] |= ink[:-1]; grown[:-1] |= ink[1:]
+    grown[:, 1:] |= ink[:, :-1]; grown[:, :-1] |= ink[:, 1:]
+    ink = grown
+    # Ink along each side of the square, for every shift at once: running
+    # sums along rows and columns of the ink mask.
+    rows = np.cumsum(np.pad(ink, ((0, 0), (1, 0))), axis=1)
+    cols = np.cumsum(np.pad(ink, ((1, 0), (0, 0))), axis=0)
+    span = 2*edge+1
+    best, shift = 0., (0, 0)
+    for dy in range(-reach, reach+1):
+        for dx in range(-reach, reach+1):
+            l, t = size+dx-edge, size+dy-edge
+            r, b = l+span-1, t+span-1
+            sides = ((rows[t, r+1]-rows[t, l])/span, (rows[b, r+1]-rows[b, l])/span,
+                     (cols[b+1, l]-cols[t, l])/span, (cols[b+1, r]-cols[t, r])/span)
+            score = min(sides)-.002*(abs(dx)+abs(dy))
+            if score > best:
+                best, shift = score, (dx, dy)
+    if best < .5:
+        return field
+    return dict(field, x=field['x']+shift[0]/SCALE, y=field['y']+shift[1]/SCALE)
+
+
 def read_marks(im,page):
     marks=[]; arr=np.asarray(im,dtype=float)
     for row in page['rows']:
-        selected=[f['kind'] for f in row['fields'] if field_value(arr,f)]
+        selected=[f['kind'] for f in row['fields'] if field_value(arr,locate(arr,f))]
         if not selected: continue
         if len(selected)!=1: raise ValueError('Mark exactly one day with an X per duty')
         chosen=selected[0]
@@ -458,7 +535,23 @@ def scan(data,doc=None):
             im=ImageOps.exif_transpose(source).convert('L')
         im.thumbnail((2600,3600)); found=decode(im)
     except (OSError,ValueError,Image.DecompressionBombError): return {}
-    if not found: return legacy.scan(data) if doc is None else {}
+    flat = None
+    if not found or (doc is not None and len(fiducial_candidates(im)) != 4):
+        # Uneven light (a shadow hides the code or a corner target): try
+        # again with it evened out. Only then, so photos that read as they
+        # are stay exactly as they were.
+        flat = flatten(im); evened = decode(flat)
+        if evened and (not found or len(fiducial_candidates(flat)) == 4):
+            im, found = flat, evened
+    if not found:
+        if flat is None: flat = flatten(im)
+        if doc is not None: return {}
+        result = legacy.scan(data)
+        # Clearly a sheet (corner targets), but no code to read: say so
+        # rather than ignore it like any other picture.
+        if not result.get('document') and max(len(fiducial_candidates(im)), len(fiducial_candidates(flat))) >= 3:
+            result = {'unreadable': True}
+        return result
     parts=[part.lower() for part in found[0][0]]
     result={'document':parts[1],'revision':parts[2],'page':int(parts[3])}
     if doc is None: return result
