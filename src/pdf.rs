@@ -599,6 +599,22 @@ mod tests {
                 "warm-up lacks \\fa{icon}"
             );
         }
+        // The printable plan's icons (raw strings there: `\faBroom`).
+        let paper = include_str!("../scripts/paper.py");
+        for icon in paper.split("\\fa").skip(1).filter_map(|rest| {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic() || *c == '*')
+                .collect();
+            name.starts_with(|c: char| c.is_ascii_uppercase())
+                .then_some(name)
+        }) {
+            assert!(
+                warmup.contains(&format!("\\fa{icon}")),
+                "warm-up lacks \\fa{icon} (scripts/paper.py)"
+            );
+        }
+        assert!(warmup.contains("graphicx"), "warm-up lacks graphicx");
         for used in [r"\weekno{", r"\tickbox", r"\multirow", r"\cdashline"] {
             assert!(warmup.contains(used), "warm-up lacks {used}");
         }

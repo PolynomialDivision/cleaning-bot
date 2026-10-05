@@ -5,23 +5,50 @@ use crate::{
     state::State,
 };
 use anyhow::{bail, ensure, Result};
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// Layout v2 (mm from the top left of an A4 page). `scripts/paper.py` reads
+// boxes only where the manifest says; its V2_FIDUCIALS / V2_QR must match.
+/// Corner registration targets.
+const FIDUCIALS: [[f64; 2]; 4] = [[10., 10.], [200., 10.], [200., 287.], [10., 287.]];
+/// Centre of the page's identity QR code.
+const QR_CENTER: [f64; 2] = [187., 277.];
+/// Duties per page, the first row's centre and the distance between rows.
+const ROWS_PER_PAGE: usize = 16;
+const FIRST_ROW: f64 = 58.25;
+const ROW_PITCH: f64 = 12.5;
+/// Box side, Monday's box centre and the distance between days: the seven
+/// day columns share the table's width right of "Who" (105–196mm). There is
+/// no Skip box on paper; skipping is recorded in Matrix.
+const BOX: f64 = 4.8;
+const MONDAY_X: f64 = 111.5;
+const DAY_PITCH: f64 = 13.;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
+    #[serde(default = "legacy_layout")]
+    pub layout_version: u8,
     pub id: String,
     pub revision: String,
     pub created: chrono::DateTime<Utc>,
     pub pages: Vec<Page>,
 }
+fn legacy_layout() -> u8 {
+    1
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Page {
     pub number: usize,
     pub title: String,
     pub rooms: String,
     pub rows: Vec<Row>,
+    #[serde(default)]
+    pub fiducials: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub qr_center: [f64; 2],
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Row {
@@ -35,6 +62,10 @@ pub struct Row {
     pub person: Option<String>,
     pub name: String,
     pub label: String,
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub y: f64,
     pub start: NaiveDate,
     pub end: NaiveDate,
     pub status: String,
@@ -45,6 +76,8 @@ pub struct Row {
 pub struct Field {
     pub id: String,
     pub kind: String,
+    #[serde(default)]
+    pub size: f64,
     pub x: f64,
     pub y: f64,
     pub label: String,
@@ -149,7 +182,7 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
             .iter()
             .filter(|a| a.group_id == group)
             .collect();
-        for chunk in assignments.chunks(8) {
+        for chunk in assignments.chunks(ROWS_PER_PAGE) {
             let mut page = Page {
                 number: pages.len(),
                 title: chunk[0].group_name.clone(),
@@ -161,43 +194,32 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
                     .collect::<Vec<_>>()
                     .join(" · "),
                 rows: Vec::new(),
+                fiducials: FIDUCIALS.to_vec(),
+                qr_center: QR_CENTER,
             };
             for (i, a) in chunk.iter().enumerate() {
                 let id = hash((&a.group_id, &a.slot_id, a.iso_year, a.iso_week, a.shift));
                 let mut fields = Vec::new();
-                let y = 64.0 + i as f64 * 25.0;
+                let y = FIRST_ROW + i as f64 * ROW_PITCH;
                 let status = if a.is_skipped {
                     "Skipped".into()
                 } else if a.is_completed {
-                    format!(
-                        "Done {}",
-                        a.completed_at.map(|d| d.to_string()).unwrap_or_default()
-                    )
+                    match a.completed_at {
+                        Some(d) => format!("Done · {}", d.format("%a %-d %b")),
+                        None => "Done".into(),
+                    }
                 } else {
                     String::new()
                 };
                 if status.is_empty() && a.assignee.is_some() {
-                    fields.push(Field {
-                        id: format!("{id}:done"),
-                        kind: "done".into(),
-                        x: 114.0,
-                        y,
-                        label: "Done".into(),
-                    });
-                    fields.push(Field {
-                        id: format!("{id}:skip"),
-                        kind: "skip".into(),
-                        x: 148.0,
-                        y,
-                        label: "Skipped".into(),
-                    });
                     let mut day = a.start;
                     while day <= a.end {
                         fields.push(Field {
                             id: format!("{id}:{day}"),
                             kind: day.to_string(),
-                            x: 114.0 + (day - a.start).num_days() as f64 * 11.0,
-                            y: y + 9.0,
+                            size: BOX,
+                            x: MONDAY_X + day.weekday().num_days_from_monday() as f64 * DAY_PITCH,
+                            y,
                             label: day.format("%a").to_string(),
                         });
                         day = day.succ_opt().expect("schedule date");
@@ -223,6 +245,8 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
                             _ => " · assigned",
                         }
                     ),
+                    task: a.slot_name.clone().unwrap_or_default(),
+                    y,
                     start: a.start,
                     end: a.end,
                     status,
@@ -234,8 +258,9 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
         }
     }
     Document {
+        layout_version: 2,
         id: uuid::Uuid::new_v4().simple().to_string(),
-        revision: hash(&pages)[..12].into(),
+        revision: hash((2, &pages))[..12].into(),
         created: Utc::now(),
         pages,
     }
@@ -361,6 +386,11 @@ async fn worker(mode: &str, input: &[u8], manifest: Option<&Document>) -> Result
     let dir = tempfile::tempdir()?;
     let script = dir.path().join("paper.py");
     tokio::fs::write(&script, include_str!("../scripts/paper.py")).await?;
+    tokio::fs::write(
+        dir.path().join("paper_v1.py"),
+        include_str!("../scripts/paper_v1.py"),
+    )
+    .await?;
     tokio::fs::write(dir.path().join("input"), input).await?;
     if let Some(d) = manifest {
         tokio::fs::write(dir.path().join("manifest.json"), serde_json::to_vec(d)?).await?;
@@ -765,14 +795,15 @@ mod tests {
         if let Ok(path) = std::env::var("PAPER_LAYOUT_FIXTURE") {
             std::fs::write(path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
         }
-        assert_eq!(doc.pages.len(), 3);
+        assert_eq!(doc.pages.len(), 2);
         let rows: Vec<_> = doc.pages.iter().flat_map(|p| &p.rows).collect();
         assert_eq!(rows.len(), 24);
         let ids: std::collections::HashSet<_> = rows.iter().map(|r| &r.id).collect();
         assert_eq!(ids.len(), 24);
         for r in rows {
+            // A two-day window: a box for each of its two days.
             assert_eq!((r.end - r.start).num_days(), 1);
-            assert_eq!(r.fields.len(), 4);
+            assert_eq!(r.fields.len(), 2);
             assert!(r.slot.is_some());
             assert!(r.fields.iter().all(|f| f.x < 196. && f.y < 260.));
         }
@@ -818,6 +849,64 @@ mod tests {
         assert!(apply(&mut s, &p, true).is_err());
         assert!(s.completions.is_empty());
         assert_eq!(s.event_log.len(), before);
+    }
+
+    #[test]
+    fn layout_v2_geometry_is_what_the_scanner_expects() {
+        let (_, doc, _) = fixture();
+        assert_eq!(doc.layout_version, 2);
+        let page = &doc.pages[0];
+        assert_eq!(page.fiducials, FIDUCIALS.to_vec());
+        assert_eq!(page.qr_center, QR_CENTER);
+        let row = &page.rows[0];
+        assert_eq!(row.y, FIRST_ROW);
+        // A whole week: a box for each day, Monday to Sunday — no
+        // separate "done" box and no Skip box.
+        let kinds: Vec<&str> = row.fields.iter().map(|f| f.kind.as_str()).collect();
+        assert_eq!(kinds.len(), 7);
+        assert!(!kinds.contains(&"done") && !kinds.contains(&"skip"));
+        for f in &row.fields {
+            assert_eq!(f.size, BOX);
+            assert_eq!(f.y, row.y);
+            let day: NaiveDate = f.kind.parse().unwrap();
+            let weekday = day.weekday().num_days_from_monday() as f64;
+            assert_eq!(f.x, MONDAY_X + weekday * DAY_PITCH);
+            assert_eq!(f.id, format!("{}:{day}", row.id));
+        }
+        // Boxes never touch: neighbours are a pitch apart, and the scanner
+        // reads 1.15mm around each box.
+        const { assert!(DAY_PITCH - BOX > 2. * 1.15) };
+        // Sunday's box and its surroundings stay inside the table (right
+        // edge at 196mm, see scripts/paper.py).
+        const { assert!(196. - (MONDAY_X + 6. * DAY_PITCH) - BOX / 2. > 1.15) };
+        const { assert!(ROW_PITCH - BOX > 2. * 1.15) };
+        // The last row stays clear of the footer and the QR code.
+        let last = FIRST_ROW + (ROWS_PER_PAGE - 1) as f64 * ROW_PITCH;
+        assert!(last + ROW_PITCH / 2. < QR_CENTER[1] - 9. - 10.);
+    }
+
+    #[test]
+    fn a_v1_manifest_without_the_new_fields_still_loads() {
+        let v1 = serde_json::json!({
+            "id": "0123456789abcdef0123456789abcdef",
+            "revision": "abcdef012345",
+            "created": "2026-09-28T10:00:00Z",
+            "pages": [{
+                "number": 0, "title": "Kitchen", "rooms": "",
+                "rows": [{
+                    "id": "r", "group": "g", "slot": null, "slot_index": 0,
+                    "year": 2026, "week": 40, "shift": 0, "person": "p",
+                    "name": "Alice", "label": "Kitchen", "start": "2026-09-28",
+                    "end": "2026-10-04", "status": "", "baseline": "b",
+                    "fields": [{"id": "done", "kind": "done", "x": 114.0, "y": 64.0, "label": "Done"}]
+                }]
+            }]
+        });
+        let doc: Document = serde_json::from_value(v1).unwrap();
+        assert_eq!(doc.layout_version, 1);
+        assert!(doc.pages[0].fiducials.is_empty());
+        assert_eq!(doc.pages[0].rows[0].task, "");
+        assert_eq!(doc.pages[0].rows[0].fields[0].size, 0.);
     }
 
     #[test]
