@@ -154,95 +154,106 @@ class PaperTests(unittest.TestCase):
         out=Path(__file__).resolve().parent.parent/'artifacts'
         photo.save(out/'paper-phone-simulation.jpg')
 
-    def test_multiple_marks_rejected(self):
+    def test_several_days_marked_is_unclear(self):
         for fields in [('2026-09-28','2026-09-29'),('2026-09-28','2026-09-29','2026-10-01')]:
-            self.assertIn('error',paper.scan(encoded(self.marked(fields=fields)),self.doc))
+            result=paper.scan(encoded(self.marked(fields=fields)),self.doc)
+            self.assertEqual((result.get('marks'),result.get('unclear')),
+                             ([],[dict(row='0-0',reason='several days marked')]),result)
 
-    def test_tick_slash_dot_fill_and_scribble_rejected(self):
-        f=self.doc['pages'][0]['rows'][0]['fields'][0];x,y=f['x']*6,f['y']*6
-        for shape in ['tick','slash','dot','fill','scribble']:
-            im=self.blank.copy();d=ImageDraw.Draw(im)
-            if shape=='tick':d.line([(x-8,y),(x-2,y+7),(x+8,y-8)],fill=0,width=2)
-            elif shape=='slash':d.line([(x-8,y+8),(x+8,y-8)],fill=0,width=2)
-            elif shape=='dot':d.ellipse((x-2,y-2,x+2,y+2),fill=0)
-            elif shape=='fill':d.rectangle((x-9,y-9,x+9,y+9),fill=0)
-            else:d.line([(x-9,y-6),(x+6,y+4),(x-8,y+7),(x+8,y-8),(x-8,y),(x+9,y+6)],fill=0,width=2)
+    def test_any_clear_mark_counts_and_a_filled_box_is_taken_back(self):
+        f,g=self.doc['pages'][0]['rows'][0]['fields'][:2];x,y=f['x']*6,f['y']*6
+        mon=[dict(row='0-0',skipped=False,day='2026-09-28')]
+        shapes={'tick':(lambda d:d.line([(x-8,y),(x-2,y+7),(x+8,y-8)],fill=0,width=2),mon,[]),
+                'slash':(lambda d:d.line([(x-8,y+8),(x+8,y-8)],fill=0,width=2),mon,[]),
+                'dot':(lambda d:d.ellipse((x-2,y-2,x+2,y+2),fill=0),[],[dict(row='0-0',reason='only a dot')]),
+                'fill':(lambda d:d.rectangle((x-9,y-9,x+9,y+9),fill=0),[],[])}
+        for name,(draw,marks,unclear) in shapes.items():
+            im=self.blank.copy();draw(ImageDraw.Draw(im))
             result=paper.scan(encoded(im),self.doc)
-            self.assertIn('error',result,(shape,result))
+            self.assertEqual((result.get('marks'),result.get('unclear')),(marks,unclear),(name,result))
+        # A filled box is said (taken back), with its day.
+        self.assertEqual(result.get('taken_back'),[dict(row='0-0',day='2026-09-28')])
+        # Taken back and marked again: Monday filled in, an X on Tuesday.
+        im=self.blank.copy();ImageDraw.Draw(im).rectangle((x-9,y-9,x+9,y+9),fill=0);pen_x(im,g)
+        result=paper.scan(encoded(im),self.doc)
+        self.assertEqual(result.get('marks'),[dict(row='0-0',skipped=False,day='2026-09-29')],result)
 
     def test_missing_marker_partial_blur_unrelated(self):
         self.assertEqual(paper.scan(encoded(Image.new('L',(1260,1782),200)),self.doc),{})
+        # A corner target lost (in a shadow, say): three and the QR code do.
         im=self.blank.copy();ImageDraw.Draw(im).rectangle((40,40,85,85),fill=255)
-        self.assertIn('error',paper.scan(encoded(im),self.doc))
+        self.assertEqual(paper.scan(encoded(im),self.doc).get('marks'),[])
         self.assertIn('error',paper.scan(encoded(self.blank.crop((0,150,1260,1782))),self.doc))
         self.assertFalse(paper.scan(encoded(self.marked().filter(ImageFilter.GaussianBlur(5))),self.doc).get('marks'))
 
-    def test_classifier_reads_every_x_and_no_other_shape(self):
+    def test_box_states(self):
         """Directly on the 6px/mm raster (the scanner's own coordinate
-        system), so many variants stay fast: pen 0.17–0.67mm, grey to black,
-        off-centre, small to large, uneven strokes."""
+        system), so many variants stay fast: every X (pen 0.17-0.67mm, grey
+        to black, off-centre, small to large, uneven) and every other clear
+        mark counts; a dot is unclear; a filled box is taken back."""
         field=self.doc['pages'][0]['rows'][0]['fields'][0]
         x,y=field['x']*6,field['y']*6
-        def value(draw):
+        def state(draw):
             im=self.blank.copy();draw(ImageDraw.Draw(im),im)
-            try: return paper.field_value(np.asarray(im,dtype=float),field)
-            except ValueError as e: return str(e)
-        for width in (1,2,3,4):
+            try: return paper.box_state(np.asarray(im,dtype=float),field)
+            except paper.Unclear as e: return f'unclear: {e}'
+        self.assertEqual(state(lambda d,im:None),'blank')
+        # (A 0.67mm marker's X can fill an old 4.8mm box: it then reads as
+        # filled, which the preview names; new sheets have 6mm boxes.)
+        for width in (1,2,3):
             for gray in (10,40,90):
                 for offset in ((0,0),(2,-1),(-2,2),(1,2)):
                     for r in (7,9,11):
                         for uneven in (False,True):
-                            # Known limit: a tiny (2.3mm), uneven X with a
-                            # 0.67mm marker merges into a blob at its crossing
-                            # and is rejected as unclear (the safe side).
-                            if (width,r,uneven)==(4,7,True): continue
                             case=dict(width=width,gray=gray,offset=offset,r=r,uneven=uneven)
-                            got=value(lambda d,im:pen_x(im,field,width,offset,gray,uneven,r))
-                            self.assertIs(got,True,case)
+                            self.assertEqual(state(lambda d,im:pen_x(im,field,width,offset,gray,uneven,r)),'marked',case)
         shapes={
             'tick':lambda d,w:d.line([(x-8,y),(x-2,y+7),(x+8,y-8)],fill=0,width=w),
             'slash':lambda d,w:d.line([(x-8,y+8),(x+8,y-8)],fill=0,width=w),
             'backslash':lambda d,w:d.line([(x-8,y-8),(x+8,y+8)],fill=0,width=w),
-            'dot':lambda d,w:d.ellipse((x-2-w,y-2-w,x+2+w,y+2+w),fill=0),
-            'fill':lambda d,w:d.rectangle((x-9,y-9,x+9,y+9),fill=0),
             'circle':lambda d,w:d.ellipse((x-8,y-8,x+8,y+8),outline=0,width=w),
             'plus':lambda d,w:(d.line([(x-9,y),(x+9,y)],fill=0,width=w),d.line([(x,y-9),(x,y+9)],fill=0,width=w)),
-            'three arms':lambda d,w:(d.line([(x-8,y-8),(x+8,y+8)],fill=0,width=w),d.line([(x,y),(x+8,y-8)],fill=0,width=w)),
-            'grid':lambda d,w:[d.line(p,fill=0,width=w) for p in ([(x-9,y-3),(x+9,y-3)],[(x-9,y+3),(x+9,y+3)],[(x-3,y-9),(x-3,y+9)],[(x+3,y-9),(x+3,y+9)])],
-            'X crossed out':lambda d,w:(d.line([(x-9,y-9),(x+9,y+9)],fill=0,width=w),d.line([(x-9,y+9),(x+9,y-9)],fill=0,width=w),d.line([(x-9,y),(x+9,y)],fill=0,width=w)),
-            'scribble':lambda d,w:d.line([(x-9,y-6),(x+6,y+4),(x-8,y+7),(x+8,y-8),(x-8,y),(x+9,y+6)],fill=0,width=w),
         }
         for name,shape in shapes.items():
             for w in (1,2,3):
-                got=value(lambda d,im:shape(d,w))
-                self.assertIsNot(got,True,dict(shape=name,width=w))
-
-    def test_scribble_through_the_photo_pipeline(self):
-        """Resampling a photo can merge a scribble's strokes; at no position
-        may that turn it into an X."""
-        page=self.doc['pages'][0];f=page['rows'][0]['fields'][0]
-        # Known limit: with a 0.5mm+ marker, this loose scribble (which
-        # contains an X) blurs into an X with a blob at its crossing — its
-        # rings look like an X's. Applying always needs the uploader's ✅.
-        for dx,dy in ((0,0),(1,1),(2,0),(3,1)):
-            for w in (1,2):
-                im=self.blank.copy();x,y=f['x']*6+dx,f['y']*6+dy
-                ImageDraw.Draw(im).line([(x-9,y-6),(x+6,y+4),(x-8,y+7),(x+8,y-8),(x-8,y),(x+9,y+6)],fill=0,width=w)
-                arr=np.asarray(paper.normalize(im,paper.decode(im),page),dtype=float)
-                try: got=paper.field_value(arr,f)
-                except ValueError: got=None
-                self.assertIsNot(got,True,dict(dx=dx,dy=dy,width=w))
+                self.assertEqual(state(lambda d,im:shape(d,w)),'marked',dict(shape=name,width=w))
+        # A loose scribble or a crossed-out X is one or the other; never
+        # blank, and the preview says which.
+        either={'scribble':lambda d,w:d.line([(x-9,y-6),(x+6,y+4),(x-8,y+7),(x+8,y-8),(x-8,y),(x+9,y+6)],fill=0,width=w),
+                'X crossed out':lambda d,w:(d.line([(x-9,y-9),(x+9,y+9)],fill=0,width=w),d.line([(x-9,y+9),(x+9,y-9)],fill=0,width=w),d.line([(x-9,y),(x+9,y)],fill=0,width=w))}
+        for name,shape in either.items():
+            for w in (1,2,3):
+                self.assertIn(state(lambda d,im:shape(d,w)),('marked','filled'),dict(shape=name,width=w))
+        for w in (0,1):
+            self.assertEqual(state(lambda d,im:d.ellipse((x-2-w,y-2-w,x+2+w,y+2+w),fill=0)),'unclear: only a dot')
+        self.assertEqual(state(lambda d,im:d.rectangle((x-9,y-9,x+9,y+9),fill=0)),'filled')
+        # Scribbled over densely: taken back as well.
+        self.assertEqual(state(lambda d,im:[d.line([(x-10,y+k),(x+10,y+k+3)],fill=0,width=2) for k in range(-10,10,2)]),'filled')
 
     def test_bad_photos_change_nothing(self):
         row=self.doc['pages'][0]['rows'][0]
         # A dark shadow over the marked box.
         im=self.marked();d=ImageDraw.Draw(im)
         f=row['fields'][0];d.rectangle((f['x']*6-30,f['y']*6-30,f['x']*6+30,f['y']*6+30),fill=110)
-        self.assertFalse(paper.scan(encoded(im),self.doc).get('marks'))
+        result=paper.scan(encoded(im),self.doc)
+        self.assertEqual((result.get('marks'),[u['row'] for u in result.get('unclear',[])]),([],['0-0']),result)
         # A buckled page: a band of rows shifted sideways by 5mm, further
-        # than a box is looked for around its place.
+        # than a box is looked for around its place: those rows are unclear,
+        # the rest of the page still reads.
         im=self.marked();band=im.crop((0,300,1260,420));im.paste(band,(30,300))
-        self.assertFalse(paper.scan(encoded(im),self.doc).get('marks'))
+        result=paper.scan(encoded(im),self.doc)
+        self.assertEqual(result.get('marks'),[dict(row='0-0',skipped=False,day='2026-09-28')],result)
+        rows=self.doc['pages'][0]['rows']
+        # (Rows whose boxes the band's edge cuts through as well.)
+        self.assertEqual({u['row'] for u in result['unclear']},
+                         {r['id'] for r in rows if 300/6<r['y']+2.4 and r['y']-2.4<420/6},result)
+        # Most of the page unclear (a crumpled sheet, creases everywhere):
+        # retake it, nothing read.
+        im=self.marked();d=ImageDraw.Draw(im);rng=np.random.default_rng(7)
+        for _ in range(120):
+            x0,y0=rng.uniform(80,1180),rng.uniform(150,1600);a=rng.uniform(0,np.pi)
+            d.line([(x0-200*np.cos(a),y0-200*np.sin(a)),(x0+200*np.cos(a),y0+200*np.sin(a))],fill=int(rng.uniform(90,160)),width=2)
+        self.assertIn('Too much of the page is unclear',paper.scan(encoded(im),self.doc).get('error',''))
         # A thick X that runs over the box frame still reads as an X.
         im=self.blank.copy();pen_x(im,row['fields'][0],width=3,r=14)
         result=paper.scan(encoded(im),self.doc)
@@ -272,9 +283,13 @@ class PaperTests(unittest.TestCase):
         result=paper.scan(data,self.doc)
         self.assertEqual(result.get('marks'),[dict(row=row['id'],skipped=False,day=row['fields'][1]['kind']),
                                              dict(row=later['id'],skipped=False,day=later['fields'][0]['kind'])],result)
-        # The same photo with a phone-sized shadow over a box: said, not misread.
-        d=ImageDraw.Draw(photo);d.rectangle((560,300,760,420),fill=60)
-        self.assertFalse(paper.scan(encoded(photo,jpeg=True),self.doc).get('marks'))
+        # The same photo with a dark shadow right over the marked box: that
+        # duty is said to be unclear, not misread; the rest still reads.
+        f=row['fields'][1];cx,cy=(f['x']*6+220)*1200/1700,(f['y']*6+240)*1600/2260
+        d=ImageDraw.Draw(photo);d.rectangle((cx-60,cy-50,cx+60,cy+50),fill=60)
+        result=paper.scan(encoded(photo,jpeg=True),self.doc)
+        self.assertEqual(result.get('marks'),[dict(row=later['id'],skipped=False,day=later['fields'][0]['kind'])],result)
+        self.assertIn(row['id'],[u['row'] for u in result['unclear']],result)
 
     def test_a_sheet_that_cannot_be_read_is_said_so(self):
         """Corner targets but no readable QR code: the bot answers instead of
@@ -399,14 +414,19 @@ class TickSheetTests(unittest.TestCase):
         im=self.blank.copy();pen_x(im,self.field('t-3-1'),width=3,uneven=True)
         src=[(0,0),(1260,0),(1260,1782),(0,1782)];dst=[(180,110),(1450,50),(1330,2080),(60,1860)]
         photo=im.transform((1560,2160),Image.Transform.PERSPECTIVE,paper.homography(dst,src),Image.Resampling.BICUBIC,fillcolor=220)
-        for angle in [0,13]:
-            result=paper.scan(encoded(photo.rotate(angle,expand=True,fillcolor=220),jpeg=True),self.doc)
-            self.assertEqual(result.get('marks'),[dict(row='t-3-1',skipped=False,day=None)],(angle,result))
+        result=paper.scan(encoded(photo,jpeg=True),self.doc)
+        self.assertEqual(result.get('marks'),[dict(row='t-3-1',skipped=False,day=None)],result)
+        # Known limit of sheets printed with 4.8mm boxes: a 0.5mm pen's X,
+        # blurred by a tilted, compressed photo, can fill the small box. It
+        # is then named as filled in (taken back), never dropped silently.
+        result=paper.scan(encoded(photo.rotate(13,expand=True,fillcolor=220),jpeg=True),self.doc)
+        done=[dict(row='t-3-1',skipped=False,day=None)]
+        self.assertTrue(result.get('marks')==done or result.get('taken_back')==[dict(row='t-3-1',day=None)],result)
 
-    def test_a_tick_instead_of_an_x_is_unclear(self):
+    def test_a_tick_counts_too(self):
         f=self.field('t-2-2');x,y=f['x']*6,f['y']*6;im=self.blank.copy()
         ImageDraw.Draw(im).line([(x-8,y),(x-2,y+7),(x+8,y-8)],fill=0,width=2)
-        self.assertIn('error',paper.scan(encoded(im),self.doc))
+        self.assertEqual(paper.scan(encoded(im),self.doc).get('marks'),[dict(row='t-2-2',skipped=False,day=None)])
 
     def test_ascii_source_and_no_raster_images(self):
         self.assertTrue(Path('sheet.tex').read_text().isascii())
@@ -436,6 +456,16 @@ class TickSheetTests(unittest.TestCase):
         for row in week:pen_x(im,row['fields'][0])
         result=paper.scan(encoded(im),doc)
         self.assertEqual(result.get('marks'),[dict(row=r['id'],skipped=False,day=None) for r in week],result)
+        # On its 6mm boxes, any pen up to a 0.67mm marker reads as done,
+        # photographed tilted and compressed too.
+        blank=raster(0,'actual-tick');row=rows[5]
+        for width in (2,3,4):
+            im=blank.copy();pen_x(im,row['fields'][0],width=width,uneven=True,r=12)
+            src=[(0,0),(1260,0),(1260,1782),(0,1782)];dst=[(180,110),(1450,50),(1330,2080),(60,1860)]
+            photo=im.transform((1560,2160),Image.Transform.PERSPECTIVE,paper.homography(dst,src),Image.Resampling.BICUBIC,fillcolor=220)
+            for angle in (0,13):
+                result=paper.scan(encoded(photo.rotate(angle,expand=True,fillcolor=220),jpeg=True),doc)
+                self.assertEqual(result.get('marks'),[dict(row=row['id'],skipped=False,day=None)],(width,angle,result))
         out=Path(__file__).resolve().parent.parent/'artifacts'
         (out/'paper-tick-full-layout.pdf').write_bytes(Path('sheet.pdf').read_bytes())
 

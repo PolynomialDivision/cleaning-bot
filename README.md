@@ -340,9 +340,10 @@ one of two styles, chosen by an administrator — for every group with
 both styles:
 
 - **days** (default): one row per duty with a box for each allowed day. Put
-  one clear X in the day you cleaned; that day is recorded.
+  one clear X (or any clear mark) in the day you cleaned; that day is
+  recorded.
 - **tick**: one line per week, the slots and shifts side by side, one box per
-  duty. Put one clear X in your box. The sheet only says *that* it was done,
+  duty. Put one clear X (or any clear mark) in your box. The sheet only says *that* it was done,
   so the bot records the middle of the duty's days (Thursday for a whole
   week, Monday for Mon–Tue, Thursday for Thu–Fri), or the day of the photo if
   that is earlier.
@@ -356,6 +357,9 @@ photo of it is ignored.
 
 Then send a full-page photo of a sheet with boxes to the cleaning
 room or an authorized encrypted DM. The bot previews changes and asks for ✅ Apply / ❌ Cancel.
-Nothing is applied before confirmation. Residents can record their own duties;
+Nothing is applied before confirmation. Boxes the photo leaves unclear (a
+fold or shadow over them) are named in the preview, to record with `!done`;
+the rest still applies. A filled-in box counts as taken back (and is named
+too). A crumpled sheet is refused as a whole: smooth it out and retake. Residents can record their own duties;
 administrators can confirm a shared sheet. `!plan pdf history` remains a compact
 read-only report. See [paper workflow, dependencies and tests](docs/PAPER.md).

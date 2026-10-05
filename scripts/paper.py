@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageOps
 import datetime
 import io
+import itertools
 
 SCALE = 6  # pixels/mm in the rectified image; a 0.35mm pen is ~2 pixels wide
 homography = legacy.homography
@@ -141,6 +142,8 @@ V2_FIDUCIALS = [[10,10],[200,10],[200,287],[10,287]]
 #: Where a v2 page's QR code may be (mm: left, top, right, bottom): around
 #: (185,276), 20mm, and on sheets printed earlier (187,277), 18mm.
 V2_QR_AREA = (170, 260, 197, 289)
+#: Where a new sheet's QR code is centred (mm).
+V2_QR_CENTER = (185, 276)
 #: Size of the QR code drawn on new sheets (mm, with its quiet zone).
 QR_SIZE = 20
 
@@ -234,10 +237,30 @@ def fiducials(im):
     return candidates
 
 
+#: Corner targets are looked for at these levels, strictest first: (dark,
+#: white disc, share of the disc that must be white, share of the ring that
+#: must be dark). A small, compressed or dim photo blurs a 5mm target's white
+#: disc and centre dot; the looser levels still demand the nested shape.
+TARGET_LEVELS = ((125, 180, .9, .7), (150, 190, .8, .6), (175, 200, .75, .6))
+
+
 def fiducial_candidates(im):
-    """Every corner target `fiducials` can see, however many."""
+    """Every corner target that can be seen, however many: in the photo and
+    with its light evened out, at each of TARGET_LEVELS."""
+    found = []
+    near = max(8, max(im.size)/200)
+    for source in (im, flatten(im)):
+        for level in TARGET_LEVELS:
+            for point in targets(source, *level):
+                if all(math.dist(point, other) > near for other in found):
+                    found.append(point)
+    return found
+
+
+def targets(im, dark, light, white_share, ring_share):
+    """Corner targets at one level (see TARGET_LEVELS)."""
     small = im.copy(); small.thumbnail((1500,2000))
-    arr = np.asarray(small); boxes = components(arr < 125)
+    arr = np.asarray(small); boxes = components(arr < dark)
     candidates = []
     for outer in boxes:
         l,t,r,b,area,_,_ = outer; w,h = r-l+1,b-t+1
@@ -251,9 +274,79 @@ def fiducial_candidates(im):
             def samples(radius):
                 return np.array([arr[int(round(y+math.sin(a)*h*radius)),int(round(x+math.cos(a)*w*radius))]
                                  for a in np.linspace(0,2*math.pi,24,endpoint=False)])
-            if np.mean(samples(.21)>180)<.9 or np.mean(samples(.43)<125)<.7: continue
+            if np.mean(samples(.21)>light)<white_share or np.mean(samples(.43)<dark)<ring_share: continue
             candidates.append((x*im.width/small.width,y*im.height/small.height))
     return candidates
+
+
+def page_corners(im, qr):
+    """The page's four corner targets in the photo, in V2_FIDUCIALS' order,
+    found with the QR code's centre `qr` (which lies at a known place near
+    the bottom-right one): of more than four targets — a neighbouring sheet
+    in the photo — the four that make a page with it; of three — one in a
+    shadow — the fourth where the three and the QR code put it."""
+    found = sorted(fiducial_candidates(im), key=lambda p: math.dist(p, qr))[:8]
+    qr_mm = tuple(V2_QR_CENTER)
+    best = None
+    for four in itertools.combinations(found, 4):
+        centre = np.mean(four, axis=0)
+        ring = sorted(four, key=lambda p: math.atan2(p[1]-centre[1], p[0]-centre[0]))
+        for start in range(4):
+            dst = [ring[(start+i) % 4] for i in range(4)]
+            try:
+                to_mm = np.r_[homography(dst, V2_FIDUCIALS), 1].reshape(3, 3)
+            except np.linalg.LinAlgError:
+                continue
+            q = to_mm @ np.r_[qr, 1]; off = math.dist(q[:2]/q[2], qr_mm)
+            if off < 6 and plausible(dst) and (best is None or off < best[0]):
+                best = (off, dst)
+    if best:
+        return best[1]
+    # Three targets and the QR code: the fourth follows.
+    for three in itertools.combinations(found, 3):
+        for missing in range(4):
+            known = [i for i in range(4) if i != missing]
+            for order in itertools.permutations(three):
+                try:
+                    to_photo = np.r_[homography([V2_FIDUCIALS[i] for i in known]+[qr_mm], list(order)+[qr]), 1].reshape(3, 3)
+                except np.linalg.LinAlgError:
+                    continue
+                v = to_photo @ np.r_[V2_FIDUCIALS[missing], 1]
+                dst = [None]*4
+                for i, point in zip(known, order): dst[i] = point
+                dst[missing] = tuple(v[:2]/v[2])
+                if plausible(dst):
+                    score = max(abs(angle-90) for angle in corner_angles(dst))
+                    if best is None or score < best[0]:
+                        best = (score, dst)
+    if best is None:
+        raise ValueError('Show all four corner marks on one flat page')
+    return best[1]
+
+
+def corner_angles(quad):
+    """The inside angles (degrees) of a quadrilateral."""
+    angles = []
+    for i in range(4):
+        a, b, c = np.array(quad[i-1]), np.array(quad[i]), np.array(quad[(i+1) % 4])
+        u, v = a-b, c-b
+        angles.append(math.degrees(math.acos(np.clip(u@v/(np.linalg.norm(u)*np.linalg.norm(v)), -1, 1))))
+    return angles
+
+
+def plausible(quad):
+    """A photographed page: the corners clockwise as printed (not mirrored),
+    a convex shape, no angle further than 40 degrees from square, opposite
+    sides of similar length."""
+    def turn(a, b, c):
+        return (b[0]-a[0])*(c[1]-b[1])-(b[1]-a[1])*(c[0]-b[0])
+    turns = [turn(quad[i], quad[(i+1) % 4], quad[(i+2) % 4]) for i in range(4)]
+    if not all(t > 0 for t in turns):
+        return False
+    if any(abs(angle-90) > 40 for angle in corner_angles(quad)):
+        return False
+    sides = [math.dist(quad[i], quad[(i+1) % 4]) for i in range(4)]
+    return max(sides[0], sides[2]) < 1.8*min(sides[0], sides[2]) and max(sides[1], sides[3]) < 1.8*min(sides[1], sides[3])
 
 
 def flatten(im):
@@ -274,13 +367,10 @@ def flatten(im):
 
 def normalize(im, found, page):
     if len(found) != 1: raise ValueError('Photograph only one page at a time')
-    corners = fiducials(im)
-    center = np.mean(corners,axis=0)
-    corners.sort(key=lambda p: math.atan2(p[1]-center[1],p[0]-center[0]))
     qr = np.array(found[0][1])
-    # The identity QR is close to the bottom-right target, resolving all rotations.
-    br = min(range(4),key=lambda i:np.linalg.norm(np.array(corners[i])-qr))
-    dst = [corners[(br-2+i)%4] for i in range(4)]
+    # The identity QR is close to the bottom-right target, resolving all
+    # rotations (and which targets belong to this page).
+    dst = page_corners(im, qr)
     edges = [np.linalg.norm(np.array(dst[i])-dst[(i+1)%4]) for i in range(4)]
     if min(edges)<500 or max(edges)/min(edges)>3:
         raise ValueError('Photo too small or angle too steep')
@@ -301,18 +391,32 @@ REGISTRATION = 2
 OUTLINE = .8
 #: A pixel at most this bright (of the paper around it) belongs to a box's
 #: printed outline.
-OUTLINE_INK = .85
-#: Share of positions along each of the four X arms that must show ink.
-ARM = .7
-#: How far from the centre (mm) each X arm is checked.
-ARM_REACH = 1.45
-UNCLEAR = 'Unclear mark: use one clear X, not a tick or filled box'
-#: Circles (mm) around the crossing of an X: an X passes each at most four
-#: times, whatever the pen; a scribble, an extra line, a grid or a circle
-#: more often.
-RINGS = (.8, 1.1, 1.4, 1.7)
-#: How far (mm) from an arm's diagonal its ink may cross such a circle.
-ARM_WIDTH = .55
+OUTLINE_INK = .9
+#: Share of a box's inside (away from its outline) that may show ink and
+#: still be blank: JPEG noise, a speck.
+BLANK = .008
+#: More ink than this, and the box is filled in: a mark taken back. Real
+#: marks cover 1.5-17% of a box in photos; a big X with a thick marker up to
+#: half of it.
+FILLED = .55
+#: Scribbled over: ink all across the box (in this share of its 4x4
+#: patches, each more than a quarter inked), with at least SCRIBBLED ink.
+#: An X leaves the four triangles between its arms free (real ones in
+#: photos: at most 38% of the patches, a big one with a thick marker 62%; a
+#: scribbled-over box in a photo: 81%).
+SPREAD, SCRIBBLED = .75, .2
+#: A mark spans at least this share of the box's inside (in either
+#: direction); less is a dot or a speck, not a mark.
+MARK_SPAN = .4
+def outline(size):
+    """A box's printed outline (mm), and what is read as its inside (this
+    far within the outline) and as the clean paper around it (this band
+    outside) — clear of the outline even where a small, compressed photo
+    blurs it. Boxes of 6mm and more (new sheets) have a bold 0.4mm outline,
+    smaller ones (sheets printed before) a 0.22mm one."""
+    if size >= 6:
+        return .4, .8, (.8, 1.4)
+    return .22, .55, (.55, 1.15)
 
 
 def continuity(mask, ink, axis):
@@ -325,86 +429,24 @@ def continuity(mask, ink, axis):
     return float((mask & ink).any(axis=axis)[present].mean())
 
 
-def arm_continuity(arm, ink, dx, dy):
-    """Share of distances from the centre (1.5px steps) along one X arm that
-    show ink across the arm's band."""
-    if not arm.any():
-        return 0.
-    # 1.5px steps: a thin diagonal line only has a pixel every sqrt(2) px.
-    steps = np.floor(np.hypot(dx, dy)[arm]*SCALE/1.5).astype(int)
-    hit = ink[arm]
-    seen = np.unique(steps)
-    inked = np.unique(steps[hit])
-    return len(inked)/len(seen)
+class Unclear(ValueError):
+    """A box that can't be read; says why, for the person to check it."""
 
 
-def ring_pieces(ink, centre, radius):
-    """Where a circle of `radius` mm around `centre` (patch pixels) passes
-    through ink: the angle (radians, image coordinates) at the middle of
-    each separate piece. One-sample gaps are closed, so a thin line isn't
-    counted twice; a fully inked circle is one piece without an angle
-    (None)."""
-    cx, cy = centre
-    samples = 120
-    angles = np.linspace(0, 2*math.pi, samples, endpoint=False)
-    cols = np.round(cx+np.cos(angles)*radius*SCALE).astype(int)
-    rows = np.round(cy+np.sin(angles)*radius*SCALE).astype(int)
-    h, w = ink.shape
-    if cols.min() < 0 or rows.min() < 0 or cols.max() >= w or rows.max() >= h:
-        return []
-    hit = ink[rows, cols]
-    hit = hit | (np.roll(hit, 1) & np.roll(hit, -1))
-    if hit.all():
-        return [None]
-    # Start on a gap, then take each run's middle.
-    shift = int(np.flatnonzero(~hit)[0])
-    hit = np.roll(hit, -shift)
-    edges = np.flatnonzero(np.diff(np.r_[0, hit.astype(np.int8), 0]))
-    return [2*math.pi*((shift+(a+b-1)/2) % samples)/samples
-            for a, b in zip(edges[::2], edges[1::2])]
-
-
-def only_the_arms(ink, crossing, down, up):
-    """Around the crossing of an X, ink may cross each circle only where its
-    four arms run: at most one piece on each arm (on its stroke — "\\" with
-    slope `down`, "/" with slope `up` — and on its side), nothing anywhere
-    else. A scribble, an extra line, a grid or a circle crosses elsewhere or
-    more often."""
-    for radius in RINGS:
-        seen = set()
-        for angle in ring_pieces(ink, crossing, radius):
-            if angle is None:
-                return False
-            px, py = math.cos(angle)*radius, math.sin(angle)*radius
-            if abs(py-down*px) < ARM_WIDTH:     # "\\": right-down or left-up
-                arm = ('down', px > 0)
-            elif abs(py+up*px) < ARM_WIDTH:     # "/": right-up or left-down
-                arm = ('up', px > 0)
-            else:
-                return False
-            if arm in seen:
-                return False
-            seen.add(arm)
-    return True
-
-
-def field_value(arr, field):
-    """Three states: blank, two diagonal strokes (X), or reject as ambiguous.
+def box_state(arr, field):
+    """What is in one box: 'blank', 'marked' (any clear mark: an X, a tick,
+    a stroke) or 'filled' (scribbled over: taken back), or Unclear.
 
     The printed outline is registered locally first (within REGISTRATION
-    pixels of the manifest position, at sub-pixel precision) and must be
-    continuous on all four sides — a missing outline is never read as an
-    empty box. Then, ignoring the outline: almost no ink is blank; a
-    confident X needs ink running along all four diagonal arms (continuity,
-    so thin and thick pens count alike), no circle around its crossing
-    passing more than four pieces of ink (no extra strokes), and no filled
-    box. Ticks, slashes, dots, fills, grids, crossed-out marks and scribbles
-    are ambiguous — except a loose scribble with a thick marker, which can
-    look like an X at this size (the preview before applying catches it).
-    """
+    pixels of where `locate` found it, at sub-pixel precision) and must be
+    continuous on all four sides, with clean paper around it — a missing
+    outline is never read as an empty box. Then, ignoring the outline, the
+    share of ink inside decides; a speck too small to be a stroke is
+    unclear."""
     x,y = field['x']*SCALE,field['y']*SCALE
     half = field['size']/2
-    radius = int((half+1.25)*SCALE)+REGISTRATION
+    _, margin, ring_band = outline(field['size'])
+    radius = int((half+ring_band[1]+.1)*SCALE)+REGISTRATION
     cx,cy = int(round(x)),int(round(y))
     patch=arr[cy-radius:cy+radius+1,cx-radius:cx+radius+1]
     if patch.shape!=(2*radius+1,2*radius+1):
@@ -416,13 +458,11 @@ def field_value(arr, field):
             # Coordinates in mm relative to the (shifted) exact box centre.
             xx=(px-(x-cx)-ox)/SCALE; yy=(py-(y-cy)-oy)/SCALE
             square=np.maximum(abs(xx),abs(yy))
-            ring=(square>half+.55)&(square<half+1.15)
+            ring=(square>half+ring_band[0])&(square<half+ring_band[1])
             white=np.median(patch[ring])
-            ink=patch < white*.70
-            # The printed outline is thin (0.22mm): in a small, compressed
-            # photo it is only a pixel or two of grey. It is found with a
-            # lighter threshold; what is drawn in the box is still read as
-            # ink only at the usual one.
+            # The printed outline is thin: in a small, compressed photo only
+            # a pixel or two of grey. It is found with a lighter threshold
+            # than what is drawn in the box.
             line=patch < white*OUTLINE_INK
             along=abs(yy)<half-.3, abs(xx)<half-.3
             sides=[continuity((abs(xx-half)<.3)&along[0],line,1),
@@ -431,40 +471,26 @@ def field_value(arr, field):
                    continuity((abs(yy+half)<.3)&along[1],line,0)]
             score=(min(sides),-abs(ox)-abs(oy))
             if best is None or score>best[0]:
-                best=(score,xx,yy,square,ring,white,ink,(ox,oy))
-    (outline,_),xx,yy,square,ring,white,ink,(rx,ry)=best
-    centre=(radius+(x-cx)+rx, radius+(y-cy)+ry)
-    background=patch[ring]
-    if white<120 or np.std(background)>32:
-        raise ValueError('Shadow or stray ink near a box; retake the photo')
-    if outline<OUTLINE:
-        raise ValueError('Box outline unclear; flatten the page and retake')
-    inside=square < half-.55
-    density=np.mean(ink[inside])
-    if density < .018: return False
-    if density > .55:
-        raise ValueError(UNCLEAR)
-    # An ordinary hand-drawn X can be offset and uneven, its two strokes at
-    # different angles. Search small offsets and a slope for each stroke for
-    # two complete diagonal strokes ...
-    slopes=(.75,1.,1.3)
-    for ox in (-.5,-.25,0,.25,.5):
-        for oy in (-.5,-.25,0,.25,.5):
-            dx,dy=xx-ox,yy-oy
-            near=np.hypot(dx,dy)<=ARM_REACH
-            # Each arm from 0.45 to 1.45mm out: any X using a good half
-            # of the box reaches that far; a dot, tick or slash doesn't.
-            arm=lambda sx,sy,band:arm_continuity((sx*dx>.3)&(sy*dy>.3)&band&inside&near,ink,dx,dy)
-            downs=[s for s in slopes if min(arm(1,1,abs(dy-s*dx)<.43),arm(-1,-1,abs(dy-s*dx)<.43))>=ARM]
-            ups=[s for s in slopes if min(arm(1,-1,abs(dy+s*dx)<.43),arm(-1,1,abs(dy+s*dx)<.43))>=ARM]
-            for down in downs:
-                for up in ups:
-                    # ... and nothing else: around the crossing, ink may
-                    # cross each circle only where the X's four arms do.
-                    crossing=(centre[0]+ox*SCALE,centre[1]+oy*SCALE)
-                    if only_the_arms(ink,crossing,down,up):
-                        return True
-    raise ValueError(UNCLEAR)
+                best=(score,square,ring,white)
+    (visible,_),square,ring,white=best
+    if white<120 or np.std(patch[ring])>32:
+        raise Unclear('shadow or ink next to the box')
+    if visible<OUTLINE:
+        raise Unclear('box not clearly visible (fold, blur)')
+    inside=square < half-margin
+    ink=(patch < white*.70) & inside
+    density=float(ink.mean()/inside.mean())
+    if density < BLANK: return 'blank'
+    if density > FILLED or (density > SCRIBBLED and spread(ink, square, half-margin) >= SPREAD):
+        return 'filled'
+    ys,xs=np.nonzero(ink)
+    if max(np.ptp(xs),np.ptp(ys))/SCALE < (half-margin)*2*MARK_SPAN:
+        raise Unclear('only a dot')
+    # A mark goes through the middle of the box (an X, a tick, a stroke
+    # do); ink only along a side is the printed outline, blurred inwards.
+    if not ink[square < half/2].any():
+        return 'blank'
+    return 'marked'
 
 
 #: How far a box may lie from where the manifest puts it (mm) — a page that
@@ -478,7 +504,7 @@ def locate(arr, field):
     """`field` moved to where its box outline actually is, within DRIFT:
     where all four sides of a box-sized square are darkest (all four, so a
     row's rule or a column line alone never passes for a box). Unchanged
-    when no outline stands out; `field_value` then says so."""
+    when no outline stands out; `box_state` then says so."""
     half = field['size']/2*SCALE
     reach = int(DRIFT*SCALE)
     x, y = field['x']*SCALE, field['y']*SCALE
@@ -514,17 +540,59 @@ def locate(arr, field):
     return dict(field, x=field['x']+shift[0]/SCALE, y=field['y']+shift[1]/SCALE)
 
 
-def read_marks(im,page):
-    marks=[]; arr=np.asarray(im,dtype=float)
+def spread(ink, square, edge):
+    """Share of the box inside's 4x4 patches more than a quarter inked."""
+    rows, cols = np.nonzero(square < edge)
+    top, left = rows.min(), cols.min()
+    height, width = rows.max()-top+1, cols.max()-left+1
+    inked = 0
+    for i in range(4):
+        for j in range(4):
+            cell = ink[top+i*height//4:top+(i+1)*height//4, left+j*width//4:left+(j+1)*width//4]
+            inked += cell.size > 0 and cell.mean() > .25
+    return inked/16
+
+
+#: More unclear boxes than this share of a page, and the photo itself is
+#: the problem (crumpled, blurred, in shadow): retake it rather than list them.
+TOO_UNCLEAR = .25
+
+
+def read_marks(im, page):
+    """The page's marks, the duties that can't be read (with why), and the
+    boxes filled in (taken back: not counted, but said, in case it was a
+    thick X). A day sheet's row may have one marked day. A row with an
+    unclear box, or several marked days, is unclear as a whole: the person
+    records it in Matrix instead."""
+    marks, unclear, taken_back = [], [], []
+    arr = np.asarray(im, dtype=float)
+    boxes = sum(len(row['fields']) for row in page['rows'])
+    bad = 0
     for row in page['rows']:
-        selected=[f['kind'] for f in row['fields'] if field_value(arr,locate(arr,f))]
-        if not selected: continue
-        if len(selected)!=1: raise ValueError('Mark exactly one day with an X per duty')
-        chosen=selected[0]
-        # 'done' (a tick sheet's only box): done, the bot dates it.
-        day=None if chosen in ('skip','done') else chosen
-        marks.append({'row':row['id'],'skipped':chosen=='skip','day':day})
-    return marks
+        marked, why = [], None
+        for field in row['fields']:
+            try:
+                state = box_state(arr, locate(arr, field))
+            except Unclear as e:
+                bad += 1; why = why or str(e); continue
+            if state == 'marked':
+                marked.append(field['kind'])
+            elif state == 'filled':
+                taken_back.append({'row': row['id'], 'day': None if field['kind'] == 'done' else field['kind']})
+        if why is None and len(marked) > 1:
+            why = 'several days marked'
+        if why is not None:
+            unclear.append({'row': row['id'], 'reason': why})
+            continue
+        if marked:
+            # 'done' (a tick sheet's only box): done, the bot dates it.
+            chosen = marked[0]
+            marks.append({'row': row['id'], 'skipped': chosen == 'skip',
+                          'day': None if chosen in ('skip', 'done') else chosen})
+    if boxes and bad > max(3, TOO_UNCLEAR*boxes):
+        raise ValueError('Too much of the page is unclear (folds, shadow or blur): '
+                         'smooth it out and take the photo again, straight from the front')
+    return marks, unclear, taken_back
 
 
 def scan(data,doc=None):
@@ -535,21 +603,16 @@ def scan(data,doc=None):
             im=ImageOps.exif_transpose(source).convert('L')
         im.thumbnail((2600,3600)); found=decode(im)
     except (OSError,ValueError,Image.DecompressionBombError): return {}
-    flat = None
-    if not found or (doc is not None and len(fiducial_candidates(im)) != 4):
-        # Uneven light (a shadow hides the code or a corner target): try
-        # again with it evened out. Only then, so photos that read as they
-        # are stay exactly as they were.
-        flat = flatten(im); evened = decode(flat)
-        if evened and (not found or len(fiducial_candidates(flat)) == 4):
-            im, found = flat, evened
+    # The light evened out (a shadow over a corner or a box decides
+    # nothing): the code read from either, the boxes from the evened one.
+    flat = flatten(im)
+    found = found or decode(flat)
     if not found:
-        if flat is None: flat = flatten(im)
         if doc is not None: return {}
         result = legacy.scan(data)
         # Clearly a sheet (corner targets), but no code to read: say so
         # rather than ignore it like any other picture.
-        if not result.get('document') and max(len(fiducial_candidates(im)), len(fiducial_candidates(flat))) >= 3:
+        if not result.get('document') and len(fiducial_candidates(im)) >= 3:
             result = {'unreadable': True}
         return result
     parts=[part.lower() for part in found[0][0]]
@@ -559,7 +622,7 @@ def scan(data,doc=None):
         if doc.get('layout_version')!=2: raise ValueError('Unsupported paper layout; request a fresh PDF')
         if parts[1]!=doc['id'] or parts[2]!=doc['revision']: raise ValueError('Unknown document revision')
         page=doc['pages'][int(parts[3])]
-        result['marks']=read_marks(normalize(im,found,page),page)
+        result['marks'],result['unclear'],result['taken_back']=read_marks(normalize(flat,found,page),page)
     except (ValueError,IndexError,OverflowError,np.linalg.LinAlgError) as e: result['error']=str(e)
     return result
 
@@ -667,9 +730,10 @@ def render_ticks(tex, text, page, rows, top, first_top, half, bottom):
                 continue
             column = columns[row.get('column', 0)]
             left, right = column['left'], column['right']
-            # The name stops well before the box: the scanner reads 3.6mm
-            # around it, ink there would make the box unclear.
-            width = right-left-12 if row['fields'] else right-left-3
+            # The name stops well before the box: the scanner reads the
+            # paper around it (RING), ink there would make the box unclear.
+            box = row['fields'][0] if row['fields'] else None
+            width = box['x']-box['size']/2-outline(box['size'])[2][1]-1-(left+1.5) if box else right-left-3
             name = short_name(row['name'])
             if row['status']:
                 text(left+1.5, y-2, fit_words(width, name), min(name_size(name), 8.5), width+1, True, anchor='west')
@@ -679,7 +743,7 @@ def render_ticks(tex, text, page, rows, top, first_top, half, bottom):
                 text(left+1.5, y, fit_words(width, name), name_size(name), width+1, True, anchor='west')
             for field in row['fields']:
                 fx, fy, h = field['x'], field['y'], field['size']/2
-                tex.append(fr'\draw[black,line width=.22mm,fill=white] ({fx-h},{fy-h}) rectangle ({fx+h},{fy+h});')
+                tex.append(fr'\draw[black,line width={outline(field["size"])[0]}mm,fill=white] ({fx-h},{fy-h}) rectangle ({fx+h},{fy+h});')
     tex.append(fr'\draw[accent,line width=.5mm] (14,{bottom}) -- (196,{bottom});')
     for x in [14, TICK_WHEN_X, TICK_COLUMNS_X]+[c['right'] for c in columns]:
         tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')
@@ -802,7 +866,7 @@ def render(doc, engine='tectonic'):
                 text(109, y, row['status'], 9, 85, anchor='west', color='muted')
             for field in row['fields']:
                 fx, fy, half = field['x'], field['y'], field['size']/2
-                tex.append(fr'\draw[black,line width=.22mm,fill=white] ({fx-half},{fy-half}) rectangle ({fx+half},{fy+half});')
+                tex.append(fr'\draw[black,line width={outline(field["size"])[0]}mm,fill=white] ({fx-half},{fy-half}) rectangle ({fx+half},{fy+half});')
         tex.append(fr'\draw[accent,line width=.5mm] (14,{bottom}) -- (196,{bottom});')
         for x in (14, 27, 76, 105, 196):
             tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')

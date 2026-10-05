@@ -29,8 +29,11 @@ const ROW_PITCH: f64 = 11.;
 const MAX_ROW_PITCH: f64 = 14.;
 /// Box side, Monday's box centre and the distance between days: the seven
 /// day columns share the table's width right of "Who" (105–196mm). There is
-/// no Skip box on paper; skipping is recorded in Matrix.
-const BOX: f64 = 4.8;
+/// no Skip box on paper; skipping is recorded in Matrix. Boxes are 6mm with
+/// a 0.4mm outline (sheets printed before: 4.8mm, 0.22mm — each manifest
+/// says its size): in a phone photo a chat app shrank to 1200x1600, a
+/// thinner line is barely a grey pixel.
+const BOX: f64 = 6.;
 const MONDAY_X: f64 = 111.5;
 const DAY_PITCH: f64 = 13.;
 /// Tick sheets: columns from here to the table's right edge (Week and the
@@ -38,7 +41,7 @@ const DAY_PITCH: f64 = 13.;
 /// right edge (clear of the line by more than the scanner reads around it).
 const TICK_COLUMNS_LEFT: f64 = 52.;
 const TABLE_RIGHT: f64 = 196.;
-const TICK_BOX_INSET: f64 = 4.5;
+const TICK_BOX_INSET: f64 = 5.5;
 
 /// The two kinds of printable plan: a box for each day a duty may be done
 /// (the day is recorded), or one box per duty (only that it was done).
@@ -197,6 +200,70 @@ struct Scan {
     /// Corner targets but no readable QR code: a sheet, badly photographed.
     #[serde(default)]
     unreadable: bool,
+    /// Duties whose boxes couldn't be read (a fold, a shadow, a dot, several
+    /// days marked): named in the preview, to be recorded in Matrix.
+    #[serde(default)]
+    unclear: Vec<Unclear>,
+    /// Boxes filled in: a mark taken back, not counted — said in the
+    /// preview, in case it was meant as a (thick) mark.
+    #[serde(default)]
+    taken_back: Vec<TakenBack>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TakenBack {
+    row: String,
+    day: Option<NaiveDate>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Unclear {
+    row: String,
+    reason: String,
+}
+
+/// The preview's note on duties a photo left unclear and boxes filled in
+/// ("" if none).
+fn unclear_note(page: &Page, unclear: &[Unclear], taken_back: &[TakenBack]) -> String {
+    let duty = |id: &str| page.rows.iter().find(|r| r.id == id);
+    let not_read: Vec<String> = unclear
+        .iter()
+        .filter_map(|u| {
+            let r = duty(&u.row)?;
+            Some(format!(
+                "❓ Week {} · {} · {} — {}",
+                r.week, r.name, r.label, u.reason
+            ))
+        })
+        .collect();
+    let filled: Vec<String> = taken_back
+        .iter()
+        .filter_map(|t| {
+            let r = duty(&t.row)?;
+            let day = t.day.map(|d| format!(" · {}", d.format("%a")));
+            Some(format!(
+                "✏️ Week {} · {} · {}{}",
+                r.week,
+                r.name,
+                r.label,
+                day.unwrap_or_default()
+            ))
+        })
+        .collect();
+    let mut note = String::new();
+    if !not_read.is_empty() {
+        note.push_str(&format!(
+            "\n\nNot read:\n{}\nRecord these with !done, or send a clearer photo.",
+            not_read.join("\n")
+        ));
+    }
+    if !filled.is_empty() {
+        note.push_str(&format!(
+            "\n\nFilled in, so taken back (not counted):\n{}\nMeant as done? Record it with !done.",
+            filled.join("\n")
+        ));
+    }
+    note
 }
 
 /// Tell `room` about a photo of a sheet that can't be used. Once per photo.
@@ -934,11 +1001,14 @@ pub async fn image(
                 "Unknown sheet revision"
             );
             let events = changes(&state, &proposal, admin)?;
+            let page = rows(&doc, &proposal)?;
+            let not_read = unclear_note(page, &scanned.unclear, &scanned.taken_back);
             if events.is_empty() {
                 proposal.result = Some("No new changes".into());
-                return Ok("📷 Cleaning sheet recognized · no new changes.".into());
+                return Ok(format!(
+                    "📷 Cleaning sheet recognized · no new changes.{not_read}"
+                ));
             }
-            let page = rows(&doc, &proposal)?;
             let lines: Vec<_> = proposal
                 .changes
                 .iter()
@@ -961,7 +1031,7 @@ pub async fn image(
                     )
                 })
                 .collect();
-            Ok(format!("📷 Cleaning sheet recognized\n\n{}\n\n{} changes · ✅ Apply · ❌ Cancel\nOnly you can confirm. Expires in 24 hours.",lines.join("\n\n"),events.len()))
+            Ok(format!("📷 Cleaning sheet recognized\n\n{}{not_read}\n\n{} changes · ✅ Apply · ❌ Cancel\nOnly you can confirm. Expires in 24 hours.",lines.join("\n\n"),events.len()))
         })();
         match outcome {
             Ok(t) => t,
@@ -1288,14 +1358,15 @@ mod tests {
             assert_eq!(f.id, format!("{}:{day}", row.id));
         }
         // Boxes never touch: neighbours are a pitch apart, and the scanner
-        // reads 1.15mm around each box.
-        const { assert!(DAY_PITCH - BOX > 2. * 1.15) };
+        // reads 1.4mm around each box (RING in scripts/paper.py).
+        const { assert!(DAY_PITCH - BOX > 2. * 1.4) };
         // Sunday's box and its surroundings stay inside the table (right
-        // edge at 196mm, see scripts/paper.py).
-        const { assert!(196. - (MONDAY_X + 6. * DAY_PITCH) - BOX / 2. > 1.15) };
-        const { assert!(ROW_PITCH - BOX > 2. * 1.15) };
-        // The last row stays clear of the footer and the QR code.
-        // The table (up to the last row's bottom) stays clear of the QR code.
+        // edge at 196mm, see scripts/paper.py), Monday's clear of the "Who"
+        // column's line (105mm), and a tick sheet's box of its column's.
+        const { assert!(196. - (MONDAY_X + 6. * DAY_PITCH) - BOX / 2. > 1.4) };
+        const { assert!(MONDAY_X - BOX / 2. - 105. > 1.4) };
+        const { assert!(TICK_BOX_INSET - BOX / 2. > 1.4) };
+        const { assert!(ROW_PITCH - BOX > 2. * 1.4) };
         // A full page fits between the column titles and the footer, and
         // the table stays clear of the QR code.
         const { assert!(ROWS_TOP + ROWS_PER_PAGE as f64 * ROW_PITCH <= ROWS_BOTTOM) };
@@ -1512,6 +1583,65 @@ mod tests {
         let mut old = serde_json::to_value(&sheet).unwrap();
         old.as_object_mut().unwrap().remove("view_only");
         assert!(!serde_json::from_value::<Document>(old).unwrap().view_only);
+    }
+
+    #[test]
+    fn unclear_duties_are_named_in_the_preview() {
+        let (_, doc, _) = fixture();
+        let page = &doc.pages[0];
+        let row = &page.rows[0];
+        assert_eq!(unclear_note(page, &[], &[]), "");
+        let note = unclear_note(
+            page,
+            &[
+                Unclear {
+                    row: row.id.clone(),
+                    reason: "only a dot".into(),
+                },
+                // Not on this page: left out.
+                Unclear {
+                    row: "elsewhere".into(),
+                    reason: "fold".into(),
+                },
+            ],
+            &[],
+        );
+        assert_eq!(
+            note,
+            format!(
+                "\n\nNot read:\n❓ Week {} · {} · {} — only a dot\n\
+                 Record these with !done, or send a clearer photo.",
+                row.week, row.name, row.label
+            )
+        );
+        // What the scanner sends is read with it.
+        let scan: Scan = serde_json::from_value(serde_json::json!({
+            "document": "d", "revision": "r", "page": 0, "marks": [],
+            "unclear": [{"row": row.id, "reason": "several days marked"}]
+        }))
+        .unwrap();
+        assert_eq!(scan.unclear[0].reason, "several days marked");
+        // A box filled in: said with its day.
+        let day = row.start;
+        let note = unclear_note(
+            page,
+            &[],
+            &[TakenBack {
+                row: row.id.clone(),
+                day: Some(day),
+            }],
+        );
+        assert_eq!(
+            note,
+            format!(
+                "\n\nFilled in, so taken back (not counted):\n✏️ Week {} · {} · {} · {}\n\
+                 Meant as done? Record it with !done.",
+                row.week,
+                row.name,
+                row.label,
+                day.format("%a")
+            )
+        );
     }
 
     #[test]

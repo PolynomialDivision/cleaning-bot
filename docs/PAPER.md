@@ -48,10 +48,15 @@ is not stored: a photo of a view has no QR code to identify and is ignored.
 
 ## Using the sheet
 
-On a days sheet each duty has a box for each day it may be done. Put **one clear X** (two
-strokes) in the day you cleaned and leave everything else blank. There is no
-Skip box on paper: a skipped duty is recorded in Matrix. Any pen works; the example box in the footer shows
-it. Notes are for humans and are not read.
+On a days sheet each duty has a box for each day it may be done; on a tick
+sheet one box. The sheet asks for **one clear X** in the day you cleaned (or
+in your box), but any clear mark through the box counts: an X, a tick, a
+stroke. A box **filled in** or scribbled over counts as taken back: it is
+not counted, and the preview names it (so a correction is simply: fill in
+the wrong box, mark the right one). A dot is too little to count. There is
+no Skip box on paper: a skipped duty is recorded in Matrix. Any pen works;
+the example box in the footer shows it. Notes are for humans and are not
+read.
 
 Send a photo as a Matrix **image** to the cleaning room or an authorized
 encrypted DM. Include the whole page with all four small corner targets. No
@@ -76,9 +81,24 @@ Example:
 ✅ Week 41 · Alice · Kitchen Mon–Tue 5 – 6 Oct
 Done 2026-10-06
 
+Not read:
+❓ Week 43 · Bob · Kitchen Mon–Tue — box not clearly visible (fold, blur)
+Record these with !done, or send a clearer photo.
+
+Filled in, so taken back (not counted):
+✏️ Week 42 · Carol · Kitchen Thu–Fri · Thu
+Meant as done? Record it with !done.
+
 1 changes · ✅ Apply · ❌ Cancel
 Only you can confirm. Expires in 24 hours.
 ```
+
+A duty whose box can't be read (a fold or shadow over it, only a dot, or
+several days marked) doesn't hold up the others: it is named under "Not
+read", and the rest of the page is applied as usual. Only when more than a
+quarter of a page's boxes can't be read (a crumpled sheet, a blurred or very
+slanted photo) is the photo refused as a whole, asking for it to be smoothed
+out and taken again: on such photos creases look like marks.
 
 Residents can complete their own assigned duties. Administrators can record
 other people's assigned duties (and, on old version-1 sheets, mark duties
@@ -127,7 +147,7 @@ Layout version 2, in A4 millimetres from the top left (`src/paper.rs` and
 | corner targets | `(10,10)`, `(200,10)`, `(200,287)`, `(10,287)` — 5 mm black square, white disc, black dot; no data |
 | identity QR | one, centred at `(185,276)`, 20 mm including its quiet zone, drawn as vector squares (no image); upper-case payload, so QR's compact alphanumeric mode gives 29×29 modules of 0.54 mm |
 | rows | from 31 mm, 11–14 mm each (per group, see above); centres in the manifest |
-| boxes | 4.8 mm squares on the row centre: Monday at x = 111.5, then every 13 mm (the days share the width right of *Who*) |
+| boxes | 6 mm squares with a 0.4 mm outline on the row centre (sheets printed before: 4.8 mm, 0.22 mm — each field's size is in the manifest, and the scanner reads either): Monday at x = 111.5, then every 13 mm (the days share the width right of *Who*) |
 | tick sheets | a line per week, same rows and heights; *Week* 14–27, *When* 27–52, the columns share 52–196 evenly; one 4.8 mm box per duty, 4.5 mm left of its column's right edge (field kind `done`, ID `<row>:done`) |
 
 The QR contains only:
@@ -164,27 +184,32 @@ new fields load as layout version 1. The form does not change group frequency.
    brightness around it): a shadow over a corner makes the paper there darker
    than the fixed thresholds' "dark". Photos that read as they are never get
    this step.
-5. Find exactly four corner targets (nested square / white disc / dot; QR
-   finder patterns have different proportions). The QR near the bottom-right
-   target fixes the orientation; its position must match the manifest after
-   the homography. Normalize perspective to A4 at 6 pixels/mm. Reject too
-   small or too steep photos.
+5. Find the four corner targets (nested square / white disc / dot; QR
+   finder patterns have different proportions), at three levels of
+   strictness, in the photo and with its light evened out: in a small,
+   compressed or dim photo a 5 mm target's white disc and dot blur. The QR
+   code, at a known place near the bottom-right target, picks the four that
+   belong to this page (a neighbouring sheet in the photo has targets too)
+   and fixes the orientation. If only three are found (one in a shadow), the
+   fourth follows from them and the QR code. Normalize perspective to A4 at
+   6 pixels/mm (from the evened-out photo). Reject too small or too steep
+   photos.
 6. Read each box the manifest names. A page that isn't flat (curled, wavy
    where it hangs) moves boxes against the corners by 2–3 mm, so each box is
    first looked for within 3 mm of its place, where all four sides of a
    box-sized square are dark (a rule or a column line alone never passes;
    boxes are 11 mm and more apart). The printed outline is found with a
    lighter threshold than ink: in a shrunk, compressed photo the 0.22 mm line
-   is only a pixel or two of grey. Then it is registered precisely
-   (up to ±2 px, sub-pixel centre) and must be continuous on all four sides,
-   with a clean background around it — otherwise the whole scan is rejected
-   (shadow, fold, missing outline). Inside, ignoring the outline: almost no
-   ink is blank; an **X** needs ink running along all four diagonal arms
-   (measured as continuity, so thin and thick pens count alike), and no
-   circle around its crossing may pass more than four pieces of ink (extra
-   strokes). Ticks, slashes, dots, filled boxes, grids, crossed-out marks and
-   scribbles are ambiguous and reject the scan. More than one X per duty
-   rejects it too. Blank boxes never clear existing state.
+   of older sheets is only a pixel or two of grey. Then it is registered
+   precisely (up to ±2 px, sub-pixel centre) and must be continuous on all
+   four sides, with clean paper around it — otherwise that duty is unclear
+   (shadow, fold, missing outline). Inside, away from the outline, the share
+   of ink decides: under 0.8 % is blank; ink through the box's middle,
+   spanning at least 40 % of it, is a mark (an X, a tick, a stroke); more
+   than 55 %, or ink all across the box (three quarters of its 4×4 patches,
+   where an X leaves the triangles between its arms free) is filled in —
+   taken back; a speck is unclear. One marked day per duty; several make it
+   unclear. Blank boxes never clear existing state.
 7. Build a persisted proposal. Recheck assignment identities, edit history,
    permissions, date windows and existing completion state.
 8. On confirmation, repeat authorization and all domain checks under the normal
@@ -255,17 +280,22 @@ cargo clippy --offline --all-targets -- -D warnings
 Python integration tests need `pdflatex`, `pdftoppm`, plus the runtime packages.
 `PAPER_ENGINE=tectonic` renders with Tectonic instead, as production does
 (its package cache must be warm: compile `docker/tex-warmup.tex` once).
-They render real PDFs, rasterize them, draw X marks with separate pen strokes
-(no fills) and scan them back:
+They render real PDFs, rasterize them, draw marks with separate pen strokes
+and scan them back:
 
-- X marks with pens 0.17–0.67 mm, grey to black, off-centre, small to large,
-  uneven — all read; ticks, slashes, dots, fills, circles, plus signs, grids,
-  three-armed marks, crossed-out X and scribbles (thin and medium pens) never;
+- X marks with pens 0.17–0.5 mm, grey to black, off-centre, small to large,
+  uneven — all read as done, and on 6 mm boxes up to a 0.67 mm marker,
+  photographed tilted and compressed; ticks, slashes, circles and plus signs
+  read as done too; a filled-in or densely scribbled box as taken back (and
+  named), a correction (one day filled in, another marked) as the marked
+  day; a dot and several marked days as unclear;
 - rotation 0/90/180/270/13°, perspective, JPEG, darker exposure;
-- empty pages, the second shift of a week, weekend days, two marks for one duty, shadows over a box,
-  a band buckled further than a box is looked for, a cropped or blurred
-  photo, missing targets, an unrelated image, an old revision, two pages in
-  one photo;
+- empty pages, the second shift of a week, weekend days, a shadow over a
+  box (that duty unclear, the rest read), a band buckled further than a box
+  is looked for (those rows unclear), creases all over a page (refused as a
+  whole), a cropped or blurred photo, a lost corner target (read from three
+  and the QR code), an unrelated image, an old revision, two pages in one
+  photo;
 - a wavy, curled page with a shadow over the QR corner, shrunk to 1200×1600
   and compressed the way chat apps send photos (read correctly); a sheet with
   corner targets but no readable code (answered, not ignored);
@@ -273,7 +303,7 @@ They render real PDFs, rasterize them, draw X marks with separate pen strokes
 - views of both styles: the notice on every page, no QR code or corner
   targets, a photo ignored (with `PAPER_VIEW_FIXTURE` also the Rust one);
 - a tick sheet: empty, ticks side by side in one week and across the page
-  (read without a day), photographed, a tick-shaped mark refused;
+  (read without a day), photographed, a tick counted;
 - with `PAPER_LAYOUT_FIXTURE` and `PAPER_TICK_FIXTURE`, round trips through
   the actual Rust-generated multi-slot/twice-weekly manifests in both styles.
 
@@ -288,14 +318,20 @@ manifests, `paper-phone-simulation.jpg`.
 
 - Ordinary full-page JPEG/PNG photos are the target. Images sent as `m.file`,
   handwriting, OCR, HEIC-specific decoding and multiple-page extraction are not
-  implemented. All four corner targets must be visible.
-- The X reader is a set of conservative geometric checks, not a calibrated
-  model, and it was tuned on synthetic pen strokes only — **no real phone
-  photos or real pens**. Expect some real marks to be rejected as unclear (then
-  retake the photo or record it in Matrix).
-- Known gap: a *loose* scribble with a thick marker (0.5 mm and more) can look
-  like an X in a 4.8 mm box. Dense scribbles count as filled boxes. Every scan
-  is a preview the uploader must confirm, which is where such a misread shows.
+  implemented. Three corner targets and the QR code must be visible.
+- The mark reader is a set of simple checks, not a calibrated model. It was
+  checked on five real phone photos, sent compressed by a chat app
+  (1200×1600): on a flat sheet every real mark (ballpoint and felt pen, small,
+  big, over the edge, with a tail) read correctly and every empty box as
+  empty; crumpled sheets and a very slanted photo with a corner target in a
+  shadow are refused as a whole (on those, creases read as marks); no mark
+  was ever applied to the wrong duty or day.
+- On sheets printed with 4.8 mm boxes, a big X with a thick pen (0.5 mm and
+  more), blurred by a tilted photo, can fill the small box and read as taken
+  back. It is named in the preview, never dropped silently. New sheets have
+  6 mm boxes, where it reads as done. A loose scribble reads as done or as
+  taken back. Every scan is a preview the uploader must confirm, which is
+  where such a misread shows.
 - Detection rejects mixed decoded page identities. It cannot prove that no second
   page is present when that page's codes are unreadable. Only the fully recognized
   page can supply proposed changes.
