@@ -36,6 +36,16 @@ preview says it: `Done (counted as Thu 8 Oct)`. A duty already recorded as
 done, on whatever day (by `!done`, ✅ or an earlier photo), is no change for a
 tick; on a days sheet a different day is a conflict.
 
+## Plans only to look at
+
+`!plan pdf view [next] [N] [group]` prints the same pages as `!plan pdf`
+(each group in its style, as many weeks) with nothing to tick: no boxes, no
+QR code, no corner targets. On a days page the days a duty may be done are
+shaded instead. The header says "CLEANING PLAN · VIEW ONLY, NOT FOR
+TICKING", and a framed note at the bottom says it is not the sheet to tick
+and to use the plan with boxes or `!done`. Its manifest has `view_only` and
+is not stored: a photo of a view has no QR code to identify and is ignored.
+
 ## Using the sheet
 
 On a days sheet each duty has a box for each day it may be done. Put **one clear X** (two
@@ -223,6 +233,7 @@ Run:
 ```sh
 export PAPER_LAYOUT_FIXTURE=/tmp/cleaning-paper-manifest.json
 export PAPER_TICK_FIXTURE=/tmp/cleaning-paper-tick-manifest.json
+export PAPER_VIEW_FIXTURE=/tmp/cleaning-paper-view-manifest.json
 cargo test --offline
 OPENBLAS_NUM_THREADS=1 python3 -m unittest discover -s scripts -p 'test_paper.py' -v
 cargo clippy --offline --all-targets -- -D warnings
@@ -242,6 +253,8 @@ They render real PDFs, rasterize them, draw X marks with separate pen strokes
   a buckled band, a cropped or blurred photo, missing targets, an unrelated
   image, an old revision, two pages in one photo;
 - a complete version-1 sheet (still scannable);
+- views of both styles: the notice on every page, no QR code or corner
+  targets, a photo ignored (with `PAPER_VIEW_FIXTURE` also the Rust one);
 - a tick sheet: empty, ticks side by side in one week and across the page
   (read without a day), photographed, a tick-shaped mark refused;
 - with `PAPER_LAYOUT_FIXTURE` and `PAPER_TICK_FIXTURE`, round trips through

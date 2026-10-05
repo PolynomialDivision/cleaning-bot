@@ -437,6 +437,7 @@ fn more_help_text() -> String {
 !groups [group] · groups, members, rooms\n\
 !stats · cleaning history\n\
 !plan pdf next 20 · a PDF from next week on · history = past weeks\n\
+!plan pdf view · the plan only to look at (to hang up), nothing to tick\n\
 !ical reset · a new calendar link (the old one stops working)\n\n\
 👥 In !mygroups, tap a number to join that group — tap it again to leave. \
 ✅ marks the groups you're in.\n\
@@ -468,7 +469,7 @@ fn admin_help_text() -> String {
 !plan unassign <group> [slot] [week N] [on <day>]
 !plan reset <group> · redistribute future weeks from the rotation
 !plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
-!plan pdf [next | history] [N] [group] · printable plan (next = from next week)
+!plan pdf [view] [next | history] [N] [group] · printable plan (next = from next week; view = only to look at)
 !plan pdf style [group] days | tick | default · a box per day, or one tick per duty with the slots side by side — for everyone or one group
 
 **Groups**

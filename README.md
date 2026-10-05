@@ -347,7 +347,14 @@ both styles:
   week, Monday for Mon–Tue, Thursday for Thu–Fri), or the day of the photo if
   that is earlier.
 
-Then send a full-page photo to the cleaning
+`!plan pdf view [next] [N] [group]` prints the same plan only to look at —
+for hanging up where nobody ticks: each group's table in its style, without
+boxes (on a days plan the days a duty may be done are shaded), without QR
+code or corner targets, and with "View only, not for ticking" at the top and
+a framed note at the bottom pointing to the plan with boxes or `!done`. A
+photo of it is ignored.
+
+Then send a full-page photo of a sheet with boxes to the cleaning
 room or an authorized encrypted DM. The bot previews changes and asks for ✅ Apply / ❌ Cancel.
 Nothing is applied before confirmation. Residents can record their own duties;
 administrators can confirm a shared sheet. `!plan pdf history` remains a compact

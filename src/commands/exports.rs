@@ -154,7 +154,7 @@ fn tick_note(style: crate::paper::Style) -> &'static str {
     }
 }
 
-// ── !plan pdf [history | next] [N] [group] ─────────────────────────────────────────────
+// ── !plan pdf [view] [history | next] [N] [group] ─────────────────────────────────────────────
 
 pub(crate) async fn cmd_pdf(
     ctx: &BotContext,
@@ -169,6 +169,9 @@ pub(crate) async fn cmd_pdf(
     {
         return cmd_pdf_style(ctx, sender, &args[1..]).await;
     }
+    // `view`: the same plan only to look at, nothing to tick.
+    let view = args.first().is_some_and(|a| a.eq_ignore_ascii_case("view"));
+    let args = if view { &args[1..] } else { args };
     // `history`: the weeks up to this one; `next`: from next week on.
     let history = args
         .first()
@@ -248,7 +251,11 @@ pub(crate) async fn cmd_pdf(
         if snapshot.is_empty() {
             return Ok(Some(format::mentionify("📄 No duties in this date range.")));
         }
-        let document = crate::paper::document(&state, &snapshot);
+        let document = if view {
+            crate::paper::view(&state, &snapshot)
+        } else {
+            crate::paper::document(&state, &snapshot)
+        };
         // Build filename: cleaning-plan-KW{first}-KW{last}.pdf
         let weeks_range = {
             let first = snapshot.assignments.first();
@@ -261,13 +268,18 @@ pub(crate) async fn cmd_pdf(
                 _ => format!("{n}w"),
             }
         };
+        let kind = if view && !history {
+            "cleaning-plan-view"
+        } else {
+            "cleaning-plan"
+        };
         let file_name = match &group_filter {
             Some(name) => format!(
-                "cleaning-plan-{}_{}.pdf",
+                "{kind}-{}_{}.pdf",
                 name.to_lowercase().replace(' ', "_"),
                 weeks_range
             ),
-            None => format!("cleaning-plan-{weeks_range}.pdf"),
+            None => format!("{kind}-{weeks_range}.pdf"),
         };
         (
             document,
@@ -292,8 +304,9 @@ pub(crate) async fn cmd_pdf(
         }
     };
 
-    // Persist mapping before a scannable PDF can leave the bot.
-    if !history {
+    // Persist mapping before a scannable PDF can leave the bot (a view
+    // can't be scanned: nothing to keep).
+    if !history && !document.view_only {
         let mut state = ctx.state.lock().await;
         state.paper_documents.insert(document.id.clone(), document);
         state.save(&ctx.state_path).await?;

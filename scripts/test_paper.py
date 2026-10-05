@@ -404,4 +404,42 @@ class TickSheetTests(unittest.TestCase):
         (out/'paper-tick-full-layout.pdf').write_bytes(Path('sheet.pdf').read_bytes())
 
 
+class ViewTests(unittest.TestCase):
+    """`!plan pdf view`: the plan to hang up, nothing to tick, and it says so."""
+    def view(self,doc):
+        for page in doc['pages']:
+            for row in page['rows']:row['fields']=[]
+        return dict(doc,view_only=True)
+
+    def check(self,doc,name):
+        tmp=tempfile.mkdtemp();old=os.getcwd();os.chdir(tmp)
+        try:
+            paper.render(doc,engine=ENGINE)
+            words=subprocess.run(['pdftotext','-layout','sheet.pdf','-'],capture_output=True,text=True,check=True).stdout
+            self.assertEqual(words.count('VIEW ONLY, NOT FOR TICKING'),len(doc['pages']),words[:400])
+            self.assertEqual(words.count('this is not the sheet to tick'),len(doc['pages']))
+            self.assertNotIn('Put one clear X',words)
+            for i in range(len(doc['pages'])):
+                im=raster(i,f'view-{i}')
+                # Nothing a photo could be taken for: no QR, no corner targets.
+                self.assertEqual(paper.decode(im),[])
+                with self.assertRaises(ValueError):paper.fiducials(im)
+                self.assertEqual(paper.scan(encoded(im)),{})
+                self.assertEqual(paper.scan(encoded(im),doc),{})
+            self.assertTrue(Path('sheet.tex').read_text().isascii())
+            out=Path(__file__).resolve().parent.parent/'artifacts';out.mkdir(exist_ok=True)
+            (out/f'paper-view-{name}.pdf').write_bytes(Path('sheet.pdf').read_bytes())
+        finally:os.chdir(old)
+
+    def test_days_and_tick_pages_as_views(self):
+        doc=self.view(document());doc['pages'].append(dict(self.view(tick_document())['pages'][0],number=3))
+        self.check(doc,'example')
+
+    @unittest.skipUnless(os.environ.get('PAPER_VIEW_FIXTURE'),'set PAPER_VIEW_FIXTURE to test the Rust view manifest')
+    def test_actual_rust_view(self):
+        doc=json.loads(Path(os.environ['PAPER_VIEW_FIXTURE']).read_text())
+        self.assertTrue(doc['view_only'])
+        self.check(doc,'full-layout')
+
+
 if __name__=='__main__':unittest.main()

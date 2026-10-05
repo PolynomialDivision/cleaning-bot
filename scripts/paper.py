@@ -515,6 +515,26 @@ def footer(tex, text, doc, page, how):
     text(150, 280, f"{page['number']+1} / {len(doc['pages'])}", 8, 20, anchor='west', color='muted')
 
 
+def view_footer(tex, text, doc, page):
+    """A view's footer: framed, that this is not the sheet to tick."""
+    tex.append(r'\draw[accent,line width=.5mm,rounded corners=1.5mm,fill=accent!6] (14,264) rectangle (196,277);')
+    text(19, 270.5, r'\color{accent}\faEye', 14, 8, True, anchor='west')
+    text(28, 270.5, r'\textbf{Only to look at: this is not the sheet to tick.}\newline '
+         r'Mark your duty with an X on the cleaning plan with boxes, or with !done in Matrix.',
+         9, 165, True, anchor='west')
+    text(15, 282, r'\color{accent}\faHeart\enspace Thanks for keeping our home lovely.', 8, 120, True, anchor='west')
+    text(176, 282, f"{page['number']+1} / {len(doc['pages'])}", 8, 20, anchor='west', color='muted')
+
+
+def days_of(row):
+    """Every day `row` may be done on."""
+    day = datetime.date.fromisoformat(row['start'])
+    end = datetime.date.fromisoformat(row['end'])
+    while day <= end:
+        yield day
+        day += datetime.timedelta(days=1)
+
+
 #: Tick sheets: the week's dates between the badge and the slot columns (mm).
 TICK_WHEN_X, TICK_COLUMNS_X = 27, 52
 
@@ -596,6 +616,7 @@ def render(doc, engine='tectonic'):
 
         rows = page['rows']
         tick = page.get('style') == 'tick'
+        view = bool(doc.get('view_only'))
         # Row height from the manifest (earlier sheets used 12.5mm). On a
         # tick sheet a week's duties share one line.
         ys = sorted({r['y'] for r in rows})
@@ -608,15 +629,26 @@ def render(doc, engine='tectonic'):
         for day in (5, 6) if not tick else ():
             cx = DAY_X+day*DAY_STEP
             tex.append(fr'\fill[accent!7] ({cx-DAY_STEP/2},{top}) rectangle ({cx+DAY_STEP/2},{bottom});')
+        # A view has nothing to tick: the days a duty may be done are shaded
+        # instead of boxed.
+        for row in rows if view and not tick else []:
+            for day in days_of(row) if not row.get('status') else []:
+                cx = DAY_X+day.weekday()*DAY_STEP
+                tex.append(fr'\fill[accent!22,rounded corners=.6mm] ({cx-DAY_STEP/2+1.2},{row["y"]-half+1.2}) '
+                           fr'rectangle ({cx+DAY_STEP/2-1.2},{row["y"]+half-1.2});')
 
-        for x, y in page['fiducials']:
-            tex.append(fr'\fill ({x-2.5},{y-2.5}) rectangle ({x+2.5},{y+2.5});\fill[white] ({x},{y}) circle (1.5mm);\fill ({x},{y}) circle (.5mm);')
-        x, y = page['qr_center']
-        tex.append(qr_tikz(marker(doc, page['number']), x, y, QR_SIZE))
+        # The scanner's marks: corner targets and the QR code. A view has
+        # neither, so a photo of it is never taken for a sheet.
+        if not view:
+            for x, y in page['fiducials']:
+                tex.append(fr'\fill ({x-2.5},{y-2.5}) rectangle ({x+2.5},{y+2.5});\fill[white] ({x},{y}) circle (1.5mm);\fill ({x},{y}) circle (.5mm);')
+            x, y = page['qr_center']
+            tex.append(qr_tikz(marker(doc, page['number']), x, y, QR_SIZE))
 
         # Header in one line: whose plan, then when and where beside it (on
         # two lines, bottom-aligned, if there are many rooms).
-        text(15, 8.5, r'\textbf{CLEANING PLAN}', 7, 60, True, color='accent')
+        label = r'CLEANING PLAN\enspace\textperiodcentered\enspace VIEW ONLY, NOT FOR TICKING' if view else 'CLEANING PLAN'
+        text(15, 8.5, r'\textbf{'+label+'}', 7, 120, True, color='accent')
         where = r'\faCalendar\enspace '+tex_escape(period(rows)) if rows else ''
         rooms = rooms_tex(page)
         if rooms:
@@ -629,7 +661,10 @@ def render(doc, engine='tectonic'):
         tex.append(fr'\draw[accent,line width=.6mm] (14,{top}) -- (196,{top});')
         if tick:
             render_ticks(tex, text, page, rows, top, first_top, half, bottom)
-            footer(tex, text, doc, page, r'\textbf{Done? Put one clear X in your box.} Leave the rest blank.')
+            if view:
+                view_footer(tex, text, doc, page)
+            else:
+                footer(tex, text, doc, page, r'\textbf{Done? Put one clear X in your box.} Leave the rest blank.')
             tex.append(r'\end{tikzpicture}')
             continue
         head = first_top-3
@@ -679,7 +714,10 @@ def render(doc, engine='tectonic'):
         for x in (14, 27, 76, 105, 196):
             tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')
 
-        footer(tex, text, doc, page, r'\textbf{Done? Put one clear X in the day you cleaned.} Leave the rest blank.')
+        if view:
+            view_footer(tex, text, doc, page)
+        else:
+            footer(tex, text, doc, page, r'\textbf{Done? Put one clear X in the day you cleaned.} Leave the rest blank.')
         tex.append(r'\end{tikzpicture}')
     tex.append(r'\end{document}')
     Path('sheet.tex').write_text('\n'.join(tex))

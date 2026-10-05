@@ -78,6 +78,10 @@ impl Style {
 pub struct Document {
     #[serde(default = "legacy_layout")]
     pub layout_version: u8,
+    /// Only to look at (`!plan pdf view`): no boxes, no QR code, no corner
+    /// targets, and it says so. Never stored or scanned.
+    #[serde(default)]
+    pub view_only: bool,
     pub id: String,
     pub revision: String,
     pub created: chrono::DateTime<Utc>,
@@ -272,11 +276,23 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
     }
     Document {
         layout_version: 2,
+        view_only: false,
         id: uuid::Uuid::new_v4().simple().to_string(),
         revision: hash((2, &pages))[..12].into(),
         created: Utc::now(),
         pages,
     }
+}
+
+/// The same plan only to look at: each group's table as it prints to be
+/// ticked, without anything to tick.
+pub fn view(state: &State, snapshot: &ScheduleSnapshot) -> Document {
+    let mut doc = document(state, snapshot);
+    doc.view_only = true;
+    for row in doc.pages.iter_mut().flat_map(|p| p.rows.iter_mut()) {
+        row.fields.clear();
+    }
+    doc
 }
 
 /// A page of `duties` (all of one group) without rows yet.
@@ -1421,6 +1437,53 @@ mod tests {
         s.apply_event(DomainEvent::GroupDeleted { group_id: bath_id })
             .unwrap();
         assert!(s.paper_styles.is_empty());
+    }
+
+    #[test]
+    fn a_view_is_the_same_plan_with_nothing_to_tick() {
+        let mut s = upper_floor();
+        let mut bath = CleaningGroup::new("Bathroom");
+        bath.member_ids = s.cleaning_groups[0].member_ids.clone();
+        s.paper_styles.insert(bath.id.clone(), Style::Tick);
+        s.cleaning_groups.push(bath);
+        let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
+        one_page_per_group(&mut snapshot, &s);
+        let sheet = document(&s, &snapshot);
+        let view = view(&s, &snapshot);
+        // What `!plan pdf view` prints — the Python tests render it.
+        if let Ok(path) = std::env::var("PAPER_VIEW_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&view).unwrap()).unwrap();
+        }
+        assert!(view.view_only && !sheet.view_only);
+        assert!(sheet
+            .pages
+            .iter()
+            .any(|p| p.rows.iter().any(|r| !r.fields.is_empty())));
+        assert!(view
+            .pages
+            .iter()
+            .all(|p| p.rows.iter().all(|r| r.fields.is_empty())));
+        // Otherwise the same: pages, styles, columns, rows, names.
+        let shape = |d: &Document| {
+            d.pages
+                .iter()
+                .map(|p| {
+                    (
+                        p.style,
+                        p.columns.len(),
+                        p.rows
+                            .iter()
+                            .map(|r| (r.name.clone(), r.y.to_bits()))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape(&view), shape(&sheet));
+        // Manifests from before load as sheets.
+        let mut old = serde_json::to_value(&sheet).unwrap();
+        old.as_object_mut().unwrap().remove("view_only");
+        assert!(!serde_json::from_value::<Document>(old).unwrap().view_only);
     }
 
     #[test]
