@@ -40,7 +40,12 @@ def document():
                              name=['Alice','Wolkenschieberin','Zoë Maximiliane Schwarzenberger-Lüdenscheidt','Kim 🌸 Straße'][i%4],
                              label='Bathroom imported' if i==3 else '',task=['Stairs','Hallway'][i%2] if mode=='slots' else '',
                              start=str(start),end=str(end),y=y,status='',fields=fields))
-        pages.append(dict(number=number,title=title,rooms={'Kitchen':'Counters · Sink · Floor','Upper Floor':'Stairs · Hallway','Bathroom':'Shower · Toilet · Sink'}[title],
+        room=lambda kind,label='':dict(kind=kind,label=label)
+        groups={'Kitchen':[dict(slot=None,rooms=[room('kitchen'),room('other','Pantry')])],
+                'Upper Floor':[dict(slot='Stairs',rooms=[room('toilet','3rd'),room('toilet','4th')]),
+                               dict(slot='Hallway',rooms=[room('toilet'),room('shower')])],
+                'Bathroom':[dict(slot=None,rooms=[room('shower'),room('toilet'),room('other','Sink')])]}[title]
+        pages.append(dict(number=number,title=title,room_groups=groups,rooms={'Kitchen':'Counters · Sink · Floor','Upper Floor':'Stairs · Hallway','Bathroom':'Shower · Toilet · Sink'}[title],
                           rows=rows,fiducials=[[10,10],[200,10],[200,287],[10,287]],qr_center=[185,276]))
     return dict(layout_version=2,id='0123456789abcdef0123456789abcdef',revision='abcdef012345',pages=pages)
 

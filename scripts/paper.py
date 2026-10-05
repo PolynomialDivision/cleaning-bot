@@ -57,6 +57,39 @@ def tex_escape(s):
     return ' '.join(''.join(out).split()) if s.strip() else ''
 
 
+#: Room kinds drawn as a symbol in the header.
+ROOM_ICONS = {'toilet': r'\faToilet', 'shower': r'\faShower', 'kitchen': r'\faUtensils'}
+
+
+def rooms_tex(page):
+    """The header's rooms: per slot, "Colbe: [toilet] 3rd · [toilet] 4th",
+    "Scharni: [toilet] [shower]" — a symbol instead of the word for the
+    room's kind. A slot is never broken across lines. Manifests from before
+    room groups show their plain list."""
+    groups = page.get('room_groups') or []
+    if not groups:
+        return tex_escape(page.get('rooms', '')[:140])
+    out = []
+    for group in groups:
+        body, bare = '', False
+        for room in group['rooms']:
+            icon = ROOM_ICONS.get(room['kind'])
+            label = tex_escape(room['label'])
+            item = (r'{\color{accent}'+icon+'}'+(r'\,'+label if label else '')) if icon else label
+            if not item:
+                continue
+            # Bare symbols side by side; anything with words gets a dot.
+            if body:
+                body += r'\enspace ' if bare and icon and not label else r' \textperiodcentered{} '
+            body += item
+            bare = bool(icon) and not label
+        if not body:
+            continue
+        slot = r'\textbf{'+tex_escape(group['slot'])+r':}~' if group.get('slot') else ''
+        out.append(r'\mbox{'+slot+body+'}')
+    return r'\hspace{5mm} '.join(out)
+
+
 def fit(width, text):
     """`text` (TeX) scaled down to `width` mm if it is wider — a long name
     or word must never run over a column line."""
@@ -513,8 +546,9 @@ def render(doc, engine='tectonic'):
         # two lines, bottom-aligned, if there are many rooms).
         text(15, 8.5, r'\textbf{CLEANING PLAN}', 7, 60, True, color='accent')
         where = r'\faCalendar\enspace '+tex_escape(period(rows)) if rows else ''
-        if page.get('rooms'):
-            where += r'\hspace{5mm}\mbox{\faMapMarker*\enspace}'+tex_escape(page['rooms'][:140])
+        rooms = rooms_tex(page)
+        if rooms:
+            where += r'\hspace{5mm}\mbox{\faMapMarker*\enspace}'+rooms
         title = r'{\color{accent}\faBroom\enspace\textbf{'+fit(110, tex_escape(page['title'][:55]))+'}}'
         tex.append(fr'\node[anchor=base west,inner sep=0,text=ink] at (15,{top-4.5}) '
                    fr'{{\fontsize{{20}}{{24}}\selectfont\sbox1{{{title}}}\usebox1\hspace{{6mm}}'

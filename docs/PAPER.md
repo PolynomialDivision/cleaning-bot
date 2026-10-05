@@ -57,7 +57,9 @@ weeks per group as fill one page. Longer plans are split evenly across pages
 and only between weeks (22 rows make 12 + 10, not 21 + 1). Rows are 11 mm high
 on a full page and grow up to 14 mm when a group's pages hold fewer, so the
 table fills the page. The header is one line: title, then dates and rooms
-beside it. Each slot and each shift of a week is its own row: a
+beside it — the rooms per slot, with a symbol for toilets, showers and
+kitchens instead of the word (`Colbe Toilet 3rd` in slot Colbe reads
+"Colbe: [toilet] 3rd"); rooms of no known kind keep their name. Each slot and each shift of a week is its own row: a
 twice-weekly group shows two rows per week (`Mon–Tue · 28–29 Sep`,
 `Thu–Fri · 1–2 Oct`), a group with slots shows the slot in bold above the
 dates. Only the days a duty may be done get a box: seven for a weekly duty,

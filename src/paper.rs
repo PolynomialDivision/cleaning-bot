@@ -52,11 +52,28 @@ pub struct Page {
     pub number: usize,
     pub title: String,
     pub rooms: String,
+    /// The rooms per slot (one group without a slot name for a group without
+    /// slots), each as a kind and what is left of its name — for the header.
+    #[serde(default)]
+    pub room_groups: Vec<RoomGroup>,
     pub rows: Vec<Row>,
     #[serde(default)]
     pub fiducials: Vec<[f64; 2]>,
     #[serde(default)]
     pub qr_center: [f64; 2],
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RoomGroup {
+    pub slot: Option<String>,
+    pub rooms: Vec<RoomLabel>,
+}
+/// "Colbe Toilet 3rd" in slot Colbe: kind `toilet`, label "3rd" — the
+/// sheet shows a toilet symbol and "3rd".
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RoomLabel {
+    /// `toilet`, `shower`, `kitchen` (each drawn as a symbol) or `other`.
+    pub kind: String,
+    pub label: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Row {
@@ -206,6 +223,7 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
                     .into_iter()
                     .collect::<Vec<_>>()
                     .join(" · "),
+                room_groups: room_groups(chunk),
                 rows: Vec::new(),
                 fiducials: FIDUCIALS.to_vec(),
                 qr_center: QR_CENTER,
@@ -278,6 +296,69 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
         pages,
     }
 }
+/// The rooms of `chunk`'s duties, per slot in slot order.
+fn room_groups(chunk: &[&AssignmentInstance]) -> Vec<RoomGroup> {
+    let mut groups: Vec<(usize, RoomGroup)> = Vec::new();
+    for a in chunk {
+        let i = match groups.iter().position(|(i, _)| *i == a.slot_index) {
+            Some(i) => i,
+            None => {
+                groups.push((
+                    a.slot_index,
+                    RoomGroup {
+                        slot: a.slot_name.clone(),
+                        rooms: Vec::new(),
+                    },
+                ));
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[i].1;
+        for name in &a.room_names {
+            let room = room(group.slot.as_deref(), name);
+            if !group.rooms.contains(&room) {
+                group.rooms.push(room);
+            }
+        }
+    }
+    groups.sort_by_key(|(i, _)| *i);
+    groups.into_iter().map(|(_, g)| g).collect()
+}
+
+/// A room as the header shows it: its kind (a symbol on the sheet) and what
+/// is left of its name without the slot's name, the word for its kind and a
+/// bare "Room": "Colbe Toilet 3rd" in Colbe → toilet "3rd", "Shower Room" →
+/// shower "". A room of no known kind keeps its name.
+fn room(slot: Option<&str>, name: &str) -> RoomLabel {
+    use crate::view::RoomKind;
+    let kind = match crate::view::room_kind(name) {
+        RoomKind::Toilet => "toilet",
+        RoomKind::Shower => "shower",
+        RoomKind::Kitchen => "kitchen",
+        RoomKind::Other => "other",
+    };
+    let mut words: Vec<&str> = name.split_whitespace().collect();
+    if kind != "other" {
+        let same = |a: &str, b: &str| a.to_lowercase() == b.to_lowercase();
+        if let (Some(slot), true) = (slot, words.len() > 1) {
+            if same(words[0], slot) {
+                words.remove(0);
+            }
+        }
+        if let Some(pos) = words
+            .iter()
+            .position(|w| crate::view::room_kind(w) != RoomKind::Other)
+        {
+            words.remove(pos);
+        }
+        words.retain(|w| !["room", "raum", "zimmer"].contains(&w.to_lowercase().as_str()));
+    }
+    RoomLabel {
+        kind: kind.into(),
+        label: words.join(" "),
+    }
+}
+
 /// Keep, for each group, only as many whole weeks as fill one page — what
 /// `!plan pdf` prints when no number of weeks is asked for (a group cleaned
 /// by two slots gets ten weeks, a weekly one-slot group 21).
@@ -1014,7 +1095,11 @@ mod tests {
         g.name = "Upper Floor".into();
         g.rhythm.shift_starts = vec![0, 3];
         g.rhythm.shift_ends = vec![1, 4];
-        g.slots = vec![CleaningSlot::new("Stairs"), CleaningSlot::new("Hall")];
+        let mut stairs = CleaningSlot::new("Stairs");
+        stairs.room_names = vec!["Stairs Toilet 3rd".into(), "Stairs Toilet 4th".into()];
+        let mut hall = CleaningSlot::new("Hall");
+        hall.room_names = vec!["Hall Toilet".into(), "Shower Room".into()];
+        g.slots = vec![stairs, hall];
         let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
         one_page_per_group(&mut snapshot);
         let weeks: std::collections::BTreeSet<_> = snapshot
@@ -1033,6 +1118,55 @@ mod tests {
         // The page is filled: 20 rows of 11.55mm reach the footer.
         let rows = &doc.pages[0].rows;
         assert!(rows.last().unwrap().y + (rows[1].y - rows[0].y) / 2. > ROWS_BOTTOM - 0.1);
+    }
+
+    #[test]
+    fn rooms_are_shown_per_slot_as_symbols_and_what_is_left() {
+        let r = |slot, name| {
+            let room = room(slot, name);
+            (room.kind, room.label)
+        };
+        let t = |k: &str, l: &str| (k.to_owned(), l.to_owned());
+        assert_eq!(r(Some("Colbe"), "Colbe Toilet 3rd"), t("toilet", "3rd"));
+        assert_eq!(r(Some("Scharni"), "Scharni Toilet"), t("toilet", ""));
+        assert_eq!(r(Some("Scharni"), "Shower Room"), t("shower", ""));
+        assert_eq!(r(None, "Kitchen"), t("kitchen", ""));
+        assert_eq!(r(None, "WC oben"), t("toilet", "oben"));
+        assert_eq!(r(None, "Duschraum"), t("shower", ""));
+        // No known kind: the name stays, slot name and all.
+        assert_eq!(
+            r(Some("Colbe"), "Colbe Hallway"),
+            t("other", "Colbe Hallway")
+        );
+
+        let (mut s, _, _) = fixture();
+        let mut colbe = CleaningSlot::new("Colbe");
+        colbe.room_names = vec!["Colbe Toilet 3rd".into(), "Colbe Toilet 4th".into()];
+        let mut scharni = CleaningSlot::new("Scharni");
+        scharni.room_names = vec!["Scharni Toilet".into(), "Shower Room".into()];
+        s.cleaning_groups[0].slots = vec![scharni, colbe];
+        let snapshot = crate::schedule::build_schedule(&s, 2);
+        let doc = document(&s, &snapshot);
+        let groups = &doc.pages[0].room_groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].slot.as_deref(), Some("Scharni"));
+        assert_eq!(
+            groups[0]
+                .rooms
+                .iter()
+                .map(|r| r.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["toilet", "shower"]
+        );
+        assert_eq!(groups[1].slot.as_deref(), Some("Colbe"));
+        assert_eq!(
+            groups[1]
+                .rooms
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            ["3rd", "4th"]
+        );
     }
 
     #[test]
