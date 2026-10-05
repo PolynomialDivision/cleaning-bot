@@ -132,6 +132,32 @@ def scan(data,doc=None):
     except (ValueError,IndexError,np.linalg.LinAlgError) as e:result['error']=str(e)
     return result
 
+def qr_tikz(payload, cx, cy, size):
+    """The QR code for `payload` as filled vector squares, `size` mm wide
+    including its 4-module quiet zone, centred on (cx, cy). No image file:
+    an embedded PNG came out as bare outlines through Tectonic."""
+    lines = subprocess.run(['qrencode', '-t', 'ASCII', '-m', '0', '-l', 'M', payload],
+                           check=True, stdout=subprocess.PIPE, text=True).stdout.splitlines()
+    rows = [[line[2*i] == '#' for i in range(len(line)//2)] for line in lines if line.strip()]
+    n = len(rows)
+    module = size/(n+8)
+    left, top = cx-size/2+4*module, cy-size/2+4*module
+    parts = []
+    for r, row in enumerate(rows):
+        c = 0
+        while c < n:
+            if row[c]:
+                start = c
+                while c < n and row[c]:
+                    c += 1
+                parts.append(f'({left+start*module:.3f},{top+r*module:.3f}) rectangle '
+                             f'({left+c*module:.3f},{top+(r+1)*module:.3f})')
+            else:
+                c += 1
+    return (fr'\fill[white] ({cx-size/2},{cy-size/2}) rectangle ({cx+size/2},{cy+size/2});'
+            + r'\fill[black] ' + ' '.join(parts) + ';')
+
+
 def tex_escape(s):
     return ''.join({'\\':r'\textbackslash{}','&':r'\&','%':r'\%','$':r'\$','#':r'\#','_':r'\_','{':r'\{','}':r'\}','~':r'\textasciitilde{}','^':r'\textasciicircum{}'}.get(c,c) for c in s)
 
@@ -141,9 +167,7 @@ def render(doc,engine='tectonic'):
         if page['number']:tex.append(r'\newpage')
         tex.append(r'\null\begin{tikzpicture}[remember picture,overlay,x=1mm,y=-1mm,shift={(current page.north west)}]')
         for i,(x,y) in enumerate(CORNERS):
-            name=f"qr-{page['number']}-{i}.png"
-            subprocess.run(['qrencode','-l','M','-s','8','-m','4','-o',name,marker(doc,page['number'],i)],check=True,stdout=subprocess.DEVNULL)
-            tex.append(fr'\node[inner sep=0] at ({x},{y}) {{\includegraphics[width=22mm]{{{name}}}}};')
+            tex.append(qr_tikz(marker(doc,page['number'],i),x,y,22))
         def text(x,y,s,size=10,width=175):
             tex.append(fr'\node[anchor=north west,inner sep=0,text width={width}mm,font=\fontsize{{{size}}}{{{size+2}}}\selectfont] at ({x},{y}) {{{tex_escape(s)}}};')
         text(36,10,'CLEANING PLAN',19,136);text(36,21,page['title'][:60],13,136)

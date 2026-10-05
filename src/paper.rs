@@ -182,7 +182,7 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
             .iter()
             .filter(|a| a.group_id == group)
             .collect();
-        for chunk in assignments.chunks(ROWS_PER_PAGE) {
+        for chunk in pages_of(&assignments, |a| (a.iso_year, a.iso_week)) {
             let mut page = Page {
                 number: pages.len(),
                 title: chunk[0].group_name.clone(),
@@ -265,6 +265,30 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
         pages,
     }
 }
+/// Split `rows` into pages of at most ROWS_PER_PAGE, evenly (18 rows make
+/// 10 + 8, not 16 + 2), breaking only between weeks unless a single week is
+/// longer than a page.
+fn pages_of<T, W: PartialEq>(rows: &[T], week: impl Fn(&T) -> W) -> Vec<&[T]> {
+    let pages = rows.len().div_ceil(ROWS_PER_PAGE).max(1);
+    let target = rows.len().div_ceil(pages);
+    let mut out = Vec::new();
+    let mut rest = rows;
+    while !rest.is_empty() {
+        let max = rest.len().min(ROWS_PER_PAGE);
+        // The first week boundary at or after `target` that still fits,
+        // else the last one before it.
+        let boundary = |i: usize| i == rest.len() || week(&rest[i - 1]) != week(&rest[i]);
+        let cut = (target.min(max)..=max)
+            .find(|&i| boundary(i))
+            .or_else(|| (1..target.min(max)).rev().find(|&i| boundary(i)))
+            .unwrap_or(max);
+        let (page, tail) = rest.split_at(cut);
+        out.push(page);
+        rest = tail;
+    }
+    out
+}
+
 fn current(state: &State, row: &Row) -> Option<AssignmentInstance> {
     crate::schedule::build_schedule_from(state, (row.year, row.week), 1)
         .assignments
@@ -786,7 +810,7 @@ mod tests {
             s.persons.push(person);
         }
         let g = &mut s.cleaning_groups[0];
-        g.name = "3+4 Floor".into();
+        g.name = "Upper Floor".into();
         g.rhythm.shift_starts = vec![0, 3];
         g.rhythm.shift_ends = vec![1, 4];
         g.slots = vec![CleaningSlot::new("Stairs"), CleaningSlot::new("Hall")];
@@ -883,6 +907,34 @@ mod tests {
         // The last row stays clear of the footer and the QR code.
         let last = FIRST_ROW + (ROWS_PER_PAGE - 1) as f64 * ROW_PITCH;
         assert!(last + ROW_PITCH / 2. < QR_CENTER[1] - 9. - 10.);
+    }
+
+    #[test]
+    fn pages_break_evenly_and_between_weeks() {
+        let sizes = |weeks: &[usize]| {
+            let rows: Vec<usize> = weeks
+                .iter()
+                .enumerate()
+                .flat_map(|(w, &n)| std::iter::repeat_n(w, n))
+                .collect();
+            let pages = pages_of(&rows, |w| *w);
+            for page in &pages {
+                assert!(page.len() <= ROWS_PER_PAGE);
+            }
+            // No week is split (unless it alone is longer than a page).
+            for pair in pages.windows(2) {
+                assert_ne!(pair[0].last(), pair[1].first());
+            }
+            pages.iter().map(|p| p.len()).collect::<Vec<_>>()
+        };
+        // 9 weeks of 2 rows: not 16 + 2.
+        assert_eq!(sizes(&[2; 9]), [10, 8]);
+        assert_eq!(sizes(&[2; 8]), [16]);
+        assert_eq!(sizes(&[1; 12]), [12]);
+        // 4 rows a week (2 slots × 2 shifts), 6 weeks.
+        assert_eq!(sizes(&[4; 6]), [12, 12]);
+        assert_eq!(sizes(&[1; 17]), [9, 8]);
+        assert_eq!(sizes(&[]), Vec::<usize>::new());
     }
 
     #[test]

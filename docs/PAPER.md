@@ -52,13 +52,21 @@ week, centred across its rows), strong rules between weeks and dotted ones
 between a week's rows, columns *Week · When (· task) · Who · Mon … Sun*,
 weekend columns lightly shaded, a calm teal accent and Helvetica. Everything
 stays readable in black and white. Each page belongs to one group and holds up
-to **16 duties**. Each slot and each shift of a week is its own row: a
+to **16 duties**; longer plans are split evenly across pages and only between
+weeks (18 rows make 10 + 8, not 16 + 2). Each slot and each shift of a week is its own row: a
 twice-weekly group shows two rows per week (`Mon–Tue · 28–29 Sep`,
 `Thu–Fri · 1–2 Oct`), a group with slots shows the slot in bold above the
 dates. Only the days a duty may be done get a box: seven for a weekly duty,
 two for a two-day window. Completed or skipped duties show
-their status as text instead of boxes. Imported and manually assigned duties
-keep a small source note.
+their status as text instead of boxes. Long names wrap between words and
+after hyphens, get smaller when long, and a word too wide for the column is
+scaled down: nothing crosses a column line. Row dates leave out the year; the
+header shows it.
+
+The TeX source is pure ASCII (special characters as LaTeX commands, the same
+table as the history PDF): production compiles with Tectonic (XeTeX), where a
+raw `·` printed as `ů` and a raw `–` vanished, and an embedded QR image came
+out as bare outlines. A test checks both.
 
 Layout version 2, in A4 millimetres from the top left (`src/paper.rs` and
 `scripts/paper.py` agree; tests check it):
@@ -66,7 +74,7 @@ Layout version 2, in A4 millimetres from the top left (`src/paper.rs` and
 | | |
 |---|---|
 | corner targets | `(10,10)`, `(200,10)`, `(200,287)`, `(10,287)` — 5 mm black square, white disc, black dot; no data |
-| identity QR | one, centred at `(187,277)`, 18 mm including its quiet zone |
+| identity QR | one, centred at `(187,277)`, 18 mm including its quiet zone, drawn as vector squares (no image) |
 | rows | centre of row *i* at `58.25 + 12.5·i` |
 | boxes | 4.8 mm squares on the row centre: Monday at x = 111.5, then every 13 mm (the days share the width right of *Who*) |
 
@@ -180,6 +188,8 @@ cargo clippy --offline --all-targets -- -D warnings
 ```
 
 Python integration tests need `pdflatex`, `pdftoppm`, plus the runtime packages.
+`PAPER_ENGINE=tectonic` renders with Tectonic instead, as production does
+(its package cache must be warm: compile `docker/tex-warmup.tex` once).
 They render real PDFs, rasterize them, draw X marks with separate pen strokes
 (no fills) and scan them back:
 
@@ -194,7 +204,8 @@ They render real PDFs, rasterize them, draw X marks with separate pen strokes
 - with `PAPER_LAYOUT_FIXTURE`, a round trip through the actual Rust-generated
   multi-slot/twice-weekly manifest, including its geometry.
 
-`artifacts/` holds synthetic previews, not the house's live plan:
+`artifacts/` (not in git; the tests write it on every run) holds synthetic,
+anonymous previews, not the house's live plan:
 `paper-{weekly,twice-weekly,multi-slot}.png` in colour, `*-bw.png` in greyscale
 (what the scanner and a black-and-white printer see), `paper-full-layout.*` from
 the Rust manifest, `paper-phone-simulation.jpg`.
@@ -214,10 +225,11 @@ the Rust manifest, `paper-phone-simulation.jpg`.
 - Detection rejects mixed decoded page identities. It cannot prove that no second
   page is present when that page's codes are unreadable. Only the fully recognized
   page can supply proposed changes.
-- Long names wrap onto two lines and are cut after 44 characters on paper; full
-  identity remains in the manifest. Existing LaTeX font coverage still limits unusual Unicode names.
-- This was tested offline with pdflatex (Tectonic is unavailable on the development
-  host). Production Tectonic/container rendering and Matrix homeserver/phone-camera
+- Names longer than 60 characters are cut after a whole word on paper; the
+  full identity remains in the manifest. Characters without a glyph in the
+  PDF fonts (emoji, non-Latin scripts) are left out on paper. Existing LaTeX font coverage still limits unusual Unicode names.
+- Rendering was tested with both pdflatex and Tectonic (the full suite passes
+  with either). The container build itself, Matrix homeserver and phone-camera
   integration were not exercised. No claim of real-camera calibration is made.
 - Digital history reports and older PDFs have no document markers and are not
   scannable. Generate a new current/upcoming form to use photo synchronization.

@@ -14,7 +14,84 @@ import io
 
 SCALE = 6  # pixels/mm in the rectified image; a 0.35mm pen is ~2 pixels wide
 homography = legacy.homography
-tex_escape = legacy.tex_escape
+
+#: Characters TeX must not see raw. The sheet is compiled by Tectonic
+#: (XeTeX) in production and pdflatex in tests; with T1-encoded fonts, XeTeX
+#: prints a raw "·" as "ů" and drops a raw "–". So the source stays ASCII —
+#: the same table as `tex_esc` in src/pdf.rs. Other characters beyond
+#: Latin-1 have no glyph in these fonts and are left out.
+TEX = {'\\': r'\textbackslash{}', '&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#',
+       '_': r'\_', '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}',
+       '^': r'\textasciicircum{}', '\u2013': '--', '\u2014': '---',
+       '\u00d7': r'$\times$', '\u00f7': r'$\div$', '\u00df': r'{\ss}', '\u00ff': r'\"y',
+       '\u00a0': '~', '\u00a1': r'\textexclamdown{}', '\u00a3': r'\pounds{}',
+       '\u00a7': r'\S{}', '\u00a9': r'\textcopyright{}', '\u00ab': r'\guillemotleft{}',
+       '\u00bb': r'\guillemotright{}', '\u00b0': r'\textdegree{}',
+       '\u00b7': r'\textperiodcentered{}', '\u00bf': r'\textquestiondown{}',
+       '\u20ac': r'\texteuro{}', '\u2026': r'\dots{}', '\u2018': '`', '\u2019': "'",
+       '\u201a': r'\quotesinglbase{}', '\u201c': '``', '\u201d': "''",
+       '\u201e': r'\quotedblbase{}'}
+#: Latin-1 letters, written as TeX accents so the source stays ASCII.
+ACCENTS = {'\u0300': '`', '\u0301': "'", '\u0302': '^', '\u0303': '~', '\u0308': '"',
+           '\u030a': 'r', '\u0327': 'c'}
+SPECIAL_LETTERS = {'\u00c6': r'\AE{}', '\u00e6': r'\ae{}', '\u00d8': r'\O{}', '\u00f8': r'\o{}',
+                   '\u00d0': r'\DH{}', '\u00f0': r'\dh{}', '\u00de': r'\TH{}', '\u00fe': r'\th{}'}
+
+
+def tex_escape(s):
+    import unicodedata
+    out = []
+    for c in s:
+        if c in TEX:
+            out.append(TEX[c])
+        elif c in SPECIAL_LETTERS:
+            out.append(SPECIAL_LETTERS[c])
+        elif ord(c) < 128:
+            out.append(c)
+        elif ord(c) < 256:
+            base, *marks = unicodedata.normalize('NFD', c)
+            if len(marks) == 1 and marks[0] in ACCENTS and ord(base) < 128:
+                accent = ACCENTS[marks[0]]
+                out.append(f'\\{accent}{{{base}}}' if accent.isalpha() else f'{{\\{accent}{base}}}')
+        # Anything else (emoji, other scripts) has no glyph here: left out.
+    return ' '.join(''.join(out).split()) if s.strip() else ''
+
+
+def fit(width, text):
+    """`text` (TeX) scaled down to `width` mm if it is wider — a long name
+    or word must never run over a column line."""
+    return fr'\fit{{{width}mm}}{{{text}}}'
+
+
+def fit_words(width, text):
+    """`text` (plain) for a narrow column: lines wrap between words and
+    after a hyphen ("Schwarzenberger-|Lüdenscheidt"); a single part too
+    wide for the column is scaled down to fit."""
+    words = []
+    for word in text.split():
+        parts = [p for p in word.replace('-', '-\n').split('\n') if tex_escape(p)]
+        if parts:
+            # \hspace{0pt}: a place to break, no space.
+            words.append(r'\hspace{0pt}'.join(fit(width, tex_escape(p)) for p in parts))
+    return ' '.join(words)
+
+
+def short_name(name, limit=60):
+    """`name`, cut after a whole word with "…" if longer than `limit`."""
+    name = ' '.join(name.split())
+    if len(name) <= limit:
+        return name
+    cut = name[:limit].rsplit(' ', 1)[0]
+    return cut + '…'
+
+
+def name_size(name):
+    """Font size for a name in the Who column (24mm): one line up to ~18
+    characters, two up to ~34, else three smaller ones — a row has room."""
+    return 9.5 if len(name) <= 18 else 8 if len(name) <= 34 else 7
+
+
+qr_tikz = legacy.qr_tikz
 
 
 def marker(doc, page):
@@ -317,13 +394,14 @@ def scan(data,doc=None):
     return result
 
 
-def span(start, end):
-    """'28 Sep', '28–29 Sep', '28 Sep – 4 Oct', '29 Dec 2026 – 4 Jan 2027'."""
+def span(start, end, years=False):
+    """'28 Sep', '28–29 Sep', '28 Sep – 4 Oct', '28 Dec – 3 Jan'; with
+    `years`, a range across New Year says both: '28 Dec 2026 – 3 Jan 2027'."""
     if start == end:
         return f"{start.day} {start:%b}"
     if (start.year, start.month) == (end.year, end.month):
         return f"{start.day}–{end.day} {end:%b}"
-    if start.year == end.year:
+    if start.year == end.year or not years:
         return f"{start.day} {start:%b} – {end.day} {end:%b}"
     return f"{start.day} {start:%b} {start.year} – {end.day} {end:%b} {end.year}"
 
@@ -341,7 +419,7 @@ def period(rows):
     """The page's whole range, with the year: '28 Sep – 20 Nov 2026'."""
     start = min(datetime.date.fromisoformat(r['start']) for r in rows)
     end = max(datetime.date.fromisoformat(r['end']) for r in rows)
-    text = span(start, end)
+    text = span(start, end, years=True)
     return text if start.year != end.year else f"{text} {end.year}"
 
 
@@ -359,6 +437,8 @@ def render(doc, engine='tectonic'):
            r'\renewcommand{\familydefault}{\sfdefault}', r'\pagestyle{empty}',
            r'\definecolor{accent}{HTML}{2F6F73}', r'\definecolor{ink}{HTML}{253238}',
            r'\definecolor{muted}{HTML}{6B7785}',
+           # Scale a box down to #1 if it is wider (names, slot names).
+           r'\newcommand{\fit}[2]{\sbox0{#2}\ifdim\wd0>#1\resizebox{#1}{!}{\usebox0}\else\usebox0\fi}',
            r'\begin{document}']
     for page in doc['pages']:
         if page['number']:
@@ -380,15 +460,12 @@ def render(doc, engine='tectonic'):
 
         for x, y in page['fiducials']:
             tex.append(fr'\fill ({x-2.5},{y-2.5}) rectangle ({x+2.5},{y+2.5});\fill[white] ({x},{y}) circle (1.5mm);\fill ({x},{y}) circle (.5mm);')
-        name = f"qr-{page['number']}.png"
-        subprocess.run(['qrencode', '-l', 'M', '-s', '8', '-m', '4', '-o', name, marker(doc, page['number'])],
-                       check=True, stdout=subprocess.DEVNULL)
         x, y = page['qr_center']
-        tex.append(fr'\node[inner sep=0] at ({x},{y}) {{\includegraphics[width=18mm]{{{name}}}}};')
+        tex.append(qr_tikz(marker(doc, page['number']), x, y, 18))
 
         # Header: what this is, whose, when, where.
         text(15, 12.5, r'\textbf{CLEANING PLAN}', 7.5, 60, True, color='accent')
-        text(15, 17, r'\color{accent}\faBroom\enspace\textbf{'+tex_escape(page['title'][:55])+'}', 21, 150, True)
+        text(15, 17, r'\color{accent}\faBroom\enspace\textbf{'+fit(150, tex_escape(page['title'][:55]))+'}', 21, 165, True)
         text(15, 27.5, 'A little teamwork. A lovely clean home.', 10, 172, color='muted')
         where = r'\faCalendar\enspace '+tex_escape(period(rows)) if rows else ''
         if page.get('rooms'):
@@ -422,19 +499,17 @@ def render(doc, engine='tectonic'):
             y = row['y']
             start = datetime.date.fromisoformat(row['start'])
             end = datetime.date.fromisoformat(row['end'])
-            note = ''
-            if 'imported' in row.get('label', ''):
-                note = ' · imported'
-            elif 'assigned' in row.get('label', ''):
-                note = ' · assigned'
-            when = tex_escape(window(start, end))
+            when = fit(44, tex_escape(window(start, end)))
             if row.get('task'):
-                text(30, y-2.2, r'\textbf{'+tex_escape(row['task'][:34])+'}', 9, 46, True, anchor='west')
-                text(30, y+2.4, when+r'{\color{muted}'+tex_escape(note)+'}', 8, 46, True, anchor='west')
+                text(30, y-2.2, r'\textbf{'+fit(44, tex_escape(row['task'][:40]))+'}', 9, 46, True, anchor='west')
+                text(30, y+2.4, when, 8, 46, True, anchor='west')
             else:
-                text(30, y, when+r'{\color{muted}\scriptsize'+tex_escape(note)+'}', 9, 46, True, anchor='west')
-            # Up to two lines; the full name stays in the manifest.
-            text(79, y, tex_escape(row['name'][:44]), 9.5 if len(row['name']) <= 20 else 8.5, 25, True, anchor='west')
+                text(30, y, when, 9, 46, True, anchor='west')
+            # Wraps between words (two lines at most fit a row); a word too
+            # long for the column is scaled down. The full name stays in the
+            # manifest.
+            name = short_name(row['name'])
+            text(79, y, fit_words(24, name), name_size(name), 25, True, anchor='west')
             if row['status']:
                 text(109, y, row['status'], 9, 85, anchor='west', color='muted')
             for field in row['fields']:

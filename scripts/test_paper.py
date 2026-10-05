@@ -14,10 +14,14 @@ from PIL import Image, ImageDraw, ImageFilter, ImageEnhance
 import numpy as np
 import paper
 
+#: The TeX engine for rendering: pdflatex by default; set PAPER_ENGINE=tectonic
+#: to test what production uses (its package cache must be warm).
+ENGINE=os.environ.get('PAPER_ENGINE','pdflatex')
+
 
 def document():
     pages=[]
-    for number,(title,mode,count) in enumerate([('Kitchen','twice',16),('3+4 Floor','slots',16),('Bathroom','weekly',12)]):
+    for number,(title,mode,count) in enumerate([('Kitchen','twice',16),('Upper Floor','slots',16),('Bathroom','weekly',16)]):
         rows=[]
         for i in range(count):
             week_offset=i//2 if mode!='weekly' else i
@@ -30,9 +34,12 @@ def document():
                 day=start+dt.timedelta(days=offset)
                 fields.append(dict(id=f'{rowid}:{day}',kind=str(day),x=111.5+day.weekday()*13,y=y,size=4.8,label=day.strftime('%a')))
             rows.append(dict(id=rowid,week=start.isocalendar().week,year=start.isocalendar().year,
-                             name=['Alice','Bob','Carol','Dan'][i%4],label='',task=['Stairs','Hallway'][i%2] if mode=='slots' else '',
+                             # Real-world names: one long word, long and accented
+                             # names, an emoji — none may cross a column line.
+                             name=['Alice','Wolkenschieberin','Zoë Maximiliane Schwarzenberger-Lüdenscheidt','Kim 🌸 Straße'][i%4],
+                             label='Bathroom imported' if i==3 else '',task=['Stairs','Hallway'][i%2] if mode=='slots' else '',
                              start=str(start),end=str(end),y=y,status='',fields=fields))
-        pages.append(dict(number=number,title=title,rooms={'Kitchen':'Counters · Sink · Floor','3+4 Floor':'Stairs · Hallway','Bathroom':'Shower · Toilet · Sink'}[title],
+        pages.append(dict(number=number,title=title,rooms={'Kitchen':'Counters · Sink · Floor','Upper Floor':'Stairs · Hallway','Bathroom':'Shower · Toilet · Sink'}[title],
                           rows=rows,fiducials=[[10,10],[200,10],[200,287],[10,287]],qr_center=[187,277]))
     return dict(layout_version=2,id='0123456789abcdef0123456789abcdef',revision='abcdef012345',pages=pages)
 
@@ -58,7 +65,7 @@ class PaperTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.doc=document();cls.tmp=tempfile.TemporaryDirectory();cls.old=os.getcwd();os.chdir(cls.tmp.name)
-        paper.render(cls.doc,engine='pdflatex')
+        paper.render(cls.doc,engine=ENGINE)
         cls.blanks=[raster(i,f'sheet-{i}') for i in range(3)];cls.blank=cls.blanks[0]
         out=Path(__file__).resolve().parent.parent/'artifacts';out.mkdir(exist_ok=True)
         (out/'paper-example.pdf').write_bytes(Path('sheet.pdf').read_bytes())
@@ -203,7 +210,7 @@ class PaperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cwd=os.getcwd();os.chdir(tmp)
             try:
-                paper.render(old,engine='pdflatex')
+                paper.render(old,engine=ENGINE)
                 subprocess.run(['pdftoppm','-scale-to-x','1050','-scale-to-y','1485','-png','-singlefile','sheet.pdf','v1'],check=True,stdout=subprocess.DEVNULL)
                 im=Image.open('v1.png').convert('L')
             finally:
@@ -225,6 +232,27 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(out,['45',str(1536*1024**2)])
         self.assertIn('legacy.limit_worker()',script.read_text().split("__main__")[1])
 
+    def test_tex_source_is_ascii_and_the_qr_is_drawn(self):
+        """Production compiles with Tectonic (XeTeX), tests with pdflatex. Raw
+        non-ASCII characters print differently in the two (a raw "·" became
+        "ů" and "–" vanished in Tectonic), and an embedded QR PNG came out as
+        bare outlines there. So: ASCII source, QR as vector squares."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd=os.getcwd();os.chdir(tmp)
+            try:
+                paper.render(self.doc,engine=ENGINE)
+                tex=Path('sheet.tex').read_text()
+            finally:
+                os.chdir(cwd)
+        bad=sorted({c for c in tex if ord(c)>127})
+        self.assertEqual(bad,[],'non-ASCII characters in the TeX source')
+        self.assertNotIn('includegraphics',tex)
+        self.assertNotIn('imported',tex)
+        self.assertIn(r'Zo{\"e}',tex)
+        self.assertIn(r'\textperiodcentered{}',tex)
+        self.assertIn('28 Dec -- 3 Jan',tex)
+        self.assertEqual(paper.tex_escape('Kim 🌸 Straße'),r'Kim Stra{\ss}e')
+
     def test_revision_mismatch(self):
         self.assertIn('error',paper.scan(encoded(self.blank),dict(self.doc,revision='000000000000')))
 
@@ -243,7 +271,7 @@ class PaperTests(unittest.TestCase):
             # Without a QR read, the scanner falls back to these positions.
             self.assertEqual(page['fiducials'],paper.V2_FIDUCIALS)
             self.assertEqual(page['qr_center'],paper.V2_QR)
-        paper.render(doc,engine='pdflatex');im=raster(0,'actual')
+        paper.render(doc,engine=ENGINE);im=raster(0,'actual')
         self.assertEqual(paper.scan(encoded(im),doc).get('marks'),[])
         row=doc['pages'][0]['rows'][0]
         pen_x(im,next(f for f in row['fields'] if f['kind']==row['start']))
