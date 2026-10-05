@@ -77,6 +77,21 @@ def tick_document():
     return dict(layout_version=2,id='fedcba9876543210fedcba9876543210',revision='0123456789ab',pages=[page])
 
 
+def colours(pdf):
+    """Every colour a PDF's pages set: (operator, values) — only DeviceGray
+    0 and 1 (solid black, white) for a printer-friendly sheet."""
+    import re,zlib
+    found=set()
+    for m in re.finditer(rb'stream\r?\n(.*?)\r?\nendstream',pdf,re.S):
+        try: content=zlib.decompress(m.group(1))
+        except zlib.error: continue
+        # Page content is text; embedded fonts (binary) are not drawing.
+        if sum(b>127 for b in content)>len(content)//20: continue
+        for values,op in re.findall(rb'((?:-?[\d.]+\s+){1,4})(rg|RG|g|G|k|K|sc|SC|scn|SCN)\b',content):
+            found.add((op.decode(),tuple(float(v) for v in values.split())))
+    return found
+
+
 def encoded(im,jpeg=False):
     b=io.BytesIO();im.save(b,format='JPEG' if jpeg else 'PNG',**({'quality':78} if jpeg else {}));return b.getvalue()
 
@@ -333,6 +348,12 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(out,['45',str(1536*1024**2)])
         self.assertIn('legacy.limit_worker()',script.read_text().split("__main__")[1])
 
+    def test_printer_friendly_only_solid_black_and_white(self):
+        """No colour and no grey anywhere: a weak printer renders those as a
+        pale dot screen (and fine grey lines not at all)."""
+        self.assertLessEqual(colours(Path('sheet.pdf').read_bytes()),
+                             {(op,(v,)) for op in ('g','G') for v in (0.,1.)})
+
     def test_tex_source_is_ascii_and_the_qr_is_drawn(self):
         """Production compiles with Tectonic (XeTeX), tests with pdflatex. Raw
         non-ASCII characters print differently in the two (a raw "·" became
@@ -430,6 +451,8 @@ class TickSheetTests(unittest.TestCase):
 
     def test_ascii_source_and_no_raster_images(self):
         self.assertTrue(Path('sheet.tex').read_text().isascii())
+        self.assertLessEqual(colours(Path('sheet.pdf').read_bytes()),
+                             {(op,(v,)) for op in ('g','G') for v in (0.,1.)})
         images=subprocess.run(['pdfimages','-list','sheet.pdf'],capture_output=True,text=True).stdout
         self.assertEqual(len(images.splitlines()),2,images)
 
@@ -493,6 +516,8 @@ class ViewTests(unittest.TestCase):
                 self.assertEqual(paper.scan(encoded(im)),{})
                 self.assertEqual(paper.scan(encoded(im),doc),{})
             self.assertTrue(Path('sheet.tex').read_text().isascii())
+            self.assertLessEqual(colours(Path('sheet.pdf').read_bytes()),
+                                 {(op,(v,)) for op in ('g','G') for v in (0.,1.)})
             out=Path(__file__).resolve().parent.parent/'artifacts';out.mkdir(exist_ok=True)
             (out/f'paper-view-{name}.pdf').write_bytes(Path('sheet.pdf').read_bytes())
         finally:os.chdir(old)

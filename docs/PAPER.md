@@ -40,8 +40,8 @@ tick; on a days sheet a different day is a conflict.
 
 `!plan pdf view [next] [N] [group]` prints the same pages as `!plan pdf`
 (each group in its style, as many weeks) with nothing to tick: no boxes, no
-QR code, no corner targets. On a days page the days a duty may be done are
-shaded instead. The header says "CLEANING PLAN · VIEW ONLY, NOT FOR
+QR code, no corner targets. On a days page a solid bar runs across the days
+a duty may be done instead (nothing that looks like a box to tick). The header says "CLEANING PLAN · VIEW ONLY, NOT FOR
 TICKING", and a framed note at the bottom says it is not the sheet to tick
 and to use the plan with boxes or `!done`. Its manifest has `view_only` and
 is not stored: a photo of a view has no QR code to identify and is ignored.
@@ -113,10 +113,12 @@ The snapshot is the same domain projection used by Matrix and iCal. History PDFs
 still use the existing compact renderer over that snapshot.
 
 The sheet is a table in the style of the history PDF: week badges (one per
-week, centred across its rows), strong rules between weeks and dotted ones
-between a week's rows, columns *Week · When (· task) · Who · Mon … Sun*,
-weekend columns lightly shaded, a calm teal accent and Helvetica. Everything
-stays readable in black and white. Each page belongs to one group and holds up
+week, centred across its rows), strong rules between weeks and dashed ones
+between a week's rows, columns *Week · When (· task) · Who · Mon … Sun*, and
+Helvetica. It is printer-friendly: everything is solid black on white
+(DeviceGray 0 — no colour, no grey, no shading; a test checks the PDF), so a
+cheap or low-toner printer prints it crisply instead of as a pale dot screen.
+Lines and text are told apart by weight and size. Each page belongs to one group and holds up
 to **21 duties**. Without a number of weeks, `!plan pdf` takes as many whole
 weeks per group as fill one page. Longer plans are split evenly across pages
 and only between weeks (22 rows make 12 + 10, not 21 + 1). Rows are 11 mm high

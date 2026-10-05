@@ -673,7 +673,7 @@ def footer(tex, text, doc, page, how):
 
 def view_footer(tex, text, doc, page):
     """A view's footer: framed, that this is not the sheet to tick."""
-    tex.append(r'\draw[accent,line width=.5mm,rounded corners=1.5mm,fill=accent!6] (14,264) rectangle (196,277);')
+    tex.append(r'\draw[accent,line width=.5mm,rounded corners=1.5mm,fill=white] (14,264) rectangle (196,277);')
     text(19, 270.5, r'\color{accent}\faEye', 14, 8, True, anchor='west')
     text(28, 270.5, r'\textbf{Only to look at: this is not the sheet to tick.}\newline '
          r'Mark your duty with an X on the cleaning plan with boxes, or with !done in Matrix.',
@@ -719,7 +719,7 @@ def render_ticks(tex, text, page, rows, top, first_top, half, bottom):
             weeks.append([row])
     for members in weeks:
         y = members[0]['y']
-        tex.append(fr'\draw[black!55,line width=.35mm] (14,{y-half}) -- (196,{y-half});')
+        tex.append(fr'\draw[black,line width=.35mm] (14,{y-half}) -- (196,{y-half});')
         tex.append(fr"\node[circle,draw=accent,line width=.3mm,inner sep=0,minimum size=6mm,"
                    fr"font=\small\bfseries,text=accent] at (20.5,{y}) {{{members[0]['week']}}};")
         start = min(datetime.date.fromisoformat(r['start']) for r in members)
@@ -746,7 +746,7 @@ def render_ticks(tex, text, page, rows, top, first_top, half, bottom):
                 tex.append(fr'\draw[black,line width={outline(field["size"])[0]}mm,fill=white] ({fx-h},{fy-h}) rectangle ({fx+h},{fy+h});')
     tex.append(fr'\draw[accent,line width=.5mm] (14,{bottom}) -- (196,{bottom});')
     for x in [14, TICK_WHEN_X, TICK_COLUMNS_X]+[c['right'] for c in columns]:
-        tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')
+        tex.append(fr'\draw[black,line width=.2mm] ({x},{top}) -- ({x},{bottom});')
 
 
 def render(doc, engine='tectonic'):
@@ -756,8 +756,12 @@ def render(doc, engine='tectonic'):
            r'\usepackage{graphicx,tikz,fontawesome5}', r'\usepackage[T1]{fontenc}',
            r'\usepackage[utf8]{inputenc}', r'\usepackage{lmodern,helvet}',
            r'\renewcommand{\familydefault}{\sfdefault}', r'\pagestyle{empty}',
-           r'\definecolor{accent}{HTML}{2F6F73}', r'\definecolor{ink}{HTML}{253238}',
-           r'\definecolor{muted}{HTML}{6B7785}',
+           # Printer-friendly: everything solid black (DeviceGray 0), no
+           # colour and no grey. A cheap or low-toner printer renders a grey
+           # or a dark colour as a pale dot screen; dotted grey lines vanish.
+           # Lines and text are told apart by weight and size instead.
+           r'\definecolor{accent}{gray}{0}', r'\definecolor{ink}{gray}{0}',
+           r'\definecolor{muted}{gray}{0}',
            # Scale a box down to #1 if it is wider (names, slot names).
            r'\newcommand{\fit}[2]{\sbox0{#2}\ifdim\wd0>#1\resizebox{#1}{!}{\usebox0}\else\usebox0\fi}',
            r'\begin{document}']
@@ -781,18 +785,14 @@ def render(doc, engine='tectonic'):
         first_top = ys[0]-half if rows else 31
         top = first_top-(8 if tick else 6)          # the column titles' row
         bottom = ys[-1]+half if rows else first_top
-        # Weekend columns, lightly shaded behind everything (never under a
-        # box's surroundings the scanner reads: those stay within 3.6mm).
-        for day in (5, 6) if not tick else ():
-            cx = DAY_X+day*DAY_STEP
-            tex.append(fr'\fill[accent!7] ({cx-DAY_STEP/2},{top}) rectangle ({cx+DAY_STEP/2},{bottom});')
-        # A view has nothing to tick: the days a duty may be done are shaded
-        # instead of boxed.
+        # A view has nothing to tick: a solid bar across the days a duty may
+        # be done (like a calendar's), nothing that looks like a box.
         for row in rows if view and not tick else []:
-            for day in days_of(row) if not row.get('status') else []:
-                cx = DAY_X+day.weekday()*DAY_STEP
-                tex.append(fr'\fill[accent!22,rounded corners=.6mm] ({cx-DAY_STEP/2+1.2},{row["y"]-half+1.2}) '
-                           fr'rectangle ({cx+DAY_STEP/2-1.2},{row["y"]+half-1.2});')
+            days = list(days_of(row)) if not row.get('status') else []
+            if days:
+                left = DAY_X+days[0].weekday()*DAY_STEP-DAY_STEP/2+2
+                right = DAY_X+days[-1].weekday()*DAY_STEP+DAY_STEP/2-2
+                tex.append(fr'\fill[black,rounded corners=1.2mm] ({left},{row["y"]-1.2}) rectangle ({right},{row["y"]+1.2});')
 
         # The scanner's marks: corner targets and the QR code. A view has
         # neither, so a photo of it is never taken for a sheet.
@@ -841,12 +841,12 @@ def render(doc, engine='tectonic'):
                 groups.append((key, [row]))
         for (_, week), members in groups:
             rule = members[0]['y']-half
-            tex.append(fr'\draw[black!55,line width=.35mm] (14,{rule}) -- (196,{rule});')
+            tex.append(fr'\draw[black,line width=.35mm] (14,{rule}) -- (196,{rule});')
             centre = (members[0]['y']+members[-1]['y'])/2
             tex.append(fr"\node[circle,draw=accent,line width=.3mm,inner sep=0,minimum size=6mm,"
                        fr"font=\small\bfseries,text=accent] at (20.5,{centre}) {{{week}}};")
             for row in members[1:]:
-                tex.append(fr'\draw[black!40,line width=.15mm,dotted] (27,{row["y"]-half}) -- (196,{row["y"]-half});')
+                tex.append(fr'\draw[black,line width=.2mm,dash pattern=on 1mm off 1mm] (27,{row["y"]-half}) -- (196,{row["y"]-half});')
         for row in rows:
             y = row['y']
             start = datetime.date.fromisoformat(row['start'])
@@ -865,11 +865,11 @@ def render(doc, engine='tectonic'):
             if row['status']:
                 text(109, y, row['status'], 9, 85, anchor='west', color='muted')
             for field in row['fields']:
-                fx, fy, half = field['x'], field['y'], field['size']/2
-                tex.append(fr'\draw[black,line width={outline(field["size"])[0]}mm,fill=white] ({fx-half},{fy-half}) rectangle ({fx+half},{fy+half});')
+                fx, fy, h = field['x'], field['y'], field['size']/2
+                tex.append(fr'\draw[black,line width={outline(field["size"])[0]}mm,fill=white] ({fx-h},{fy-h}) rectangle ({fx+h},{fy+h});')
         tex.append(fr'\draw[accent,line width=.5mm] (14,{bottom}) -- (196,{bottom});')
         for x in (14, 27, 76, 105, 196):
-            tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')
+            tex.append(fr'\draw[black,line width=.2mm] ({x},{top}) -- ({x},{bottom});')
 
         if view:
             view_footer(tex, text, doc, page)

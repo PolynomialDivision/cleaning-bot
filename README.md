@@ -350,7 +350,7 @@ both styles:
 
 `!plan pdf view [next] [N] [group]` prints the same plan only to look at —
 for hanging up where nobody ticks: each group's table in its style, without
-boxes (on a days plan the days a duty may be done are shaded), without QR
+boxes (on a days plan a solid bar across the days a duty may be done), without QR
 code or corner targets, and with "View only, not for ticking" at the top and
 a framed note at the bottom pointing to the plan with boxes or `!done`. A
 photo of it is ignored.
