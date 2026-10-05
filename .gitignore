@@ -1,3 +1,6 @@
 target/
 
 __pycache__/
+
+# Example PDFs/images the paper tests write on every run (see docs/PAPER.md).
+artifacts/
