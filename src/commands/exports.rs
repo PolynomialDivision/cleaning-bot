@@ -97,7 +97,7 @@ pub(crate) async fn cmd_pdf(
         refresh_display_names(ctx, &main).await;
     }
 
-    let (tex, file_name) = {
+    let (document, history_tex, file_name) = {
         let state = ctx.state.lock().await;
         let (y, w) = current_iso_week();
         let mut snapshot = if history {
@@ -120,7 +120,10 @@ pub(crate) async fn cmd_pdf(
                 }
             }
         }
-        let tex = crate::pdf::render_tex(&snapshot);
+        if snapshot.is_empty() {
+            return Ok(Some(format::mentionify("📄 No duties in this date range.")));
+        }
+        let document = crate::paper::document(&state, &snapshot);
         // Build filename: cleaning-plan-KW{first}-KW{last}.pdf
         let weeks_range = {
             let first = snapshot.assignments.first();
@@ -141,11 +144,20 @@ pub(crate) async fn cmd_pdf(
             ),
             None => format!("cleaning-plan-{weeks_range}.pdf"),
         };
-        (tex, file_name)
+        (
+            document,
+            history.then(|| crate::pdf::render_tex(&snapshot)),
+            file_name,
+        )
     };
 
     // Render .tex → PDF via tectonic.
-    let pdf_bytes = match crate::pdf_renderer::tex_to_pdf(&tex).await {
+    let rendered = if let Some(tex) = history_tex {
+        crate::pdf_renderer::tex_to_pdf(&tex).await
+    } else {
+        crate::paper::pdf(&document).await
+    };
+    let pdf_bytes = match rendered {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("tectonic render failed: {e}");
@@ -154,6 +166,13 @@ pub(crate) async fn cmd_pdf(
             )));
         }
     };
+
+    // Persist mapping before a scannable PDF can leave the bot.
+    if !history {
+        let mut state = ctx.state.lock().await;
+        state.paper_documents.insert(document.id.clone(), document);
+        state.save(&ctx.state_path).await?;
+    }
 
     let mime: mime::Mime = "application/pdf".parse().expect("valid mime");
     room.send_attachment(

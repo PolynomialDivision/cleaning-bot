@@ -111,6 +111,7 @@ fn current_open_assignment_blocks_removal_until_completed() {
 
     state
         .apply_event(DomainEvent::CleaningCompleted {
+            completed_on: None,
             group_id: group_id.clone(),
             slot_id: None,
             person_id: first_id.clone(),
@@ -1157,6 +1158,7 @@ async fn a_completion_recorded_after_import_still_mentions_the_imported_assignee
         let mut state = ctx.state.lock().await;
         state
             .apply_event(DomainEvent::CleaningCompleted {
+                completed_on: None,
                 group_id: group_id.clone(),
                 slot_id: None,
                 person_id: second_id.clone(),
@@ -1418,6 +1420,7 @@ async fn import_replace_is_idempotent_and_refuses_to_touch_a_completed_week() {
             .unwrap();
         state
             .apply_event(DomainEvent::CleaningCompleted {
+                completed_on: None,
                 group_id: group_id.clone(),
                 slot_id: None,
                 person_id: first_id.clone(),
@@ -1828,6 +1831,7 @@ async fn join_replanning_leaves_history_completions_and_manual_weeks_alone() {
     let (by, bw) = add_weeks(y, w, -1);
     state
         .apply_event(DomainEvent::CleaningCompleted {
+            completed_on: None,
             group_id: group_id.clone(),
             slot_id: None,
             person_id: ids[1].clone(),
@@ -2139,6 +2143,7 @@ async fn leaving_after_their_turn_keeps_it_and_the_rest_of_the_round() {
     let (y, w) = current_iso_week();
     state
         .apply_event(DomainEvent::CleaningCompleted {
+            completed_on: None,
             group_id: gid.clone(),
             slot_id: None,
             person_id: anna.clone(),
@@ -2514,6 +2519,7 @@ async fn linkmatrix_repairs_a_corrupted_matrix_id_and_merges_the_unused_stub() {
         source: Default::default(),
     });
     state.completions.push(crate::state::Completion {
+        completed_on: None,
         group_id: group_id.clone(),
         slot_id: None,
         completed_by_id: real_id.clone(),
@@ -2641,6 +2647,7 @@ async fn linkmatrix_refuses_to_guess_between_two_real_people_with_the_same_name(
     state.cleaning_groups.push(group);
     let (year, week) = current_iso_week();
     state.completions.push(crate::state::Completion {
+        completed_on: None,
         group_id: group_id.clone(),
         slot_id: None,
         completed_by_id: dup_b_id.clone(),
@@ -3973,6 +3980,7 @@ async fn status_shows_who_actually_cleaned_and_skips() {
         // Bob cleans Alice's slot.
         state
             .apply_event(DomainEvent::CleaningCompleted {
+                completed_on: None,
                 group_id: group_id.clone(),
                 slot_id: Some("s0".into()),
                 person_id: bob_id.clone(),
@@ -4300,6 +4308,7 @@ fn personal_stats_count_own_turns_not_every_week_of_the_group() {
     for (back, by) in [(4, &alice_id), (2, &alice_id), (1, &bob_id)] {
         let (cy, cw) = add_weeks(y, w, -back);
         state.completions.push(crate::state::Completion {
+            completed_on: None,
             group_id: group_id.clone(),
             slot_id: None,
             completed_by_id: by.clone(),
@@ -5563,6 +5572,7 @@ async fn people_who_used_the_bot_before_count_as_welcomed() {
         .clone();
     state
         .apply_event(DomainEvent::CleaningCompleted {
+            completed_on: None,
             group_id: floor,
             slot_id: None,
             person_id: alice.clone(),
@@ -5789,6 +5799,7 @@ fn shared_snapshot_keeps_completion_author_dates_windows_and_imports_in_exports(
         .unwrap()
         .with_timezone(&Utc);
     state.completions.push(crate::state::Completion {
+        completed_on: None,
         group_id: bathroom.id.clone(),
         slot_id: None,
         completed_by_id: ids[2].clone(),
@@ -5800,6 +5811,7 @@ fn shared_snapshot_keeps_completion_author_dates_windows_and_imports_in_exports(
         skipped: false,
     });
     state.completions.push(crate::state::Completion {
+        completed_on: None,
         group_id: kitchen.id.clone(),
         slot_id: None,
         completed_by_id: ids[0].clone(),
@@ -6235,6 +6247,7 @@ async fn an_old_done_reaction_never_takes_back_a_newer_done_mark() {
         .clone();
     state
         .apply_event(DomainEvent::CleaningCompleted {
+            completed_on: None,
             group_id: group_id.clone(),
             slot_id,
             person_id: alice_id,

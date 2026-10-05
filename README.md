@@ -316,3 +316,12 @@ forget earlier rhythm versions.
 `cargo run --bin state_debug -- state.json` prints a quick report of a state
 file, but its schedule is a simple guess that ignores rhythms and slot
 assignments — use `!plan` and `!validate` for the real thing.
+
+## Paper plans and photos
+
+Current/upcoming `!plan pdf` exports are printable, scannable forms. Fill Done +
+one day (or Skipped), then send a full-page image to the cleaning room or an
+authorized encrypted DM. The bot previews changes and asks for ✅ Apply / ❌ Cancel.
+Nothing is applied before confirmation. Residents can record their own duties;
+administrators can confirm a shared sheet. `!plan pdf history` remains a compact
+read-only report. See [paper workflow, dependencies and tests](docs/PAPER.md).

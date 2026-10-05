@@ -28,6 +28,9 @@ pub struct Completion {
     /// Shift within the week (see `rhythm`); 0 for whole-week rhythms.
     #[serde(default)]
     pub shift: u8,
+    /// Date selected on paper, separate from the actual recording timestamp.
+    #[serde(default)]
+    pub completed_on: Option<NaiveDate>,
     pub completed_at: DateTime<Utc>,
     #[serde(default)]
     pub skipped: bool,
@@ -385,6 +388,10 @@ impl RecentIds {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct State {
+    #[serde(default)]
+    pub paper_documents: HashMap<String, crate::paper::Document>,
+    #[serde(default)]
+    pub paper_scans: HashMap<String, crate::paper::Proposal>,
     #[serde(default)]
     pub persons: Vec<Person>,
     #[serde(default)]
@@ -882,6 +889,7 @@ impl State {
 
             // ── Cleaning ──────────────────────────────────────────────────────
             E::CleaningCompleted {
+                completed_on,
                 group_id,
                 slot_id,
                 person_id,
@@ -912,6 +920,7 @@ impl State {
                     iso_year: *iso_year,
                     iso_week: *iso_week,
                     shift: *shift,
+                    completed_on: *completed_on,
                     completed_at: Utc::now(),
                     skipped: false,
                 });
@@ -958,6 +967,7 @@ impl State {
                             continue;
                         }
                         self.completions.push(Completion {
+                            completed_on: None,
                             group_id: group_id.clone(),
                             slot_id: sid.clone(),
                             completed_by_id: skipper_id.clone(),
@@ -1091,6 +1101,7 @@ impl State {
     }
 
     pub async fn save(&mut self, path: &Path) -> Result<()> {
+        crate::paper::prune(self);
         if let Some(key) = &self.active_command {
             self.processed_commands.insert(key.clone());
         }
@@ -1627,6 +1638,7 @@ mod tests {
         assert!(state.belongs_in_weekly_plan(&group, year, week));
 
         state.completions.push(Completion {
+            completed_on: None,
             group_id: group.id.clone(),
             slot_id: None,
             completed_by_id: "p1".into(),

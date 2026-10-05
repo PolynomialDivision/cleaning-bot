@@ -21,6 +21,7 @@ const PREAMBLE: &str = r#"\documentclass[a4paper]{article}
 \usepackage[table]{xcolor}
 \usepackage{arydshln}
 \usepackage{tikz}
+\usepackage{graphicx}
 \usepackage{fontawesome5}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}

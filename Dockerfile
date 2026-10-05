@@ -70,7 +70,7 @@ RUN tectonic --outdir /tmp /tmp/tex-warmup.tex \
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libsqlite3-0 \
+    libsqlite3-0 python3 python3-pil python3-numpy libzbar0 qrencode \
     && rm -rf /var/lib/apt/lists/*
 
 # Static musl binary — no extra runtime deps needed.

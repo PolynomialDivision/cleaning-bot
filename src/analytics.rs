@@ -153,6 +153,8 @@ pub enum DomainEvent {
 
     // ── Cleaning operations ───────────────────────────────────────────────────
     CleaningCompleted {
+        #[serde(default)]
+        completed_on: Option<chrono::NaiveDate>,
         group_id: GroupId,
         /// `Some` for multi-slot groups; `None` for single-slot groups.
         #[serde(default)]
@@ -280,6 +282,7 @@ pub fn backfill_events(state: &State) -> Vec<LoggedEvent> {
             }
         } else {
             DomainEvent::CleaningCompleted {
+                completed_on: c.completed_on,
                 group_id: c.group_id.clone(),
                 slot_id: c.slot_id.clone(),
                 person_id: c.completed_by_id.clone(),
@@ -1017,6 +1020,7 @@ mod tests {
         st.cleaning_groups.push(g);
 
         st.completions.push(Completion {
+            completed_on: None,
             group_id: gid.clone(),
             slot_id: None,
             completed_by_id: pid.clone(),
@@ -1060,6 +1064,7 @@ mod tests {
         // Each person cleaned once.
         for (pid, week) in [(&pid1, 1u32), (&pid2, 2u32)] {
             st.completions.push(Completion {
+                completed_on: None,
                 group_id: gid.clone(),
                 slot_id: None,
                 completed_by_id: pid.clone(),

@@ -1265,6 +1265,7 @@ pub(crate) fn mark_duties_done(
             .map(|p| vec![p.id.clone()])
             .unwrap_or_default();
         state.apply_event(DomainEvent::CleaningCompleted {
+            completed_on: None,
             group_id: duty.group.id.clone(),
             slot_id: duty.group.slots.get(duty.slot_index).map(|s| s.id.clone()),
             person_id: person_id.clone(),

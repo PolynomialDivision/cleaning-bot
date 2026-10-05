@@ -306,9 +306,11 @@ pub fn build_schedule_from(state: &State, first: (i32, u32), weeks: usize) -> Sc
                     completed_by: completion
                         .and_then(|c| state.person_by_id(&c.completed_by_id))
                         .map(|p| p.display_name.clone()),
-                    completed_at: completion
-                        .filter(|c| !c.skipped)
-                        .map(|c| crate::state::local_time(c.completed_at).date_naive()),
+                    completed_at: completion.filter(|c| !c.skipped).map(|c| {
+                        c.completed_on.unwrap_or_else(|| {
+                            crate::state::local_time(c.completed_at).date_naive()
+                        })
+                    }),
                 });
             }
         }

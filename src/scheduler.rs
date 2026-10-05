@@ -1203,6 +1203,7 @@ mod tests {
         // Alice is done: she moves to the ✅ line, as a pill that pings nobody.
         state
             .apply_event(crate::analytics::DomainEvent::CleaningCompleted {
+                completed_on: None,
                 group_id: floor_id.clone(),
                 slot_id: Some(state.cleaning_groups[0].slots[0].id.clone()),
                 person_id: alice_id,
@@ -1243,6 +1244,7 @@ mod tests {
             for slot_id in slots {
                 state
                     .apply_event(crate::analytics::DomainEvent::CleaningCompleted {
+                        completed_on: None,
                         group_id: group_id.clone(),
                         slot_id,
                         person_id: state.persons[2].id.clone(),
@@ -1366,6 +1368,7 @@ mod tests {
             source: Default::default(),
         });
         state.completions.push(crate::state::Completion {
+            completed_on: None,
             group_id: gid.clone(),
             slot_id: None,
             completed_by_id: bid,
@@ -1442,6 +1445,7 @@ mod tests {
             source: Default::default(),
         });
         state.completions.push(crate::state::Completion {
+            completed_on: None,
             group_id: gid.clone(),
             slot_id: None,
             completed_by_id: aid,
@@ -1624,6 +1628,7 @@ mod tests {
 
         // Dave marks his task done — this is what triggers the edit/refresh.
         state.completions.push(crate::state::Completion {
+            completed_on: None,
             group_id: gid.clone(),
             slot_id: None,
             completed_by_id: did,
@@ -1719,6 +1724,7 @@ mod tests {
             });
         }
         state.completions.push(crate::state::Completion {
+            completed_on: None,
             group_id: floor.id.clone(),
             slot_id: Some(floor.slots[0].id.clone()),
             completed_by_id: alice.id.clone(),
@@ -1753,6 +1759,7 @@ mod tests {
         for (group_id, slot_id, skipped) in [(hall_id, None, true), (floor_id, Some(colbe), false)]
         {
             state.completions.push(crate::state::Completion {
+                completed_on: None,
                 group_id,
                 slot_id,
                 completed_by_id: bob_id.clone(),
@@ -1959,6 +1966,7 @@ mod tests {
         let bid = state.persons[0].id.clone();
         let gid = state.cleaning_groups[0].id.clone();
         state.completions.push(crate::state::Completion {
+            completed_on: None,
             group_id: gid,
             slot_id: None,
             completed_by_id: bid,

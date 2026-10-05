@@ -39,6 +39,7 @@ mod help_board;
 mod http;
 mod ical;
 mod onboarding;
+mod paper;
 mod pdf;
 mod pdf_renderer;
 mod private;
@@ -252,6 +253,13 @@ async fn main() -> Result<()> {
                 if matches!(ev.content.relates_to, Some(Relation::Replacement(_))) {
                     return;
                 }
+                if let MessageType::Image(ref image) = ev.content.msgtype {
+                    if let Err(e) = paper::image(&ctx, &room, &ev.sender, &ev.event_id, image).await
+                    {
+                        error!("Paper scan failed: {e}");
+                    }
+                    return;
+                }
                 let MessageType::Text(ref text) = ev.content.msgtype else {
                     return;
                 };
@@ -378,6 +386,18 @@ async fn main() -> Result<()> {
                 let reacted_to = ev.content.relates_to.event_id.to_string();
                 let emoji_key = ev.content.relates_to.key.clone();
                 let sender_mxid = ev.sender.as_str().to_owned();
+
+                match paper::reaction(&ctx, &room, &ev.sender, &reacted_to, &emoji_key).await {
+                    Ok(true) => {
+                        onboarding::consume_tap(&room, &ev.event_id, &bot_user_id).await;
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Paper confirmation failed: {e}");
+                        return;
+                    }
+                    Ok(false) => {}
+                }
 
                 // A first reaction here is a first visit too.
                 if room.room_id() == ctx.room_id {
