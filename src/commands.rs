@@ -469,7 +469,7 @@ fn admin_help_text() -> String {
 !plan reset <group> · redistribute future weeks from the rotation
 !plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
 !plan pdf [next | history] [N] [group] · printable plan (next = from next week)
-!plan pdf style [days | tick] · a box per day, or one tick per duty with the slots side by side
+!plan pdf style [group] days | tick | default · a box per day, or one tick per duty with the slots side by side — for everyone or one group
 
 **Groups**
 !groups <group> · details: rhythm, turn order, slots, rooms, weights

@@ -333,8 +333,11 @@ assignments — use `!plan` and `!validate` for the real thing.
 ## Paper plans and photos
 
 Current/upcoming `!plan pdf` exports are printable, scannable wall plans in
-one of two styles, chosen by an administrator with `!plan pdf style days` or
-`!plan pdf style tick` (`!plan pdf style` shows the current one):
+one of two styles, chosen by an administrator — for every group with
+`!plan pdf style days` or `!plan pdf style tick`, for one group with
+`!plan pdf style <group> tick` (`<group> default`: like everyone again).
+`!plan pdf style` shows what each group prints. One PDF can hold pages of
+both styles:
 
 - **days** (default): one row per duty with a box for each allowed day. Put
   one clear X in the day you cleaned; that day is recorded.

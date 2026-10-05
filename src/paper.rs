@@ -59,6 +59,13 @@ impl Style {
         }
     }
 
+    pub fn name(self) -> &'static str {
+        match self {
+            Style::Days => "days",
+            Style::Tick => "tick",
+        }
+    }
+
     pub fn describe(self) -> &'static str {
         match self {
             Style::Days => "days: a box for each day, the day is recorded",
@@ -71,8 +78,6 @@ impl Style {
 pub struct Document {
     #[serde(default = "legacy_layout")]
     pub layout_version: u8,
-    #[serde(default)]
-    pub style: Style,
     pub id: String,
     pub revision: String,
     pub created: chrono::DateTime<Utc>,
@@ -91,6 +96,9 @@ pub struct Page {
     /// slots), each as a kind and what is left of its name — for the header.
     #[serde(default)]
     pub room_groups: Vec<RoomGroup>,
+    /// Each group has its own style, so each page does.
+    #[serde(default)]
+    pub style: Style,
     /// Tick sheets: the slots (and shifts) side by side, left to right.
     #[serde(default)]
     pub columns: Vec<Column>,
@@ -244,7 +252,6 @@ fn baseline(state: &State, a: &AssignmentInstance) -> String {
     ))
 }
 pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
-    let style = state.paper_style;
     let mut pages: Vec<Page> = Vec::new();
     let mut groups: Vec<&str> = Vec::new();
     for a in &snapshot.assignments {
@@ -258,23 +265,22 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
             .iter()
             .filter(|a| a.group_id == group)
             .collect();
-        match style {
+        match state.paper_style_for(group) {
             Style::Days => days_pages(state, &assignments, &mut pages),
             Style::Tick => tick_pages(state, &assignments, &mut pages),
         }
     }
     Document {
         layout_version: 2,
-        style,
         id: uuid::Uuid::new_v4().simple().to_string(),
-        revision: hash((2, style, &pages))[..12].into(),
+        revision: hash((2, &pages))[..12].into(),
         created: Utc::now(),
         pages,
     }
 }
 
 /// A page of `duties` (all of one group) without rows yet.
-fn page_for(number: usize, duties: &[&AssignmentInstance]) -> Page {
+fn page_for(number: usize, style: Style, duties: &[&AssignmentInstance]) -> Page {
     Page {
         number,
         title: duties[0].group_name.clone(),
@@ -286,6 +292,7 @@ fn page_for(number: usize, duties: &[&AssignmentInstance]) -> Page {
             .collect::<Vec<_>>()
             .join(" · "),
         room_groups: room_groups(duties),
+        style,
         columns: Vec::new(),
         rows: Vec::new(),
         fiducials: FIDUCIALS.to_vec(),
@@ -361,7 +368,7 @@ fn days_pages(state: &State, assignments: &[&AssignmentInstance], pages: &mut Ve
     // page allows.
     let pitch = pitch_for(chunks.iter().map(|c| c.len()).max().unwrap_or(1));
     for chunk in chunks {
-        let mut page = page_for(pages.len(), chunk);
+        let mut page = page_for(pages.len(), Style::Days, chunk);
         for (i, a) in chunk.iter().enumerate() {
             let y = ROWS_TOP + (i as f64 + 0.5) * pitch;
             page.rows.push(duty_row(state, a, y, 0, |id| {
@@ -425,7 +432,7 @@ fn tick_pages(state: &State, assignments: &[&AssignmentInstance], pages: &mut Ve
     let pitch = pitch_for(chunks.iter().map(|c| c.len()).max().unwrap_or(1));
     for chunk in chunks {
         let duties: Vec<&AssignmentInstance> = chunk.iter().flatten().copied().collect();
-        let mut page = page_for(pages.len(), &duties);
+        let mut page = page_for(pages.len(), Style::Tick, &duties);
         page.columns = columns.clone();
         for (i, week) in chunk.iter().enumerate() {
             let y = ROWS_TOP + (i as f64 + 0.5) * pitch;
@@ -462,10 +469,7 @@ pub fn tick_day(start: NaiveDate, end: NaiveDate, today: NaiveDate) -> NaiveDate
 
 /// Give the ticks scanned from a tick sheet their day (see `tick_day`).
 pub fn date_ticks(doc: &Document, page: usize, marks: &mut [Mark], today: NaiveDate) {
-    if doc.style != Style::Tick {
-        return;
-    }
-    let Some(page) = doc.pages.get(page) else {
+    let Some(page) = doc.pages.get(page).filter(|p| p.style == Style::Tick) else {
         return;
     };
     for mark in marks.iter_mut().filter(|m| !m.skipped && m.day.is_none()) {
@@ -541,8 +545,8 @@ fn room(slot: Option<&str>, name: &str) -> RoomLabel {
 /// Keep, for each group, only as many whole weeks as fill one page — what
 /// `!plan pdf` prints when no number of weeks is asked for (a group cleaned
 /// by two slots gets ten weeks, a weekly one-slot group 21). A tick sheet
-/// has one row per week, so it always gets 21.
-pub fn one_page_per_group(snapshot: &mut ScheduleSnapshot, style: Style) {
+/// has one row per week, so a group printed that way always gets 21.
+pub fn one_page_per_group(snapshot: &mut ScheduleSnapshot, state: &State) {
     use std::collections::{HashMap, HashSet};
     let all = std::mem::take(&mut snapshot.assignments);
     let mut rows_in_week: HashMap<(&str, (i32, u32)), usize> = HashMap::new();
@@ -550,7 +554,7 @@ pub fn one_page_per_group(snapshot: &mut ScheduleSnapshot, style: Style) {
         let rows = rows_in_week
             .entry((&a.group_id, (a.iso_year, a.iso_week)))
             .or_default();
-        *rows = match style {
+        *rows = match state.paper_style_for(&a.group_id) {
             Style::Days => *rows + 1,
             Style::Tick => 1,
         };
@@ -1310,7 +1314,7 @@ mod tests {
     fn by_default_each_group_fills_one_page() {
         let s = upper_floor();
         let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
-        one_page_per_group(&mut snapshot, Style::Days);
+        one_page_per_group(&mut snapshot, &s);
         let weeks: std::collections::BTreeSet<_> = snapshot
             .assignments
             .iter()
@@ -1332,9 +1336,10 @@ mod tests {
     #[test]
     fn a_tick_sheet_puts_the_slots_side_by_side() {
         let mut s = upper_floor();
-        s.paper_style = Style::Tick;
+        let group = s.cleaning_groups[0].id.clone();
+        s.paper_styles.insert(group.clone(), Style::Tick);
         let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
-        one_page_per_group(&mut snapshot, s.paper_style);
+        one_page_per_group(&mut snapshot, &s);
         // One line a week: 21 weeks of four duties on one page.
         assert_eq!(snapshot.assignments.len(), 4 * ROWS_PER_PAGE);
         let doc = document(&s, &snapshot);
@@ -1342,8 +1347,8 @@ mod tests {
         if let Ok(path) = std::env::var("PAPER_TICK_FIXTURE") {
             std::fs::write(path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
         }
-        assert_eq!(doc.style, Style::Tick);
         assert_eq!(doc.pages.len(), 1);
+        assert_eq!(doc.pages[0].style, Style::Tick);
         let page = &doc.pages[0];
         let titles: Vec<_> = page.columns.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(titles, ["Stairs", "Hall", "Stairs", "Hall"]);
@@ -1367,8 +1372,55 @@ mod tests {
             }
         }
         // Neither the style nor the columns are the same sheet as days.
-        s.paper_style = Style::Days;
+        s.paper_styles.remove(&group);
         assert_ne!(document(&s, &snapshot).revision, doc.revision);
+    }
+
+    #[test]
+    fn groups_print_in_their_own_style_in_one_document() {
+        let mut s = upper_floor();
+        let mut bath = CleaningGroup::new("Bathroom");
+        bath.member_ids = s.cleaning_groups[0].member_ids.clone();
+        let bath_id = bath.id.clone();
+        s.cleaning_groups.push(bath);
+        s.paper_styles.insert(bath_id.clone(), Style::Tick);
+        let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
+        one_page_per_group(&mut snapshot, &s);
+        let weeks = |group: &str| {
+            snapshot
+                .assignments
+                .iter()
+                .filter(|a| a.group_id == group)
+                .map(|a| (a.iso_year, a.iso_week))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+        // Upper Floor by days: five weeks of four rows; Bathroom ticked: 21.
+        assert_eq!(weeks(&s.cleaning_groups[0].id), 5);
+        assert_eq!(weeks(&bath_id), ROWS_PER_PAGE);
+        let doc = document(&s, &snapshot);
+        let styles: Vec<_> = doc.pages.iter().map(|p| p.style).collect();
+        assert_eq!(styles, [Style::Days, Style::Tick]);
+        assert!(doc.pages[0].columns.is_empty());
+        assert_eq!(doc.pages[1].columns.len(), 1);
+        // Only the tick page's marks get a day from the bot.
+        let mark = |page: usize| Mark {
+            row: doc.pages[page].rows[0].id.clone(),
+            skipped: false,
+            day: None,
+        };
+        let today = NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        let mut days = [mark(0)];
+        date_ticks(&doc, 0, &mut days, today);
+        assert_eq!(days[0].day, None);
+        let mut ticks = [mark(1)];
+        date_ticks(&doc, 1, &mut ticks, today);
+        let row = &doc.pages[1].rows[0];
+        assert_eq!(ticks[0].day, Some(tick_day(row.start, row.end, today)));
+        // A group's own style goes with the group.
+        s.apply_event(DomainEvent::GroupDeleted { group_id: bath_id })
+            .unwrap();
+        assert!(s.paper_styles.is_empty());
     }
 
     #[test]

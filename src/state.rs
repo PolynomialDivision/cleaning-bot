@@ -392,9 +392,13 @@ pub struct State {
     pub paper_documents: HashMap<String, crate::paper::Document>,
     #[serde(default)]
     pub paper_scans: HashMap<String, crate::paper::Proposal>,
-    /// Which printable plan `!plan pdf` makes (`!plan pdf style`).
+    /// Which printable plan `!plan pdf` makes for groups without their own
+    /// (`!plan pdf style`).
     #[serde(default)]
     pub paper_style: crate::paper::Style,
+    /// Groups with their own printable plan (`!plan pdf style <group> …`).
+    #[serde(default)]
+    pub paper_styles: HashMap<GroupId, crate::paper::Style>,
     #[serde(default)]
     pub persons: Vec<Person>,
     #[serde(default)]
@@ -563,6 +567,7 @@ impl State {
                 // history, absences, swaps and reminder bookkeeping go with it
                 // (`!groups disable` is the way to keep them).
                 self.slot_assignments.retain(|a| &a.group_id != group_id);
+                self.paper_styles.remove(group_id);
                 self.completions.retain(|c| &c.group_id != group_id);
                 self.absences.retain(|a| &a.group_id != group_id);
                 self.swap_requests.retain(|s| &s.group_id != group_id);
@@ -1169,6 +1174,13 @@ impl State {
             .iter()
             .filter(|p| p.display_name.eq_ignore_ascii_case(query))
             .collect()
+    }
+    /// The printable plan `group_id` gets: its own style, else everyone's.
+    pub fn paper_style_for(&self, group_id: &str) -> crate::paper::Style {
+        self.paper_styles
+            .get(group_id)
+            .copied()
+            .unwrap_or(self.paper_style)
     }
     pub fn group_by_name(&self, name: &str) -> Option<&CleaningGroup> {
         self.cleaning_groups

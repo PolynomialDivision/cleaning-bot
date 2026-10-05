@@ -595,7 +595,7 @@ def render(doc, engine='tectonic'):
                        fr'font=\fontsize{{{size}}}{{{size*1.2:.1f}}}\selectfont,text={color}] at ({x},{y}) {{{value}}};')
 
         rows = page['rows']
-        tick = doc.get('style') == 'tick'
+        tick = page.get('style') == 'tick'
         # Row height from the manifest (earlier sheets used 12.5mm). On a
         # tick sheet a week's duties share one line.
         ys = sorted({r['y'] for r in rows})

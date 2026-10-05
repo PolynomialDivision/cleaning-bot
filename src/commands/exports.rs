@@ -50,44 +50,108 @@ pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
     lines.join("\n")
 }
 
-// ── !plan pdf style [days | tick] ─────────────────────────────────────────
+// ── !plan pdf style [group] [days | tick | default] ──────────────────────
 
-/// Which sheet `!plan pdf` prints: anyone may ask, administrators change it.
-async fn cmd_pdf_style(
+/// Which sheet `!plan pdf` prints, for everyone or one group: anyone may
+/// ask, administrators change it.
+pub(crate) async fn cmd_pdf_style(
     ctx: &BotContext,
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
     use crate::paper::Style;
-    let Some(choice) = args.first() else {
-        let style = ctx.state.lock().await.paper_style;
-        return Ok(Some(format::mentionify(&format!(
-            "📄 Printable plan: {}\n\n\
-             !plan pdf style days · {}\n\
-             !plan pdf style tick · {}",
-            style.describe(),
-            Style::Days.describe(),
-            Style::Tick.describe(),
-        ))));
-    };
-    let Some(style) = Style::parse(choice) else {
-        return Ok(Some(format::mentionify(
-            "📄 Unknown style. Use !plan pdf style days or !plan pdf style tick.",
-        )));
+    const USAGE: &str = "!plan pdf style [group] days | tick | default";
+    if args.is_empty() {
+        let state = ctx.state.lock().await;
+        let mut lines = vec![
+            format!("📄 Printable plan: {}", state.paper_style.describe()),
+            String::new(),
+        ];
+        for g in &state.cleaning_groups {
+            let own = state.paper_styles.get(&g.id);
+            lines.push(format!(
+                "• {}: {}{}",
+                g.name,
+                state.paper_style_for(&g.id).name(),
+                if own.is_some() { "" } else { " (as everyone)" }
+            ));
+        }
+        lines.push(String::new());
+        lines.push(format!("days · {}", Style::Days.describe()));
+        lines.push(format!("tick · {}", Style::Tick.describe()));
+        lines.push(USAGE.into());
+        return Ok(Some(format::mentionify(&lines.join("\n"))));
+    }
+    // The style is the last word; anything before it names a group.
+    let (choice, group) = args.split_last().expect("not empty");
+    let style = match choice.to_lowercase().as_str() {
+        "default" | "reset" if !group.is_empty() => None,
+        word => match Style::parse(word) {
+            Some(style) => Some(style),
+            None => {
+                return Ok(Some(format::mentionify(&format!(
+                    "📄 Unknown style «{choice}». Use {USAGE}."
+                ))))
+            }
+        },
     };
     require_admin(ctx, sender)?;
     let mut state = ctx.state.lock().await;
-    state.paper_style = style;
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format::mentionify(&format!(
-        "📄 Printable plan from now on: {}{}",
-        style.describe(),
+    let reply = if group.is_empty() {
+        let style = style.expect("a style for everyone");
+        state.paper_style = style;
+        let own: Vec<&str> = state
+            .cleaning_groups
+            .iter()
+            .filter(|g| state.paper_styles.contains_key(&g.id))
+            .map(|g| g.name.as_str())
+            .collect();
+        format!(
+            "📄 Printable plan from now on: {}{}{}",
+            style.describe(),
+            if own.is_empty() {
+                String::new()
+            } else {
+                format!("\nExcept for {}, which have their own.", own.join(", "))
+            },
+            tick_note(style)
+        )
+    } else {
+        let name = group.join(" ");
+        let Some(g) = state.group_by_name(&name) else {
+            return Ok(Some(format::mentionify(&group_not_found(&name))));
+        };
+        let (id, name) = (g.id.clone(), g.name.clone());
         match style {
-            Style::Tick => "\nA tick counts as done in the middle of its days \
-                            (Thursday for a whole week), or the day of the photo if that is earlier.",
-            Style::Days => "",
+            Some(style) => {
+                state.paper_styles.insert(id, style);
+                format!(
+                    "📄 Printable plan for {name} from now on: {}{}",
+                    style.describe(),
+                    tick_note(style)
+                )
+            }
+            None => {
+                state.paper_styles.remove(&id);
+                format!(
+                    "📄 {name} prints like everyone again: {}",
+                    state.paper_style.describe()
+                )
+            }
         }
-    ))))
+    };
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format::mentionify(&reply)))
+}
+
+fn tick_note(style: crate::paper::Style) -> &'static str {
+    match style {
+        crate::paper::Style::Tick => {
+            "\nA tick counts as done in the middle of its days \
+             (Thursday for a whole week), or the day of the photo if that is earlier."
+        }
+        crate::paper::Style::Days => "",
+    }
 }
 
 // ── !plan pdf [history | next] [N] [group] ─────────────────────────────────────────────
@@ -179,7 +243,7 @@ pub(crate) async fn cmd_pdf(
             }
         }
         if !history && !weeks_given {
-            crate::paper::one_page_per_group(&mut snapshot, state.paper_style);
+            crate::paper::one_page_per_group(&mut snapshot, &state);
         }
         if snapshot.is_empty() {
             return Ok(Some(format::mentionify("📄 No duties in this date range.")));

@@ -6392,3 +6392,75 @@ async fn the_welcome_links_the_calendar_feed_when_feeds_are_set_up() {
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }
+
+#[tokio::test]
+async fn each_group_can_have_its_own_printable_plan() {
+    use crate::paper::Style;
+    let (mut state, floor, ..) = three_person_state();
+    let mut kitchen = CleaningGroup::new("Upper Kitchen");
+    let kitchen_id = kitchen.id.clone();
+    kitchen.member_ids = state.cleaning_groups[0].member_ids.clone();
+    state.cleaning_groups.push(kitchen);
+    let (ctx, path, admin) = test_context(state);
+    let outsider = OwnedUserId::try_from("@outsider:example.org").unwrap();
+    let text = |m: Option<RoomMessageEventContent>| m.unwrap().body().to_owned();
+
+    // Only administrators change it; a multi-word group name needs no quotes.
+    let error = exports::cmd_pdf_style(&ctx, &outsider, &["Floor", "tick"])
+        .await
+        .unwrap_err();
+    assert!(error.is::<mxbot_common::admin::NotAdmin>());
+    let reply = text(
+        exports::cmd_pdf_style(&ctx, &admin, &["Upper", "Kitchen", "tick"])
+            .await
+            .unwrap(),
+    );
+    assert!(reply.contains("for Upper Kitchen"), "{reply}");
+    {
+        let state = ctx.state.lock().await;
+        assert_eq!(state.paper_style_for(&kitchen_id), Style::Tick);
+        assert_eq!(state.paper_style_for(&floor), Style::Days);
+    }
+    // Everyone else: the group keeps its own.
+    let reply = text(
+        exports::cmd_pdf_style(&ctx, &admin, &["tick"])
+            .await
+            .unwrap(),
+    );
+    assert!(reply.contains("Except for Upper Kitchen"), "{reply}");
+    exports::cmd_pdf_style(&ctx, &admin, &["days"])
+        .await
+        .unwrap();
+    let listing = text(exports::cmd_pdf_style(&ctx, &outsider, &[]).await.unwrap());
+    assert!(listing.contains("Floor: days (as everyone)"), "{listing}");
+    assert!(listing.contains("Upper Kitchen: tick\n"), "{listing}");
+    // Back to everyone's; unknown words and groups are said so.
+    exports::cmd_pdf_style(&ctx, &admin, &["Upper Kitchen", "default"])
+        .await
+        .unwrap();
+    assert!(ctx.state.lock().await.paper_styles.is_empty());
+    let reply = text(
+        exports::cmd_pdf_style(&ctx, &admin, &["fancy"])
+            .await
+            .unwrap(),
+    );
+    assert!(reply.contains("Unknown style"), "{reply}");
+    let reply = text(
+        exports::cmd_pdf_style(&ctx, &admin, &["default"])
+            .await
+            .unwrap(),
+    );
+    assert!(reply.contains("Unknown style"), "{reply}");
+    let reply = text(
+        exports::cmd_pdf_style(&ctx, &admin, &["Basement", "tick"])
+            .await
+            .unwrap(),
+    );
+    assert!(reply.contains("not found"), "{reply}");
+    // Saved.
+    let saved: State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(saved.paper_styles.is_empty());
+    assert_eq!(saved.paper_style, Style::Days);
+
+    let _ = tokio::fs::remove_file(path).await;
+}

@@ -5,16 +5,22 @@ keeps the compact, read-only history report. Nothing is automatically deployed.
 
 ## Two styles
 
-An administrator chooses which sheet `!plan pdf` prints; it is kept in the
-bot state (`paper_style`), and anyone can ask with `!plan pdf style`:
+An administrator chooses which sheet `!plan pdf` prints, for every group or
+for one; it is kept in the bot state (`paper_style` for everyone,
+`paper_styles` per group), and anyone can see what each group prints with
+`!plan pdf style`:
 
 ```
-!plan pdf style days   · a box for each day, the day is recorded (default)
-!plan pdf style tick   · one box per duty, slots side by side; done or not
+!plan pdf style days            · everyone: a box for each day, the day is recorded (default)
+!plan pdf style tick            · everyone: one box per duty, slots side by side; done or not
+!plan pdf style Kitchen tick    · only Kitchen (multi-word names need no quotes)
+!plan pdf style Kitchen default · Kitchen prints like everyone again
 ```
 
-The style is part of each sheet's manifest, so sheets printed before a switch
-keep scanning as what they are.
+A group's own style wins over everyone's, and goes when the group is
+deleted. Each page of the manifest records its style, so one PDF can hold a
+days page for one group and a tick page for another, and sheets printed
+before a switch keep scanning as what they are.
 
 **Tick** sheets have one line per week. The group's slots and shifts stand
 side by side as columns (for a group with two slots cleaned twice a week:

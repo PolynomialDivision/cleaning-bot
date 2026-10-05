@@ -70,11 +70,11 @@ def tick_document():
             rows.append(dict(id=rowid,week=start.isocalendar().week,year=start.isocalendar().year,
                              name=names[(week+column)%len(names)],label='',task=c['title'],column=column,
                              start=str(start),end=str(end),y=y,status=status,fields=fields))
-    page=dict(number=0,title='Upper Floor',rooms='Stairs · Hallway',columns=columns,
+    page=dict(number=0,title='Upper Floor',rooms='Stairs · Hallway',style='tick',columns=columns,
               room_groups=[dict(slot='Stairs',rooms=[dict(kind='toilet',label='3rd')]),
                            dict(slot='Hallway',rooms=[dict(kind='shower',label='')])],
               rows=rows,fiducials=[[10,10],[200,10],[200,287],[10,287]],qr_center=[185,276])
-    return dict(layout_version=2,style='tick',id='fedcba9876543210fedcba9876543210',revision='0123456789ab',pages=[page])
+    return dict(layout_version=2,id='fedcba9876543210fedcba9876543210',revision='0123456789ab',pages=[page])
 
 
 def encoded(im,jpeg=False):
@@ -377,10 +377,22 @@ class TickSheetTests(unittest.TestCase):
         images=subprocess.run(['pdfimages','-list','sheet.pdf'],capture_output=True,text=True).stdout
         self.assertEqual(len(images.splitlines()),2,images)
 
+    def test_one_document_with_a_page_in_each_style(self):
+        # Each group prints in its own style: a days page, then a tick page.
+        days=document()['pages'][0];tick=dict(tick_document()['pages'][0],number=1)
+        doc=dict(tick_document(),pages=[days,tick])
+        os.chdir(tempfile.mkdtemp());paper.render(doc,engine=ENGINE)
+        first,second=raster(0,'mixed-0'),raster(1,'mixed-1')
+        pen_x(first,days['rows'][0]['fields'][0]);pen_x(second,self.field('t-4-2'))
+        self.assertEqual(paper.scan(encoded(first),doc).get('marks'),
+                         [dict(row=days['rows'][0]['id'],skipped=False,day=days['rows'][0]['fields'][0]['kind'])])
+        self.assertEqual(paper.scan(encoded(second),doc).get('marks'),[dict(row='t-4-2',skipped=False,day=None)])
+        os.chdir(self.tmp.name)
+
     @unittest.skipUnless(os.environ.get('PAPER_TICK_FIXTURE'),'set PAPER_TICK_FIXTURE to test the Rust tick manifest')
     def test_actual_rust_tick_layout_round_trip(self):
         doc=json.loads(Path(os.environ['PAPER_TICK_FIXTURE']).read_text())
-        self.assertEqual(doc['style'],'tick')
+        self.assertEqual([p['style'] for p in doc['pages']],['tick'])
         paper.render(doc,engine=ENGINE);im=raster(0,'actual-tick')
         self.assertEqual(paper.scan(encoded(im),doc).get('marks'),[])
         rows=[r for r in doc['pages'][0]['rows'] if r['fields']]
