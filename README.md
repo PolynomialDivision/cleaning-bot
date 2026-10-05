@@ -248,9 +248,10 @@ anyway — but anyone with the link can follow those turns.
 
 ### PDF
 
-`!plan pdf [N] [group]` renders N weeks from this one (default 8); `!plan pdf
-next [N] [group]` N weeks from next week on; `!plan pdf history [N] [group]`
-the last N weeks up to this one. It is made to be printed in black and
+`!plan pdf [N] [group]` renders N weeks from this one — without N, as many
+whole weeks as fill one page per group (ten for a group with two slots, 21
+for a weekly one); `!plan pdf next [N] [group]` the same from next week on;
+`!plan pdf history [N] [group]` the last N weeks up to this one (default 8). It is made to be printed in black and
 white: a heavy frame and heavy rules between weeks, dashed rules between the
 shifts of a week, dotted ones between slots; a week never breaks across
 pages. Open turns have a box to tick by hand, done ones a tick and the date;

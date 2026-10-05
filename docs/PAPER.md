@@ -52,8 +52,12 @@ week, centred across its rows), strong rules between weeks and dotted ones
 between a week's rows, columns *Week · When (· task) · Who · Mon … Sun*,
 weekend columns lightly shaded, a calm teal accent and Helvetica. Everything
 stays readable in black and white. Each page belongs to one group and holds up
-to **16 duties**; longer plans are split evenly across pages and only between
-weeks (18 rows make 10 + 8, not 16 + 2). Each slot and each shift of a week is its own row: a
+to **21 duties**. Without a number of weeks, `!plan pdf` takes as many whole
+weeks per group as fill one page. Longer plans are split evenly across pages
+and only between weeks (22 rows make 12 + 10, not 21 + 1). Rows are 11 mm high
+on a full page and grow up to 14 mm when a group's pages hold fewer, so the
+table fills the page. The header is one line: title, then dates and rooms
+beside it. Each slot and each shift of a week is its own row: a
 twice-weekly group shows two rows per week (`Mon–Tue · 28–29 Sep`,
 `Thu–Fri · 1–2 Oct`), a group with slots shows the slot in bold above the
 dates. Only the days a duty may be done get a box: seven for a weekly duty,
@@ -74,8 +78,8 @@ Layout version 2, in A4 millimetres from the top left (`src/paper.rs` and
 | | |
 |---|---|
 | corner targets | `(10,10)`, `(200,10)`, `(200,287)`, `(10,287)` — 5 mm black square, white disc, black dot; no data |
-| identity QR | one, centred at `(187,277)`, 18 mm including its quiet zone, drawn as vector squares (no image) |
-| rows | centre of row *i* at `58.25 + 12.5·i` |
+| identity QR | one, centred at `(185,276)`, 20 mm including its quiet zone, drawn as vector squares (no image); upper-case payload, so QR's compact alphanumeric mode gives 29×29 modules of 0.54 mm |
+| rows | from 31 mm, 11–14 mm each (per group, see above); centres in the manifest |
 | boxes | 4.8 mm squares on the row centre: Monday at x = 111.5, then every 13 mm (the days share the width right of *Who*) |
 
 The QR contains only:

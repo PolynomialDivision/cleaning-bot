@@ -10,15 +10,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 // Layout v2 (mm from the top left of an A4 page). `scripts/paper.py` reads
-// boxes only where the manifest says; its V2_FIDUCIALS / V2_QR must match.
+// boxes only where each document's manifest says, so sheets printed with
+// earlier v2 positions (16 rows from 58.25mm, QR at 187/277) still scan; its
+// V2_FIDUCIALS must match and its QR search area must cover QR_CENTER.
 /// Corner registration targets.
 const FIDUCIALS: [[f64; 2]; 4] = [[10., 10.], [200., 10.], [200., 287.], [10., 287.]];
-/// Centre of the page's identity QR code.
-const QR_CENTER: [f64; 2] = [187., 277.];
-/// Duties per page, the first row's centre and the distance between rows.
-const ROWS_PER_PAGE: usize = 16;
-const FIRST_ROW: f64 = 58.25;
-const ROW_PITCH: f64 = 12.5;
+/// Centre of the page's identity QR code (20mm with its quiet zone, drawn
+/// by scripts/paper.py).
+const QR_CENTER: [f64; 2] = [185., 276.];
+/// Duties per page and the rows' room: a one-line header leaves the table
+/// from 25mm (column titles) to 262mm, rows from 31mm. Rows are 11mm high
+/// on a full page and taller (up to 14mm) when a group's pages hold fewer,
+/// so a page is filled rather than left half empty.
+pub const ROWS_PER_PAGE: usize = 21;
+const ROWS_TOP: f64 = 31.;
+const ROWS_BOTTOM: f64 = 262.;
+const ROW_PITCH: f64 = 11.;
+const MAX_ROW_PITCH: f64 = 14.;
 /// Box side, Monday's box centre and the distance between days: the seven
 /// day columns share the table's width right of "Who" (105–196mm). There is
 /// no Skip box on paper; skipping is recorded in Matrix.
@@ -182,7 +190,12 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
             .iter()
             .filter(|a| a.group_id == group)
             .collect();
-        for chunk in pages_of(&assignments, |a| (a.iso_year, a.iso_week)) {
+        let chunks = pages_of(&assignments, |a| (a.iso_year, a.iso_week));
+        // One row height for all of the group's pages: as tall as its
+        // fullest page allows.
+        let fullest = chunks.iter().map(|c| c.len()).max().unwrap_or(1).max(1);
+        let pitch = ((ROWS_BOTTOM - ROWS_TOP) / fullest as f64).clamp(ROW_PITCH, MAX_ROW_PITCH);
+        for chunk in chunks {
             let mut page = Page {
                 number: pages.len(),
                 title: chunk[0].group_name.clone(),
@@ -200,7 +213,7 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
             for (i, a) in chunk.iter().enumerate() {
                 let id = hash((&a.group_id, &a.slot_id, a.iso_year, a.iso_week, a.shift));
                 let mut fields = Vec::new();
-                let y = FIRST_ROW + i as f64 * ROW_PITCH;
+                let y = ROWS_TOP + (i as f64 + 0.5) * pitch;
                 let status = if a.is_skipped {
                     "Skipped".into()
                 } else if a.is_completed {
@@ -265,15 +278,57 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
         pages,
     }
 }
+/// Keep, for each group, only as many whole weeks as fill one page — what
+/// `!plan pdf` prints when no number of weeks is asked for (a group cleaned
+/// by two slots gets ten weeks, a weekly one-slot group 21).
+pub fn one_page_per_group(snapshot: &mut ScheduleSnapshot) {
+    use std::collections::{HashMap, HashSet};
+    let all = std::mem::take(&mut snapshot.assignments);
+    let mut rows_in_week: HashMap<(&str, (i32, u32)), usize> = HashMap::new();
+    for a in &all {
+        *rows_in_week
+            .entry((&a.group_id, (a.iso_year, a.iso_week)))
+            .or_default() += 1;
+    }
+    // Weeks each group keeps, in order, while they fit (a first week always).
+    let mut keep: HashSet<(&str, (i32, u32))> = HashSet::new();
+    let mut used: HashMap<&str, usize> = HashMap::new();
+    let mut closed: HashSet<&str> = HashSet::new();
+    for a in &all {
+        let key = (a.group_id.as_str(), (a.iso_year, a.iso_week));
+        if keep.contains(&key) || closed.contains(key.0) {
+            continue;
+        }
+        let rows = used.entry(key.0).or_default();
+        if *rows > 0 && *rows + rows_in_week[&key] > ROWS_PER_PAGE {
+            closed.insert(key.0);
+            continue;
+        }
+        *rows += rows_in_week[&key];
+        keep.insert(key);
+    }
+    let kept: Vec<bool> = all
+        .iter()
+        .map(|a| keep.contains(&(a.group_id.as_str(), (a.iso_year, a.iso_week))))
+        .collect();
+    snapshot.assignments = all
+        .into_iter()
+        .zip(kept)
+        .filter_map(|(a, k)| k.then_some(a))
+        .collect();
+}
+
 /// Split `rows` into pages of at most ROWS_PER_PAGE, evenly (18 rows make
 /// 10 + 8, not 16 + 2), breaking only between weeks unless a single week is
 /// longer than a page.
 fn pages_of<T, W: PartialEq>(rows: &[T], week: impl Fn(&T) -> W) -> Vec<&[T]> {
-    let pages = rows.len().div_ceil(ROWS_PER_PAGE).max(1);
-    let target = rows.len().div_ceil(pages);
+    let mut pages = rows.len().div_ceil(ROWS_PER_PAGE).max(1);
     let mut out = Vec::new();
     let mut rest = rows;
     while !rest.is_empty() {
+        // Share what is left evenly over the pages still to come.
+        let target = rest.len().div_ceil(pages.max(1));
+        pages = pages.saturating_sub(1);
         let max = rest.len().min(ROWS_PER_PAGE);
         // The first week boundary at or after `target` that still fits,
         // else the last one before it.
@@ -816,9 +871,6 @@ mod tests {
         g.slots = vec![CleaningSlot::new("Stairs"), CleaningSlot::new("Hall")];
         let snapshot = crate::schedule::build_schedule(&s, 6);
         let doc = document(&s, &snapshot);
-        if let Ok(path) = std::env::var("PAPER_LAYOUT_FIXTURE") {
-            std::fs::write(path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
-        }
         assert_eq!(doc.pages.len(), 2);
         let rows: Vec<_> = doc.pages.iter().flat_map(|p| &p.rows).collect();
         assert_eq!(rows.len(), 24);
@@ -831,6 +883,11 @@ mod tests {
             assert!(r.slot.is_some());
             assert!(r.fields.iter().all(|f| f.x < 196. && f.y < 260.));
         }
+        // 12 rows a page: taller rows (at most 14mm) fill more of it.
+        let ys: Vec<f64> = doc.pages[0].rows.iter().map(|r| r.y).collect();
+        assert!(ys
+            .windows(2)
+            .all(|w| (w[1] - w[0] - MAX_ROW_PITCH).abs() < 1e-9));
     }
     #[test]
     fn routine_freeze_is_valid_but_reassigning_away_and_back_is_stale() {
@@ -883,7 +940,8 @@ mod tests {
         assert_eq!(page.fiducials, FIDUCIALS.to_vec());
         assert_eq!(page.qr_center, QR_CENTER);
         let row = &page.rows[0];
-        assert_eq!(row.y, FIRST_ROW);
+        // One week on the page: rows as tall as allowed.
+        assert_eq!(row.y, ROWS_TOP + MAX_ROW_PITCH / 2.);
         // A whole week: a box for each day, Monday to Sunday — no
         // separate "done" box and no Skip box.
         let kinds: Vec<&str> = row.fields.iter().map(|f| f.kind.as_str()).collect();
@@ -905,8 +963,13 @@ mod tests {
         const { assert!(196. - (MONDAY_X + 6. * DAY_PITCH) - BOX / 2. > 1.15) };
         const { assert!(ROW_PITCH - BOX > 2. * 1.15) };
         // The last row stays clear of the footer and the QR code.
-        let last = FIRST_ROW + (ROWS_PER_PAGE - 1) as f64 * ROW_PITCH;
-        assert!(last + ROW_PITCH / 2. < QR_CENTER[1] - 9. - 10.);
+        // The table (up to the last row's bottom) stays clear of the QR code.
+        // A full page fits between the column titles and the footer, and
+        // the table stays clear of the QR code.
+        const { assert!(ROWS_TOP + ROWS_PER_PAGE as f64 * ROW_PITCH <= ROWS_BOTTOM) };
+        const { assert!(ROWS_BOTTOM < QR_CENTER[1] - 20. / 2.) };
+        // And the QR code of the bottom-right corner target.
+        const { assert!(QR_CENTER[0] + 20. / 2. < FIDUCIALS[2][0] - 2.5) };
     }
 
     #[test]
@@ -927,14 +990,49 @@ mod tests {
             }
             pages.iter().map(|p| p.len()).collect::<Vec<_>>()
         };
-        // 9 weeks of 2 rows: not 16 + 2.
-        assert_eq!(sizes(&[2; 9]), [10, 8]);
-        assert_eq!(sizes(&[2; 8]), [16]);
-        assert_eq!(sizes(&[1; 12]), [12]);
+        // 11 weeks of 2 rows (22): not 21 + 1, and no week split.
+        assert_eq!(sizes(&[2; 11]), [12, 10]);
+        assert_eq!(sizes(&[2; 10]), [20]);
+        assert_eq!(sizes(&[1; 21]), [21]);
+        assert_eq!(sizes(&[1; 22]), [11, 11]);
         // 4 rows a week (2 slots × 2 shifts), 6 weeks.
         assert_eq!(sizes(&[4; 6]), [12, 12]);
-        assert_eq!(sizes(&[1; 17]), [9, 8]);
+        assert_eq!(sizes(&[2; 25]), [18, 16, 16]);
         assert_eq!(sizes(&[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn by_default_each_group_fills_one_page() {
+        let (mut s, _, _) = fixture();
+        for name in ["Bob", "Carol", "Dan"] {
+            let person = Person::new_named(name);
+            s.cleaning_groups[0].member_ids.push(person.id.clone());
+            s.persons.push(person);
+        }
+        // Two slots, twice a week: four rows a week.
+        let g = &mut s.cleaning_groups[0];
+        g.name = "Upper Floor".into();
+        g.rhythm.shift_starts = vec![0, 3];
+        g.rhythm.shift_ends = vec![1, 4];
+        g.slots = vec![CleaningSlot::new("Stairs"), CleaningSlot::new("Hall")];
+        let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
+        one_page_per_group(&mut snapshot);
+        let weeks: std::collections::BTreeSet<_> = snapshot
+            .assignments
+            .iter()
+            .map(|a| (a.iso_year, a.iso_week))
+            .collect();
+        assert_eq!(snapshot.assignments.len(), 20);
+        assert_eq!(weeks.len(), 5);
+        let doc = document(&s, &snapshot);
+        // What `!plan pdf` prints by default — the Python tests scan it.
+        if let Ok(path) = std::env::var("PAPER_LAYOUT_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        }
+        assert_eq!(doc.pages.len(), 1);
+        // The page is filled: 20 rows of 11.55mm reach the footer.
+        let rows = &doc.pages[0].rows;
+        assert!(rows.last().unwrap().y + (rows[1].y - rows[0].y) / 2. > ROWS_BOTTOM - 0.1);
     }
 
     #[test]

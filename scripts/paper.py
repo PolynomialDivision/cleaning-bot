@@ -95,13 +95,21 @@ qr_tikz = legacy.qr_tikz
 
 
 def marker(doc, page):
-    return f"CB2:{doc['id']}:{doc['revision']}:{page}"
+    """The page's QR payload. Upper case: hex digits and ":" then fit QR's
+    compact alphanumeric mode (29 instead of 33 modules: bigger modules at
+    the same size). Read back case-insensitively, as earlier sheets used
+    lower case."""
+    return f"CB2:{doc['id']}:{doc['revision']}:{page}".upper()
 
 
 #: Where every v2 page has its corner targets and its QR (mm from top left);
 #: the Rust manifest says the same for each page (a test checks).
 V2_FIDUCIALS = [[10,10],[200,10],[200,287],[10,287]]
-V2_QR = [187,277]
+#: Where a v2 page's QR code may be (mm: left, top, right, bottom): around
+#: (185,276), 20mm, and on sheets printed earlier (187,277), 18mm.
+V2_QR_AREA = (170, 260, 197, 289)
+#: Size of the QR code drawn on new sheets (mm, with its quiet zone).
+QR_SIZE = 20
 
 
 def apply(h, point):
@@ -133,8 +141,7 @@ def decode_rectified(im, scale=8):
         return []
     center = np.mean(corners, axis=0)
     corners.sort(key=lambda p: math.atan2(p[1]-center[1], p[0]-center[0]))
-    qx, qy = V2_QR
-    box = ((qx-14)*scale, (qy-14)*scale, (qx+14)*scale, (qy+14)*scale)
+    box = tuple(v*scale for v in V2_QR_AREA)
     for start in range(4):
         dst = [corners[(start+i) % 4] for i in range(4)]
         try:
@@ -246,6 +253,8 @@ UNCLEAR = 'Unclear mark: use one clear X, not a tick or filled box'
 #: times, whatever the pen; a scribble, an extra line, a grid or a circle
 #: more often.
 RINGS = (.8, 1.1, 1.4, 1.7)
+#: How far (mm) from an arm's diagonal its ink may cross such a circle.
+ARM_WIDTH = .55
 
 
 def continuity(mask, ink, axis):
@@ -272,21 +281,53 @@ def arm_continuity(arm, ink, dx, dy):
 
 
 def ring_pieces(ink, centre, radius):
-    """How many separate pieces of ink a circle of `radius` mm around
-    `centre` (patch pixels) passes through. One-sample gaps are closed, so a
-    thin line isn't counted twice; a fully inked circle is one piece."""
+    """Where a circle of `radius` mm around `centre` (patch pixels) passes
+    through ink: the angle (radians, image coordinates) at the middle of
+    each separate piece. One-sample gaps are closed, so a thin line isn't
+    counted twice; a fully inked circle is one piece without an angle
+    (None)."""
     cx, cy = centre
-    angles = np.linspace(0, 2*math.pi, 120, endpoint=False)
+    samples = 120
+    angles = np.linspace(0, 2*math.pi, samples, endpoint=False)
     cols = np.round(cx+np.cos(angles)*radius*SCALE).astype(int)
     rows = np.round(cy+np.sin(angles)*radius*SCALE).astype(int)
     h, w = ink.shape
     if cols.min() < 0 or rows.min() < 0 or cols.max() >= w or rows.max() >= h:
-        return 0
+        return []
     hit = ink[rows, cols]
     hit = hit | (np.roll(hit, 1) & np.roll(hit, -1))
     if hit.all():
-        return 1
-    return int(np.sum(hit & ~np.roll(hit, 1)))
+        return [None]
+    # Start on a gap, then take each run's middle.
+    shift = int(np.flatnonzero(~hit)[0])
+    hit = np.roll(hit, -shift)
+    edges = np.flatnonzero(np.diff(np.r_[0, hit.astype(np.int8), 0]))
+    return [2*math.pi*((shift+(a+b-1)/2) % samples)/samples
+            for a, b in zip(edges[::2], edges[1::2])]
+
+
+def only_the_arms(ink, crossing, down, up):
+    """Around the crossing of an X, ink may cross each circle only where its
+    four arms run: at most one piece on each arm (on its stroke — "\\" with
+    slope `down`, "/" with slope `up` — and on its side), nothing anywhere
+    else. A scribble, an extra line, a grid or a circle crosses elsewhere or
+    more often."""
+    for radius in RINGS:
+        seen = set()
+        for angle in ring_pieces(ink, crossing, radius):
+            if angle is None:
+                return False
+            px, py = math.cos(angle)*radius, math.sin(angle)*radius
+            if abs(py-down*px) < ARM_WIDTH:     # "\\": right-down or left-up
+                arm = ('down', px > 0)
+            elif abs(py+up*px) < ARM_WIDTH:     # "/": right-up or left-down
+                arm = ('up', px > 0)
+            else:
+                return False
+            if arm in seen:
+                return False
+            seen.add(arm)
+    return True
 
 
 def field_value(arr, field):
@@ -340,25 +381,26 @@ def field_value(arr, field):
     if density < .018: return False
     if density > .55:
         raise ValueError(UNCLEAR)
-    # An ordinary hand-drawn X can be offset and uneven. Search small offsets
-    # and slopes for two complete diagonal strokes ...
+    # An ordinary hand-drawn X can be offset and uneven, its two strokes at
+    # different angles. Search small offsets and a slope for each stroke for
+    # two complete diagonal strokes ...
+    slopes=(.75,1.,1.3)
     for ox in (-.5,-.25,0,.25,.5):
         for oy in (-.5,-.25,0,.25,.5):
             dx,dy=xx-ox,yy-oy
-            for slope in (.75,1.,1.3):
-                down=abs(dy-slope*dx)<.43   # "\\" in image coordinates
-                up=abs(dy+slope*dx)<.43     # "/"
-                # Each arm from 0.45 to 1.45mm out: any X using a good half
-                # of the box reaches that far; a dot, tick or slash doesn't.
-                near=np.hypot(dx,dy)<=ARM_REACH
-                arms=[(sx*dx>.3)&(sy*dy>.3)&band&inside&near
-                      for sx,sy,band in ((1,1,down),(-1,-1,down),(1,-1,up),(-1,1,up))]
-                if min(arm_continuity(a,ink,dx,dy) for a in arms)<ARM: continue
-                # ... and nothing else: around the crossing, ink may cross each
-                # circle only where the X's four arms do.
-                crossing=(centre[0]+ox*SCALE,centre[1]+oy*SCALE)
-                if all(ring_pieces(ink,crossing,r)<=4 for r in RINGS):
-                    return True
+            near=np.hypot(dx,dy)<=ARM_REACH
+            # Each arm from 0.45 to 1.45mm out: any X using a good half
+            # of the box reaches that far; a dot, tick or slash doesn't.
+            arm=lambda sx,sy,band:arm_continuity((sx*dx>.3)&(sy*dy>.3)&band&inside&near,ink,dx,dy)
+            downs=[s for s in slopes if min(arm(1,1,abs(dy-s*dx)<.43),arm(-1,-1,abs(dy-s*dx)<.43))>=ARM]
+            ups=[s for s in slopes if min(arm(1,-1,abs(dy+s*dx)<.43),arm(-1,1,abs(dy+s*dx)<.43))>=ARM]
+            for down in downs:
+                for up in ups:
+                    # ... and nothing else: around the crossing, ink may
+                    # cross each circle only where the X's four arms do.
+                    crossing=(centre[0]+ox*SCALE,centre[1]+oy*SCALE)
+                    if only_the_arms(ink,crossing,down,up):
+                        return True
     raise ValueError(UNCLEAR)
 
 
@@ -382,7 +424,7 @@ def scan(data,doc=None):
         im.thumbnail((2600,3600)); found=decode(im)
     except (OSError,ValueError,Image.DecompressionBombError): return {}
     if not found: return legacy.scan(data) if doc is None else {}
-    parts=found[0][0]
+    parts=[part.lower() for part in found[0][0]]
     result={'document':parts[1],'revision':parts[2],'page':int(parts[3])}
     if doc is None: return result
     try:
@@ -451,33 +493,40 @@ def render(doc, engine='tectonic'):
                        fr'font=\fontsize{{{size}}}{{{size*1.2:.1f}}}\selectfont,text={color}] at ({x},{y}) {{{value}}};')
 
         rows = page['rows']
-        bottom = rows[-1]['y']+6.25 if rows else 60
+        # Row height from the manifest (earlier sheets used 12.5mm).
+        half = (rows[1]['y']-rows[0]['y'])/2 if len(rows) > 1 else 5.5
+        first_top = rows[0]['y']-half if rows else 31
+        top = first_top-6          # the column titles' row
+        bottom = rows[-1]['y']+half if rows else first_top
         # Weekend columns, lightly shaded behind everything (never under a
         # box's surroundings the scanner reads: those stay within 3.6mm).
         for day in (5, 6):
             cx = DAY_X+day*DAY_STEP
-            tex.append(fr'\fill[accent!7] ({cx-DAY_STEP/2},44) rectangle ({cx+DAY_STEP/2},{bottom});')
+            tex.append(fr'\fill[accent!7] ({cx-DAY_STEP/2},{top}) rectangle ({cx+DAY_STEP/2},{bottom});')
 
         for x, y in page['fiducials']:
             tex.append(fr'\fill ({x-2.5},{y-2.5}) rectangle ({x+2.5},{y+2.5});\fill[white] ({x},{y}) circle (1.5mm);\fill ({x},{y}) circle (.5mm);')
         x, y = page['qr_center']
-        tex.append(qr_tikz(marker(doc, page['number']), x, y, 18))
+        tex.append(qr_tikz(marker(doc, page['number']), x, y, QR_SIZE))
 
-        # Header: what this is, whose, when, where.
-        text(15, 12.5, r'\textbf{CLEANING PLAN}', 7.5, 60, True, color='accent')
-        text(15, 17, r'\color{accent}\faBroom\enspace\textbf{'+fit(150, tex_escape(page['title'][:55]))+'}', 21, 165, True)
-        text(15, 27.5, 'A little teamwork. A lovely clean home.', 10, 172, color='muted')
+        # Header in one line: whose plan, then when and where beside it (on
+        # two lines, bottom-aligned, if there are many rooms).
+        text(15, 8.5, r'\textbf{CLEANING PLAN}', 7, 60, True, color='accent')
         where = r'\faCalendar\enspace '+tex_escape(period(rows)) if rows else ''
         if page.get('rooms'):
-            where += r'\qquad\faMapMarker*\enspace '+tex_escape(page['rooms'][:110])
-        text(15, 34, where, 9, 175, True)
+            where += r'\hspace{5mm}\mbox{\faMapMarker*\enspace}'+tex_escape(page['rooms'][:140])
+        title = r'{\color{accent}\faBroom\enspace\textbf{'+fit(110, tex_escape(page['title'][:55]))+'}}'
+        tex.append(fr'\node[anchor=base west,inner sep=0,text=ink] at (15,{top-4.5}) '
+                   fr'{{\fontsize{{20}}{{24}}\selectfont\sbox1{{{title}}}\usebox1\hspace{{6mm}}'
+                   fr'\parbox[b]{{\dimexpr 180mm-\wd1-6mm}}{{\raggedright\fontsize{{9}}{{11}}\selectfont {where}}}}};')
 
-        tex.append(r'\draw[accent,line width=.6mm] (14,44) -- (196,44);')
-        text(20.5, 49, 'Week', 8, 12, anchor='center', align='center', color='muted')
-        text(30, 49, 'When' + (' · task' if any(r.get('task') for r in rows) else ''), 8, 45, anchor='west', color='muted')
-        text(79, 49, 'Who', 8, 26, anchor='west', color='muted')
+        tex.append(fr'\draw[accent,line width=.6mm] (14,{top}) -- (196,{top});')
+        head = first_top-3
+        text(20.5, head, 'Week', 8, 12, anchor='center', align='center', color='muted')
+        text(30, head, 'When' + (' · task' if any(r.get('task') for r in rows) else ''), 8, 45, anchor='west', color='muted')
+        text(79, head, 'Who', 8, 26, anchor='west', color='muted')
         for j, label in enumerate(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']):
-            text(DAY_X+j*DAY_STEP, 49, label, 7.5, 9, anchor='center', align='center', color='muted')
+            text(DAY_X+j*DAY_STEP, head, label, 7.5, 9, anchor='center', align='center', color='muted')
 
         # Rows, grouped by week: a strong rule and one badge per week.
         groups = []
@@ -488,13 +537,13 @@ def render(doc, engine='tectonic'):
             else:
                 groups.append((key, [row]))
         for (_, week), members in groups:
-            top = members[0]['y']-6.25
-            tex.append(fr'\draw[black!55,line width=.35mm] (14,{top}) -- (196,{top});')
+            rule = members[0]['y']-half
+            tex.append(fr'\draw[black!55,line width=.35mm] (14,{rule}) -- (196,{rule});')
             centre = (members[0]['y']+members[-1]['y'])/2
             tex.append(fr"\node[circle,draw=accent,line width=.3mm,inner sep=0,minimum size=6mm,"
                        fr"font=\small\bfseries,text=accent] at (20.5,{centre}) {{{week}}};")
             for row in members[1:]:
-                tex.append(fr'\draw[black!40,line width=.15mm,dotted] (27,{row["y"]-6.25}) -- (196,{row["y"]-6.25});')
+                tex.append(fr'\draw[black!40,line width=.15mm,dotted] (27,{row["y"]-half}) -- (196,{row["y"]-half});')
         for row in rows:
             y = row['y']
             start = datetime.date.fromisoformat(row['start'])
@@ -517,15 +566,15 @@ def render(doc, engine='tectonic'):
                 tex.append(fr'\draw[black,line width=.22mm,fill=white] ({fx-half},{fy-half}) rectangle ({fx+half},{fy+half});')
         tex.append(fr'\draw[accent,line width=.5mm] (14,{bottom}) -- (196,{bottom});')
         for x in (14, 27, 76, 105, 196):
-            tex.append(fr'\draw[black!35,line width=.15mm] ({x},44) -- ({x},{bottom});')
+            tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')
 
         # How to use it, with a little example box.
-        ex, ey = 19, 263.2
+        ex, ey = 19, 271
         tex.append(fr'\draw[black,line width=.22mm] ({ex-2},{ey-2}) rectangle ({ex+2},{ey+2});')
         tex.append(fr'\draw[ink,line width=.35mm,line cap=round] ({ex-1.3},{ey-1.3}) -- ({ex+1.3},{ey+1.3}) ({ex-1.3},{ey+1.3}) -- ({ex+1.3},{ey-1.3});')
         text(23.5, ey, r'\textbf{Done? Put one clear X in the day you cleaned.} Leave the rest blank.', 8.5, 150, True, anchor='west')
-        text(15, 281, r'\color{accent}\faHeart\enspace Thanks for keeping our home lovely.', 8, 120, True, anchor='west')
-        text(148, 281, f"{page['number']+1} / {len(doc['pages'])}", 8, 20, anchor='west', color='muted')
+        text(15, 280, r'\color{accent}\faHeart\enspace Thanks for keeping our home lovely.', 8, 120, True, anchor='west')
+        text(150, 280, f"{page['number']+1} / {len(doc['pages'])}", 8, 20, anchor='west', color='muted')
         tex.append(r'\end{tikzpicture}')
     tex.append(r'\end{document}')
     Path('sheet.tex').write_text('\n'.join(tex))

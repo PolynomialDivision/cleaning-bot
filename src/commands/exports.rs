@@ -72,6 +72,7 @@ pub(crate) async fn cmd_pdf(
     };
     // !plan pdf [history | next] [weeks] [group name]
     // First arg: either a number (weeks) or start of group name.
+    let weeks_given = args.first().is_some_and(|s| s.parse::<usize>().is_ok());
     let (n, group_filter) = {
         let weeks = args.first().and_then(|s| s.parse::<usize>().ok());
         if let Some(w) = weeks {
@@ -87,7 +88,16 @@ pub(crate) async fn cmd_pdf(
             } else {
                 None
             };
-            (8, name)
+            // Printable plan: one full page per group (see below);
+            // history: the last 8 weeks.
+            (
+                if history {
+                    8
+                } else {
+                    crate::paper::ROWS_PER_PAGE
+                },
+                name,
+            )
         }
     };
 
@@ -119,6 +129,9 @@ pub(crate) async fn cmd_pdf(
                     ))))
                 }
             }
+        }
+        if !history && !weeks_given {
+            crate::paper::one_page_per_group(&mut snapshot);
         }
         if snapshot.is_empty() {
             return Ok(Some(format::mentionify("📄 No duties in this date range.")));
