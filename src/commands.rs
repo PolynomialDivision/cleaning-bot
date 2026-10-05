@@ -39,8 +39,8 @@ mod swaps;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use assignments::cmd_next;
 use assignments::*;
+pub(crate) use assignments::{cmd_next, upcoming_duties};
 use exports::*;
 pub(crate) use exports::{cmd_pdf, plan_text};
 pub(crate) use helpers::*;
@@ -140,6 +140,25 @@ pub async fn handle(
     let sub = sub.as_deref();
     let rest = args.get(1..).unwrap_or_default();
 
+    // Your own next turns: a menu to pick one and swap it or ask for cover
+    // (`turn_menu`) — as plain text only for more than it has numbers.
+    if matches!(cmd, "!next" | "!myplan" | "!mycleaning") {
+        let count = match args.as_slice() {
+            [] => Some(crate::turn_menu::DEFAULT),
+            [n] => n
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=crate::turn_menu::MAX).contains(n)),
+            _ => None,
+        };
+        if let Some(count) = count {
+            let relation = (room.room_id() == ctx.room_id).then(|| answer_to.clone());
+            if crate::turn_menu::post(ctx, room, sender, count, relation).await? {
+                return Ok(None);
+            }
+        }
+    }
+
     // Commands that need direct room access.
     match (cmd, sub) {
         ("!plan", None) => return cmd_cleanplan(ctx, sender, room, &args).await,
@@ -162,6 +181,10 @@ pub async fn handle(
         }
         ("!plan", Some("pdf")) => return cmd_pdf(ctx, sender, room, rest, Some(answer_to)).await,
         ("!mygroups", _) => return cmd_mygroups(ctx, sender, room).await,
+        ("!sos" | "!cant", _) => {
+            let reply = cmd_sos(ctx, sender, room, &args).await?;
+            return Ok(reply.map(|s| format::intentional(format::mentionify(&s))));
+        }
         ("!help", Some("post")) => return cmd_help_post(ctx, sender, room).await,
         ("!member", Some("welcome")) => return cmd_member_welcome(ctx, sender, room, rest).await,
         ("!ical", Some("revoke")) => return cmd_icalrevoke(ctx, sender, rest).await,
@@ -177,7 +200,7 @@ pub async fn handle(
     let reply: Option<String> = match (cmd, sub) {
         // ── Everyone ──
         ("!status", _) => cmd_status(ctx).await,
-        ("!done", _) => cmd_done(ctx, sender, &args).await,
+        ("!done", _) => cmd_done(ctx, sender, room, &args).await,
         ("!undo", _) => cmd_undo(ctx, sender, &args).await,
         ("!groups", None) => cmd_groups(ctx, None).await,
         ("!next" | "!myplan" | "!mycleaning", _) => cmd_next(ctx, sender, &args).await,
@@ -309,7 +332,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
         ("!done" | "!undo" | "!join" | "!leave", _) => joined(args),
         ("!next" | "!myplan" | "!mycleaning", _) => person_then_number(args),
         ("!cleaning", Some("person")) => with_sub(args[0], person_then_number(rest)),
-        ("!takeover", _) => group_first(state, args, 0),
+        ("!takeover" | "!sos" | "!cant", _) => group_first(state, args, 0),
         ("!swap", Some("accept" | "reject")) => owned(args),
         ("!swap", Some(_)) => {
             let mut out = vec![args[0].to_owned()];
@@ -385,7 +408,7 @@ const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <gro
 /// nothing about other people, nothing for admins (they have their own DM).
 pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
     match cmd {
-        "!help" | "!mygroups" | "!join" | "!leave" | "!done" | "!undo" => true,
+        "!help" | "!mygroups" | "!join" | "!leave" | "!done" | "!undo" | "!sos" | "!cant" => true,
         "!next" | "!myplan" | "!mycleaning" => {
             args.is_empty() || (args.len() == 1 && args[0].parse::<usize>().is_ok())
         }
@@ -406,11 +429,11 @@ pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
 
 fn help_text() -> String {
     "🧹 **A little cleaning, a happier house** ✨\n\n\
-📅 !next · your next turn\n\
+📅 !next · your turns — swap one or 🆘 from there\n\
 📋 !plan · see the plan\n\
 👥 !mygroups · join or leave groups\n\
 ✅ !done · done! (or ✅ on the plan)\n\
-🔄 !swap @user · ask for cover\n\
+🆘 !sos · can't make it? find cover (or 🆘 on the plan)\n\
 🗓 !ical · your calendar\n\
 📄 !plan pdf · printable plan\n\n\
 ❓ !help more · !help admin"
@@ -422,6 +445,7 @@ fn more_help_text() -> String {
 !status · this week's progress\n\
 !undo [group] · take your done mark back\n\
 !done <group> · mark a group you cleaned\n\
+!sos [group] [slot] [week N] [on <day>] · ask who steps in for a later turn\n\
 !takeover [group] · take a turn over yourself\n\
 !swap @user [group] · ask someone to cover; they accept or reject\n\
 !join <group> · !leave <group> · without the number buttons\n\
@@ -431,7 +455,10 @@ fn more_help_text() -> String {
 !ical reset · a new calendar link (the old one stops working)\n\n\
 👥 In !mygroups, tap a number to join that group — tap it again to leave. \
 ✅ marks the groups you're in.\n\
-🔒 !next, !plan, !mygroups, !done and !ical also work in a private chat with me \
+🆘 on the plan: someone can take your turn (🙋) or swap theirs for it (🔄). \
+✅ while your shift is still to come and the running one is open: \
+you swap — and ↩️ swaps back.\n\
+🔒 !next, !plan, !mygroups, !done, !sos and !ical also work in a private chat with me \
 — tap 💬 on the help board and I'll invite you."
         .into()
 }

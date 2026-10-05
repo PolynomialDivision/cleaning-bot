@@ -1,4 +1,4 @@
-//! Swapping duties: !swap, !swap accept, !swap reject.
+//! Swapping duties: !swap, !swap accept, !swap reject, !sos.
 
 use super::*;
 
@@ -325,4 +325,110 @@ pub(crate) async fn cmd_rejectswap(
     state.apply_event(DomainEvent::SwapRejected { swap_id: id })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("❌ Swap #{id} rejected.")))
+}
+
+// ── !sos [group] [slot] [week N] [on <day>] ──────────────────────────────────
+//
+// "I can't make it": asks the cleaning room who steps in for one of the
+// sender's turns — their next one, or the one named — like 🆘 on the plan
+// does for this week (see `trades`).
+
+pub(crate) async fn cmd_sos(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+    args: &[&str],
+) -> Result<Option<String>> {
+    let usage = "Usage: !sos [<group>] [<slot>] [week <1-53>] [on <day>]";
+    let Some(parsed) = extract_turn_args(args) else {
+        return Ok(Some(usage.into()));
+    };
+    let week_named = args.iter().any(|a| a.eq_ignore_ascii_case("week"));
+    let state = ctx.state.lock().await;
+    let Some(person_id) = state
+        .person_by_matrix_id(sender.as_str())
+        .map(|p| p.id.clone())
+    else {
+        return Ok(Some(
+            "❌ You're not on the plan yet — !mygroups to join a group.".into(),
+        ));
+    };
+    let (group, slot) = match parsed.rest.as_slice() {
+        [] => (None, None),
+        [first, rest @ ..] => match state.group_by_name(first) {
+            Some(group) if rest.len() <= 1 => (Some(group.id.clone()), rest.first().copied()),
+            None if rest.is_empty() => (None, Some(*first)),
+            _ => return Ok(Some(usage.into())),
+        },
+    };
+    let mut duties: Vec<Duty> = upcoming_duties(&state, &person_id, 200)
+        .into_iter()
+        .filter(|d| group.as_ref().is_none_or(|id| *id == d.group.id))
+        .filter(|d| {
+            slot.is_none_or(|name| {
+                d.group
+                    .slots
+                    .get(d.slot_index)
+                    .is_some_and(|s| s.name.eq_ignore_ascii_case(name))
+            })
+        })
+        .filter(|d| !week_named || d.turn.week() == parsed.week)
+        .filter(|d| {
+            parsed.day.is_none_or(|day| {
+                let rhythm = d.group.rhythm.for_week(d.turn.year, d.turn.week);
+                rhythm.contains_weekday(day) && rhythm.shift_for_weekday(day) == d.turn.shift
+            })
+        })
+        .collect();
+    if !week_named {
+        // The next one — several only when they start the same day.
+        let first = duties.iter().map(|d| d.turn.dates(&d.group.rhythm).0).min();
+        duties.retain(|d| Some(d.turn.dates(&d.group.rhythm).0) == first);
+    }
+    let duty = match duties.as_slice() {
+        [] => {
+            return Ok(Some(
+                "Nothing open of yours to ask cover for. (!next shows your turns.)".into(),
+            ))
+        }
+        [one] => one.clone(),
+        many => {
+            return Ok(Some(format!(
+                "Which one? {}\n{usage}",
+                many.iter()
+                    .map(|d| format!("{} (week {})", d.label(), d.turn.week))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
+    };
+    if crate::trades::open_request(&state, &duty).is_some() {
+        return Ok(Some(format!(
+            "You already asked for {} — see your 🆘 in the cleaning room.",
+            duty.label()
+        )));
+    }
+    drop(state);
+    let main = room
+        .client()
+        .get_room(&ctx.room_id)
+        .ok_or_else(|| anyhow::anyhow!("Cleaning room unavailable"))?;
+    let request = crate::trades::new_request(&duty, sender.as_str(), None);
+    if crate::trades::post_request(ctx, &main, request)
+        .await
+        .is_none()
+    {
+        return Ok(Some(
+            "😕 I couldn't post that — try again in a moment.".into(),
+        ));
+    }
+    // In the cleaning room the request speaks for itself.
+    Ok((room.room_id() != ctx.room_id).then(|| {
+        format!(
+            "🆘 Asked in the cleaning room who steps in for {} (week {}) — \
+             you'll be pinged there when someone does.",
+            duty.label(),
+            duty.turn.week
+        )
+    }))
 }

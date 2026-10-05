@@ -9,6 +9,15 @@ use matrix_sdk::ruma::OwnedRoomId;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+/// `!done`'s answer, without a room to tell about early swaps.
+async fn cmd_done_text(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    Ok(mark_done(ctx, sender, args).await?.0)
+}
+
 fn rotation_state() -> (State, GroupId, PersonId, PersonId) {
     let first = Person::new_matrix("@alice:example.org");
     let second = Person::new_matrix("@bob:example.org");
@@ -2711,7 +2720,7 @@ async fn done_does_not_touch_rotation_queue_or_future_assignments() {
 
     let (ctx, path, _admin) = test_context(state);
     let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
-    let reply = cmd_done(&ctx, &alice, &["2nd Floor"])
+    let reply = cmd_done_text(&ctx, &alice, &["2nd Floor"])
         .await
         .unwrap()
         .unwrap();
@@ -2900,7 +2909,10 @@ async fn new_assignee_can_mark_done_and_it_persists_across_restart() {
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
     cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap();
-    let done_reply = cmd_done(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
+    let done_reply = cmd_done_text(&ctx, &bob, &["2nd Floor"])
+        .await
+        .unwrap()
+        .unwrap();
     assert!(done_reply.contains("Cleaned"), "{done_reply}");
 
     {
@@ -2952,7 +2964,7 @@ async fn a_member_can_still_mark_done_but_credit_goes_to_the_takeover_assignee()
     let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
 
     cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap();
-    let reply = cmd_done(&ctx, &alice, &["2nd Floor"])
+    let reply = cmd_done_text(&ctx, &alice, &["2nd Floor"])
         .await
         .unwrap()
         .unwrap();
@@ -3025,7 +3037,7 @@ async fn takeover_of_an_already_completed_week_is_rejected() {
     let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
-    cmd_done(&ctx, &alice, &["2nd Floor"]).await.unwrap();
+    cmd_done_text(&ctx, &alice, &["2nd Floor"]).await.unwrap();
     let reply = cmd_takeover(&ctx, &bob, &["2nd Floor"])
         .await
         .unwrap()
@@ -3091,8 +3103,11 @@ async fn double_done_after_takeover_stays_consistent() {
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
     cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap();
-    cmd_done(&ctx, &bob, &["2nd Floor"]).await.unwrap();
-    let second_reply = cmd_done(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
+    cmd_done_text(&ctx, &bob, &["2nd Floor"]).await.unwrap();
+    let second_reply = cmd_done_text(&ctx, &bob, &["2nd Floor"])
+        .await
+        .unwrap()
+        .unwrap();
     assert!(second_reply.contains("Already done"), "{second_reply}");
 
     let state = ctx.state.lock().await;
@@ -3138,7 +3153,7 @@ async fn takeover_then_done_survives_a_full_event_replay() {
     let (ctx, path, _admin) = test_context(state);
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
     cmd_takeover(&ctx, &bob, &["2nd Floor"]).await.unwrap();
-    cmd_done(&ctx, &bob, &["2nd Floor"]).await.unwrap();
+    cmd_done_text(&ctx, &bob, &["2nd Floor"]).await.unwrap();
 
     let before = ctx.state.lock().await.clone();
     let mut replayed = State::default();
@@ -3228,7 +3243,10 @@ async fn accepted_swap_actually_reassigns_an_already_materialized_current_week()
     );
     // And !done now works for Bob without any special-cased swap lookup.
     drop(state);
-    let done_reply = cmd_done(&ctx, &bob, &["2nd Floor"]).await.unwrap().unwrap();
+    let done_reply = cmd_done_text(&ctx, &bob, &["2nd Floor"])
+        .await
+        .unwrap()
+        .unwrap();
     assert!(done_reply.contains("Cleaned"), "{done_reply}");
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -3934,7 +3952,7 @@ async fn status_lists_every_person_of_a_shared_week_with_their_own_state() {
     assert!(before.contains("⬜ Scharni: alice"), "{before}");
     assert!(before.contains("⬜ Colbe: bob"), "{before}");
 
-    cmd_done(&ctx, &alice, &[]).await.unwrap().unwrap();
+    cmd_done_text(&ctx, &alice, &[]).await.unwrap().unwrap();
     let after = names_only(&cmd_status(&ctx).await.unwrap().unwrap());
     assert!(after.contains("· 1/2 done"), "{after}");
     assert!(after.contains("✅ Scharni: alice"), "{after}");
@@ -3984,8 +4002,8 @@ async fn undo_in_a_shared_week_only_takes_back_the_senders_own_slot() {
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
     let (year, week) = current_iso_week();
 
-    cmd_done(&ctx, &alice, &[]).await.unwrap();
-    cmd_done(&ctx, &bob, &[]).await.unwrap();
+    cmd_done_text(&ctx, &alice, &[]).await.unwrap();
+    cmd_done_text(&ctx, &bob, &[]).await.unwrap();
     assert!(ctx.state.lock().await.is_completed(&group_id, year, week));
 
     let reply = cmd_undo(&ctx, &alice, &[]).await.unwrap().unwrap();
@@ -4036,7 +4054,7 @@ async fn bare_done_only_marks_what_is_open_for_the_sender() {
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
     let stranger = OwnedUserId::try_from("@nobody:example.org").unwrap();
 
-    let reply = cmd_done(&ctx, &bob, &[]).await.unwrap().unwrap();
+    let reply = cmd_done_text(&ctx, &bob, &[]).await.unwrap().unwrap();
     assert!(reply.contains("Floor / Colbe"), "{reply}");
     {
         let state = ctx.state.lock().await;
@@ -4048,7 +4066,7 @@ async fn bare_done_only_marks_what_is_open_for_the_sender() {
         );
     }
 
-    let reply = cmd_done(&ctx, &stranger, &[]).await.unwrap().unwrap();
+    let reply = cmd_done_text(&ctx, &stranger, &[]).await.unwrap().unwrap();
     assert!(
         reply.starts_with("❌ You're not on the plan yet — !mygroups"),
         "{reply}"
@@ -4161,7 +4179,7 @@ async fn next_names_the_persons_own_turn_not_just_the_next_due_week() {
         "{reply}"
     );
 
-    cmd_done(&ctx, &alice, &[]).await.unwrap();
+    cmd_done_text(&ctx, &alice, &[]).await.unwrap();
     let reply = cmd_next(&ctx, &alice, &[]).await.unwrap().unwrap();
     assert!(
         !reply.contains("· now"),
@@ -4238,7 +4256,7 @@ async fn deleting_a_group_needs_confirmation_and_leaves_nothing_behind() {
     freeze(&mut state, &group_id, 0, current_iso_week(), &alice_id);
     let (ctx, path, admin) = test_context(state);
     let alice = OwnedUserId::try_from("@alice:example.org").unwrap();
-    cmd_done(&ctx, &alice, &[]).await.unwrap();
+    cmd_done_text(&ctx, &alice, &[]).await.unwrap();
 
     let warning = cmd_removefloor(&ctx, &admin, &["2nd Floor"])
         .await
@@ -6244,7 +6262,7 @@ async fn an_old_done_reaction_never_takes_back_a_newer_done_mark() {
     );
     assert!(!done(&state));
     drop(state);
-    cmd_done(&ctx, &alice, &[]).await.unwrap();
+    cmd_done_text(&ctx, &alice, &[]).await.unwrap();
     let mut state = ctx.state.lock().await;
     assert_eq!(
         redaction(&ctx, &mut state, &room, alice.as_str(), "$d2"),

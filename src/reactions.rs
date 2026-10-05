@@ -3,7 +3,8 @@
 //! selector taps themselves are `onboarding::tap`.)
 //!
 //! A ✅ on the weekly plan marks the reacting person's open duties of that
-//! week done. Two kinds of reactions can be taken back:
+//! week done — or, when their shift is still to come, swaps them onto the
+//! running one (`trades`). Two kinds of reactions can be taken back:
 //!   * a group selector tap (`onboarding`): its owner undoes it, as long as
 //!     that still applies;
 //!   * a ✅ on the weekly plan: whoever reacted takes their done mark back —
@@ -31,6 +32,9 @@ pub enum PlanDone {
     NothingOpen,
     /// Their open duties were marked done.
     Marked,
+    /// Their own shift was still to come, so they took the running one
+    /// (marked done) and its holder theirs — see `trades`.
+    SwappedEarly(crate::state::Trade),
 }
 
 /// `sender` reacted ✅ (`reaction_id`) on the plan of `week`: mark their
@@ -56,12 +60,21 @@ pub fn plan_done(
         .person_by_matrix_id(sender)
         .map(|p| p.id.clone())
         .ok_or_else(|| anyhow::anyhow!("{sender} has no person record"))?;
-    let duties = crate::commands::markable_duties(state, &person_id, week, None);
-    let Some(first) = duties.first() else {
-        return Ok(PlanDone::NothingOpen);
-    };
-    let group_id = first.group.id.clone();
-    crate::commands::mark_duties_done(state, &person_id, &duties)?;
+    let mut duties = crate::commands::markable_duties(state, &person_id, week, None);
+    let mut swapped = None;
+    if duties.is_empty() {
+        let today = crate::state::today();
+        match crate::trades::swap_early(state, &person_id, sender, week, None, today)? {
+            Some((trade, cleaned)) => {
+                duties = cleaned;
+                swapped = Some(trade);
+            }
+            None => return Ok(PlanDone::NothingOpen),
+        }
+    } else {
+        crate::commands::mark_duties_done(state, &person_id, &duties)?;
+    }
+    let group_id = duties[0].group.id.clone();
     // When each mark was made, so taking this reaction back later can't
     // undo a newer mark of the same turn.
     let times = duties
@@ -92,7 +105,7 @@ pub fn plan_done(
                 .collect(),
         },
     );
-    Ok(PlanDone::Marked)
+    Ok(swapped.map_or(PlanDone::Marked, PlanDone::SwappedEarly))
 }
 
 /// What a redaction did.

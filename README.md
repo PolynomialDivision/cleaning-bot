@@ -7,11 +7,11 @@ keeps track of who actually cleaned.
 ## Using it (for housemates)
 
 ```
-📅 !next · your next turn
+📅 !next · your turns — swap one or 🆘 from there
 📋 !plan · see the plan
 👥 !mygroups · join or leave groups
 ✅ !done · done! (or ✅ on the plan)
-🔄 !swap @user · ask for cover
+🆘 !sos · can't make it? find cover (or 🆘 on the plan)
 🗓 !ical · your private calendar
 📄 !plan pdf · printable plan
 ```
@@ -20,16 +20,16 @@ The bot answers a command as a reply to it — in the thread, if you wrote
 it in one.
 
 **The help board.** An admin can post a friendly overview with `!help post`.
-Its reactions are buttons — 📅 your next turns, 📋 the plan, 👥 your
-groups, 📄 a PDF, 💬 a private chat: the bot answers privately if you
+Its reactions are buttons — 📅 your next turns (as the menu below), 📋 the
+plan, 👥 your groups, 📄 a PDF, 💬 a private chat: the bot answers privately if you
 have a private chat with it, else as a reply to the board, addressed to
 you, and then takes the reaction away so the button stays clean. 💬 makes
 the bot invite you to a new encrypted chat (no invite allowlist needed for
 that); once you join, it greets you there with your groups and calendar
 link.
 
-`!help more` lists the rest (`!status`, `!undo`, `!takeover`, `!join`,
-`!leave`, `!groups`, `!stats`, `!plan pdf history`, `!ical reset`).
+`!help more` lists the rest (`!status`, `!undo`, `!takeover`, `!swap`,
+`!join`, `!leave`, `!groups`, `!stats`, `!plan pdf history`, `!ical reset`).
 
 **The weekly plan** is posted and pinned on the configured weekday (later
 that week if the bot was down then). React ✅ on it when your part is done;
@@ -45,13 +45,74 @@ of the bot. Messages pinned by people stay pinned.
 ```
 ⏰ Still open, ends today: @bob (Bath · Thu–Fri) · Dan (Kitchen)
 ✅ alice (2nd Floor)
-React ✅ here or on the plan when it's done.
+React ✅ here or on the plan when it's done · 🆘 if you can't make it.
 ```
 
 A ✅ on the reminder counts the same as one on the plan. The reminder is
 edited as people finish (without pinging anyone again), until it reads
 "✨ All done — thanks!". A shift starting mid-week gets a "🔔 Your turn
 starts today" one; `!plan remind` (admin) sends a "Still open this week".
+
+**Your turns, as a menu.** `!next` (or `!next N`, up to 10) and 📅 on the
+help board show your next turns as a menu to tap — in a private chat with
+the bot if you have one, else in the cleaning room:
+
+```
+📅 Your next turns
+1️⃣ 2nd Floor · Thu–Sun (8 – 11 Oct) · later this week
+2️⃣ 👉 Kitchen · 13 – 19 Oct · next week
+3️⃣ 2nd Floor · Mon–Wed (20 – 22 Oct) · in 2 weeks · 🆘 asked
+
+👉 Kitchen · 13 – 19 Oct — 🔄 swap it · 🆘 I can't make it
+```
+
+Tap a number to pick a turn, then 🔄 to ask the room who swaps with you
+(only 🔄 counts on that request: whoever takes it gives you their next turn
+of the group), or 🆘 if you can't make it (the request below: 🙋 or 🔄).
+Only your own taps count; the menu is edited in place and your tap taken
+back, so the same buttons work again. It keeps showing what became of each
+turn — done, asked, or someone else's now. Only your latest menu is live.
+`!next <person>` and `!next 11`+ give the plain list.
+
+**Swapping without commands.** Two ways, both by reaction:
+
+- *Cleaning early.* ✅ (or `!done`) while your own shift of the week is
+  still to come — Thu–Sun, say — and the running shift of the same slot is
+  still open: you did that one, so you swap. You get the running shift,
+  marked done; its holder gets your later one and is told:
+
+  ```
+  🔄 @alice — bob already cleaned **2nd Floor · Mon–Wed** for you, so you two swapped: you're on **Thu–Sun (8 – 11 Oct)** now.
+  Doesn't suit you? React ↩️ and I'll swap you back.
+  ```
+
+  ↩️ there (by either of you) swaps back until the later shift starts; the
+  cleaning stays recorded. Taking the ✅ back undoes both.
+- *🆘 Who steps in?* 🆘 on the plan or a reminder asks the room to cover
+  your open turns of that week; `!sos [group] [slot] [week N] [on <day>]`
+  does it for your next or any later turn (also from a private chat). The
+  request pings the group's other members:
+
+  ```
+  🆘 Who can step in? bob can't make it:
+  2nd Floor · Thu–Sun (8 – 11 Oct) · week 41
+  🙋 I'll do it · 🔄 swap — you take it, bob takes your next turn
+  (bob: ↩️ if you can make it after all)
+  @alice @carol
+  ```
+
+  🙋 — anyone in the room — takes the turn over. 🔄 takes it and hands the
+  helper's next turn of that group (not yet started, not one where the asker
+  already cleans) to the asker; without such a turn, the bot says so and 🙋
+  still works. The request is edited to "✅ Sorted!" / "✅ Swapped!", which
+  pings the asker. ↩️ by either of them undoes it until its turns start, and
+  the request is open again; ↩️ by the asker on an open request (or taking
+  the 🆘 back) withdraws it. A request closes by itself once the turn is
+  done, over, or reassigned otherwise. If nobody has stepped in when the
+  turn starts, the bot replies to it pinging the admins.
+
+`!swap @user` (ask one person, who accepts with `!swap accept <id>`) and
+`!takeover` still work.
 
 **Welcome and groups.** Everyone gets one welcome, ever — when they join the
 room, or with their first command or reaction there, also if an admin added
@@ -80,8 +141,8 @@ selector; `!join`/`!leave` work without buttons. More than ten groups: the
 rest via `!groups` and `!join`.
 
 **A private chat with the bot** (encrypted) also takes `!next`, `!plan`,
-`!plan pdf`, `!mygroups`, `!join`, `!leave`, `!done`, `!undo`, `!help` and
-`!ical` — only about yourself, never about others, and never admin commands
+`!plan pdf`, `!mygroups`, `!join`, `!leave`, `!done`, `!undo`, `!sos`,
+`!help` and `!ical` — only about yourself, never about others, and never admin commands
 (admins have their own admin DM). See *Private chats* below for what it
 takes.
 
@@ -125,6 +186,11 @@ with `weekly …`.
   keep exactly that until an admin sets a new rhythm.
 - A window says when a turn is *due*; nothing enforces when it is actually
   cleaned. A late Mon–Tue cleaning may land right before the Thu–Fri one.
+- **The start of the week takes turns.** In a week split into shifts, the
+  rotation picks who cleans that week as before, then gives each of them the
+  shift after the one they had last time: start of the week this time, end of
+  the week next time. Without that, a group with an even number of members
+  would leave the same people on Mon–Wed every time.
 
 ### Too few people
 
@@ -213,7 +279,7 @@ missing from the PDF.
   instead of posting it twice. That holds only while the homeserver remembers
   the transaction for the same device; after a new login or restoring an old
   `state.json`, a duplicate is possible.
-- **Taps and ✅ reactions** count once per reaction event, also across
+- **Taps (selectors, menus), ✅, 🆘, 🙋, 🔄 and ↩️ reactions** count once per reaction event, also across
   restarts. A redaction that arrives before its reaction still wins. Taking a
   ✅ back never undoes a done mark made later by other means (for ✅ given
   before this version, a later mark by the same person can still go with it).
@@ -234,6 +300,11 @@ All new state fields have defaults, so an existing `state.json` loads as is:
   that can be shown again, and the old URL still works until `!ical reset`;
 - selectors without a room belong to the cleaning room;
 - bookkeeping for commands, redactions and welcomes starts empty.
+
+On the first start, plans made before the start of a split week took turns are
+re-seated once, from next week on: within each week, the two people may trade
+Mon–Wed and Thu–Sun. Nobody gains or loses a week. Weeks that were assigned,
+swapped, taken over, done or asked about (🆘, a pending swap) stay as they are.
 
 The calendar is now named "Cleaning – <name>" instead of "Putzplan – <name>";
 event UIDs are unchanged, so subscriptions just update.

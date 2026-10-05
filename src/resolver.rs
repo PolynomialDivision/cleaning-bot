@@ -96,7 +96,8 @@ pub fn reconcile_queue(state: &State, group: &CleaningGroup) -> Vec<PersonId> {
 /// Every shift of a due week is its own turn, and every slot of a turn draws
 /// the next person from the group's rotation queue — so a group cleaned
 /// twice a week hands its two shifts to two consecutive people in the
-/// rotation. Nobody is drawn twice within one week.
+/// rotation. Nobody is drawn twice within one week. Which of them gets the
+/// start of the week takes turns (`seat_by_shift`).
 ///
 /// Returns `SlotAssigned` events plus, for each group that had at least one
 /// turn filled, a trailing `RotationQueueSet` capturing the queue's new
@@ -141,6 +142,9 @@ pub fn materialize_group(
         .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
         .max();
 
+    // This run's draws, which `last_shift` can't find in `state` yet.
+    let mut planned: Vec<(Turn, PersonId)> = Vec::new();
+
     let mut due = first_due;
     for _ in 0..cycles_ahead {
         let (dy, dw) = due;
@@ -156,6 +160,7 @@ pub fn materialize_group(
             .filter_map(|a| a.person_id.clone())
             .collect();
 
+        let mut drawn: Vec<(Turn, usize, Option<PersonId>)> = Vec::new();
         for turn in state.turns_in_week(group, dy, dw) {
             for si in 0..num_slots {
                 // Skip if already frozen — this is what makes materialize additive.
@@ -191,22 +196,27 @@ pub fn materialize_group(
                     used_this_week.insert(picked.clone());
                     picked
                 });
-
-                events.push(DomainEvent::SlotAssigned {
-                    group_id: group.id.clone(),
-                    slot_index: si,
-                    iso_year: turn.year,
-                    iso_week: turn.week,
-                    shift: turn.shift,
-                    person_id,
-                    source: AssignmentSource::RoundRobin,
-                    // Automatic — nobody "did" this, and materialize only
-                    // ever fills a not-yet-frozen turn, so there is no prior
-                    // occupant to record either.
-                    actor_id: None,
-                    previous_person_id: None,
-                });
+                drawn.push((turn, si, person_id));
             }
+        }
+
+        seat_by_shift(state, group, &planned, &mut drawn);
+        for (turn, si, person_id) in drawn {
+            planned.extend(person_id.clone().map(|pid| (turn, pid)));
+            events.push(DomainEvent::SlotAssigned {
+                group_id: group.id.clone(),
+                slot_index: si,
+                iso_year: turn.year,
+                iso_week: turn.week,
+                shift: turn.shift,
+                person_id,
+                source: AssignmentSource::RoundRobin,
+                // Automatic — nobody "did" this, and materialize only ever
+                // fills a not-yet-frozen turn, so there is no prior occupant
+                // to record either.
+                actor_id: None,
+                previous_person_id: None,
+            });
         }
     }
 
@@ -217,6 +227,169 @@ pub fn materialize_group(
         });
     }
     events
+}
+
+/// Who of the people drawn for one week (`drawn`, in turn order) cleans
+/// which shift: slot by slot, everyone gets the shift after the one they
+/// had last time, so in a week split into Mon–Wed / Thu–Sun nobody always
+/// has the start of the week — a plain draw would, whenever the group has
+/// an even number of members. Who cleans in which week stays as drawn.
+fn seat_by_shift(
+    state: &State,
+    group: &CleaningGroup,
+    planned: &[(Turn, PersonId)],
+    drawn: &mut [(Turn, usize, Option<PersonId>)],
+) {
+    let Some(&(first, ..)) = drawn.first() else {
+        return;
+    };
+    let rhythm = group.rhythm.for_week(first.year, first.week);
+    let shifts = rhythm.shift_count() as u8;
+    if shifts < 2 {
+        return;
+    }
+    for slot in State::slot_indices(group) {
+        let seats: Vec<usize> = (0..drawn.len())
+            .filter(|&i| drawn[i].1 == slot && drawn[i].2.is_some())
+            .collect();
+        let mut people: Vec<(PersonId, Option<u8>)> = seats
+            .iter()
+            .filter_map(|&i| drawn[i].2.clone())
+            .map(|pid| {
+                let next =
+                    last_shift(state, group, planned, &pid, first.week()).map(|s| (s + 1) % shifts);
+                (pid, next)
+            })
+            .collect();
+        // Shift by shift: whoever is due for it, else someone without a
+        // shift so far, else the next in line.
+        for i in seats {
+            let shift = drawn[i].0.shift;
+            let pos = people
+                .iter()
+                .position(|(_, next)| *next == Some(shift))
+                .or_else(|| people.iter().position(|(_, next)| next.is_none()))
+                .unwrap_or(0);
+            drawn[i].2 = Some(people.remove(pos).0);
+        }
+    }
+}
+
+/// The shift `person` had on their last turn in `group` before week
+/// `before`, counting only weeks split into shifts — from what is stored
+/// and from `planned` (draws not stored yet).
+fn last_shift(
+    state: &State,
+    group: &CleaningGroup,
+    planned: &[(Turn, PersonId)],
+    person: &PersonId,
+    before: (i32, u32),
+) -> Option<u8> {
+    let stored = state
+        .slot_assignments
+        .iter()
+        .filter(|a| a.group_id == group.id && a.person_id.as_ref() == Some(person))
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift));
+    let drawn = planned
+        .iter()
+        .filter(|(_, pid)| pid == person)
+        .map(|(turn, _)| *turn);
+    stored
+        .chain(drawn)
+        .filter(|t| t.week() < before && group.rhythm.for_week(t.year, t.week).is_split())
+        .max()
+        .map(|t| t.shift)
+}
+
+/// Once, for plans made before `seat_by_shift`: re-seats the weeks from
+/// `from` on the same way, so the start of the week takes turns there too.
+/// Only plain rotation is touched — a slot's week whose turns were all
+/// drawn by the rotation, none of them done or asked about; anything
+/// assigned, swapped or taken over stays as it is. Only swaps who has
+/// which shift within a week: nobody gains or loses a week. Returns how
+/// many turns changed hands.
+pub fn rebalance_shifts(state: &mut State, from: (i32, u32)) -> anyhow::Result<usize> {
+    let mut changed = 0;
+    for group in state.cleaning_groups.clone() {
+        if !group.is_active {
+            continue;
+        }
+        let mut weeks: Vec<(i32, u32)> = state
+            .slot_assignments
+            .iter()
+            .filter(|a| a.group_id == group.id && (a.iso_year, a.iso_week) >= from)
+            .map(|a| (a.iso_year, a.iso_week))
+            .collect();
+        weeks.sort_unstable();
+        weeks.dedup();
+        for (year, week) in weeks {
+            let turns = state.turns_in_week(&group, year, week);
+            for slot in State::slot_indices(&group) {
+                let Some(mut drawn) = plain_rotation(state, &group, slot, &turns) else {
+                    continue;
+                };
+                let before = drawn.clone();
+                seat_by_shift(state, &group, &[], &mut drawn);
+                for ((turn, _, person_id), (_, _, previous)) in drawn.into_iter().zip(before) {
+                    if person_id == previous {
+                        continue;
+                    }
+                    state.apply_event(DomainEvent::SlotAssigned {
+                        group_id: group.id.clone(),
+                        slot_index: slot,
+                        iso_year: turn.year,
+                        iso_week: turn.week,
+                        shift: turn.shift,
+                        person_id,
+                        source: AssignmentSource::RoundRobin,
+                        actor_id: None,
+                        previous_person_id: previous,
+                    })?;
+                    changed += 1;
+                }
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// The turns of one slot's week as the rotation drew them — `None` unless
+/// each one was drawn for someone and nothing happened to any of them yet
+/// (done, skipped, asked about, a swap pending).
+fn plain_rotation(
+    state: &State,
+    group: &CleaningGroup,
+    slot: usize,
+    turns: &[Turn],
+) -> Option<Vec<(Turn, usize, Option<PersonId>)>> {
+    let &first = turns.first()?;
+    let week = first.week();
+    let touched = state.help_requests.values().any(|r| {
+        r.group_id == group.id && r.slot_index == slot && (r.iso_year, r.iso_week) == week
+    }) || state.swap_requests.iter().any(|r| {
+        r.status == crate::state::SwapStatus::Pending
+            && r.group_id == group.id
+            && r.slot_index == slot
+            && (r.iso_year, r.iso_week) == week
+    });
+    if touched {
+        return None;
+    }
+    turns
+        .iter()
+        .map(|&turn| {
+            if state.completion_for(group, slot, turn).is_some() {
+                return None;
+            }
+            let a = state.slot_assignments.iter().find(|a| {
+                a.group_id == group.id
+                    && a.slot_index == slot
+                    && (a.iso_year, a.iso_week, a.shift) == (turn.year, turn.week, turn.shift)
+            })?;
+            (a.source == AssignmentSource::RoundRobin && a.person_id.is_some())
+                .then(|| (turn, slot, a.person_id.clone()))
+        })
+        .collect()
 }
 
 /// Preview who `materialize` would assign to one (group, slot, turn) beyond
@@ -1063,6 +1236,135 @@ mod tests {
             pinned.cleaning_groups[0].rotation_queue,
             st.cleaning_groups[0].rotation_queue
         );
+    }
+
+    /// Kitchen cleaned Mon–Wed + Thu–Sun by `names`; nothing frozen yet.
+    fn split_state(names: &[&str]) -> (State, Vec<PersonId>) {
+        let mut st = State::default();
+        st.created_at = Some(Utc::now());
+        let people: Vec<Person> = names.iter().map(|n| Person::new_named(n)).collect();
+        let ids: Vec<PersonId> = people.iter().map(|p| p.id.clone()).collect();
+        st.persons = people;
+        let mut g = CleaningGroup::new("Kitchen");
+        g.member_ids = ids.clone();
+        g.rotation_queue = ids.clone();
+        g.rhythm = crate::rhythm::Rhythm {
+            every_weeks: Some(1),
+            shift_starts: vec![0, 3],
+            ..Default::default()
+        };
+        st.cleaning_groups.push(g);
+        (st, ids)
+    }
+
+    /// Who has Mon–Wed and Thu–Sun in each of the next `weeks` weeks.
+    fn shifts(st: &State, weeks: i64) -> Vec<[Option<PersonId>; 2]> {
+        let (y, w) = current_iso_week();
+        (0..weeks)
+            .map(|i| {
+                let (y, w) = add_weeks(y, w, i);
+                [0, 1].map(|shift| {
+                    st.slot_assignments
+                        .iter()
+                        .find(|a| (a.iso_year, a.iso_week, a.shift) == (y, w, shift))
+                        .and_then(|a| a.person_id.clone())
+                })
+            })
+            .collect()
+    }
+
+    fn week(a: &PersonId, b: &PersonId) -> [Option<PersonId>; 2] {
+        [Some(a.clone()), Some(b.clone())]
+    }
+
+    #[test]
+    fn in_split_weeks_the_start_of_the_week_takes_turns() {
+        // Four people: a plain draw would pair Anna+Bob and Carla+Dan with
+        // Anna and Carla always on Mon–Wed.
+        let (mut st, ids) = split_state(&["Anna", "Bob", "Carla", "Dan"]);
+        let [a, b, c, d] = [&ids[0], &ids[1], &ids[2], &ids[3]];
+        for ev in materialize(&st, 6) {
+            st.apply_event(ev).unwrap();
+        }
+        assert_eq!(
+            shifts(&st, 6),
+            [
+                week(a, b),
+                week(c, d),
+                week(b, a),
+                week(d, c),
+                week(a, b),
+                week(c, d)
+            ]
+        );
+        // A plan made this way has nothing left to re-seat.
+        let before = st.slot_assignments.clone();
+        assert_eq!(rebalance_shifts(&mut st, current_iso_week()).unwrap(), 0);
+        assert_eq!(st.slot_assignments, before);
+    }
+
+    #[test]
+    fn an_odd_rotation_alternates_as_drawn() {
+        let (mut st, ids) = split_state(&["Anna", "Bob", "Carla"]);
+        let [a, b, c] = [&ids[0], &ids[1], &ids[2]];
+        for ev in materialize(&st, 4) {
+            st.apply_event(ev).unwrap();
+        }
+        assert_eq!(
+            shifts(&st, 4),
+            [week(a, b), week(c, a), week(b, c), week(a, b)]
+        );
+    }
+
+    #[test]
+    fn rebalancing_an_old_plan_re_seats_only_plain_rotation_weeks() {
+        let (mut st, ids) = split_state(&["Anna", "Bob", "Carla", "Dan"]);
+        let [a, b, c, d] = [&ids[0], &ids[1], &ids[2], &ids[3]];
+        let gid = st.cleaning_groups[0].id.clone();
+        // A plan from before: Anna and Carla always start the week.
+        let (y, w) = current_iso_week();
+        for i in 0..6 {
+            let (py, pw) = add_weeks(y, w, i);
+            let pair = if i % 2 == 0 { [a, b] } else { [c, d] };
+            for (shift, who) in pair.into_iter().enumerate() {
+                st.apply_event(DomainEvent::SlotAssigned {
+                    group_id: gid.clone(),
+                    slot_index: 0,
+                    iso_year: py,
+                    iso_week: pw,
+                    shift: shift as u8,
+                    person_id: Some(who.clone()),
+                    // Week 4 was swapped by hand: it stays.
+                    source: if i == 4 {
+                        AssignmentSource::Swap
+                    } else {
+                        AssignmentSource::RoundRobin
+                    },
+                    actor_id: None,
+                    previous_person_id: None,
+                })
+                .unwrap();
+            }
+        }
+        let changed = rebalance_shifts(&mut st, add_weeks(y, w, 1)).unwrap();
+        assert_eq!(changed, 4);
+        assert_eq!(
+            shifts(&st, 6),
+            [
+                week(a, b), // this week: left alone
+                week(c, d),
+                week(b, a),
+                week(d, c),
+                week(a, b), // swapped by hand: left alone
+                week(c, d)  // Carla had Thu–Sun last time
+            ]
+        );
+        // Who cleans which week didn't change, and it all was rotation.
+        assert!(st
+            .slot_assignments
+            .iter()
+            .filter(|a| a.iso_week != add_weeks(y, w, 4).1)
+            .all(|a| a.source == AssignmentSource::RoundRobin));
     }
 
     #[test]

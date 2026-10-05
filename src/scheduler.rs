@@ -43,6 +43,18 @@ async fn mention_message(
     content
 }
 
+/// The buttons under the plan and a reminder: ✅ done, 🆘 can't make it.
+async fn seed_buttons(room: &Room, event_id: &OwnedEventId) {
+    for key in ["✅", crate::trades::ASK] {
+        room.send(ReactionEventContent::new(Annotation::new(
+            event_id.clone(),
+            key.to_owned(),
+        )))
+        .await
+        .ok();
+    }
+}
+
 pub async fn run(ctx: BotContext, client: Client) {
     info!("Scheduler started");
     loop {
@@ -75,8 +87,12 @@ pub(crate) async fn roll_planning_horizon(ctx: &BotContext) -> anyhow::Result<()
 /// No-op if no plan has been sent for this week yet, or if the rendered
 /// content already matches what was last sent (avoids a pointless Matrix edit).
 pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32, week: u32) {
-    // The week's reminders show who's done, too.
+    // The week's reminders show who's done, too — 🆘 requests close once
+    // settled.
     refresh_reminders(ctx, room, year, week).await;
+    crate::trades::tidy(ctx, room, false).await;
+    // Turn menus show who has a turn now, and what was asked.
+    crate::turn_menu::refresh_all(ctx, &room.client()).await;
     let week_key = format!("{year}-W{week:02}");
 
     let (canonical_eid, msg, mxids, already_mentioned) = {
@@ -192,6 +208,9 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     if !after_hour {
         return Ok(());
     }
+    // 🆘 requests: close settled ones; nobody stepped in by the start of
+    // the turn → tell the admins.
+    crate::trades::tidy(ctx, &room, true).await;
 
     // ── Weekly plan: every turn of the week, posted and pinned once ──────────
     let plan = {
@@ -222,13 +241,8 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
         register_weekly_plan_message(ctx, year, week, &msg, &plan_eid).await?;
         info!("Sent consolidated weekly plan for week {week}/{year}");
 
-        // Self-react ✅ (UI affordance) then update room pin.
-        room.send(ReactionEventContent::new(Annotation::new(
-            plan_eid.clone(),
-            "✅".to_string(),
-        )))
-        .await
-        .ok();
+        // The ✅ and 🆘 buttons, then the pin.
+        seed_buttons(&room, &plan_eid).await;
         pin_weekly_plan(ctx, &room, Some(&plan_eid)).await;
     }
 
@@ -390,12 +404,7 @@ pub(crate) async fn announce_weekly_plan(
     register_weekly_plan_message(ctx, year, week, &msg, &new_eid).await?;
 
     // ── Phase 4: react + pin (no lock held) ──────────────────────────────────
-    room.send(ReactionEventContent::new(Annotation::new(
-        new_eid.clone(),
-        "✅".to_string(),
-    )))
-    .await
-    .ok();
+    seed_buttons(room, &new_eid).await;
     pin_weekly_plan(ctx, room, Some(&new_eid)).await;
 
     Ok(Some(new_eid))
@@ -544,13 +553,8 @@ pub(crate) async fn send_reminder(
         );
         state.save(&ctx.state_path).await?;
     }
-    // Like on the plan: a ✅ to tap.
-    room.send(ReactionEventContent::new(Annotation::new(
-        event_id.clone(),
-        "✅".to_owned(),
-    )))
-    .await
-    .ok();
+    // Like on the plan: ✅ and 🆘 to tap.
+    seed_buttons(room, &event_id).await;
     Ok(Some(event_id))
 }
 
@@ -646,7 +650,7 @@ async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) 
 /// ```text
 /// ⏰ Still open, ends today: @bob (Bath · Thu–Fri) · Dan (Kitchen)
 /// ✅ alice (2nd Floor)
-/// React ✅ here or on the plan when it's done.
+/// React ✅ here or on the plan when it's done · 🆘 if you can't make it.
 /// ```
 ///
 /// "the plan" links to that week's plan message (`plan_link`), if any.
@@ -714,7 +718,9 @@ pub(crate) fn reminder_text(
     }
     if !open.is_empty() {
         let plan = plan_link.map_or_else(|| "the plan".to_owned(), |l| format!("[the plan]({l})"));
-        lines.push(format!("React ✅ here or on {plan} when it's done."));
+        lines.push(format!(
+            "React ✅ here or on {plan} when it's done · 🆘 if you can't make it."
+        ));
     }
     mxids.sort();
     mxids.dedup();
@@ -951,12 +957,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
                     let new_eid = resp.response.event_id.clone();
                     match register_weekly_plan_message(ctx, year, week, &raw_msg, &new_eid).await {
                         Ok(()) => {
-                            room.send(ReactionEventContent::new(Annotation::new(
-                                new_eid.clone(),
-                                "✅".to_string(),
-                            )))
-                            .await
-                            .ok();
+                            seed_buttons(&room, &new_eid).await;
                             pin_weekly_plan(ctx, &room, Some(&new_eid)).await;
                             info!("Reconcile: recreated {week_key} plan message ({new_eid}) and pinned it");
                         }
@@ -993,7 +994,7 @@ pub(crate) fn build_weekly_plan(
         } else if all_done {
             "✨ All done for this week — thank you!".to_owned()
         } else {
-            "React ✅ when your part is done 🫧".to_owned()
+            "React ✅ when your part is done 🫧 · 🆘 if you can't make it".to_owned()
         },
     ];
     let mut all_mxids: Vec<String> = Vec::new();
@@ -1156,7 +1157,7 @@ mod tests {
             text,
             "⏰ Still open, ends today: @alice:example.org (Floor · Scharni) · \
              @bob:example.org (Floor · Colbe) · Dan (Kitchen)\n\
-             React ✅ here or on the plan when it's done."
+             React ✅ here or on the plan when it's done · 🆘 if you can't make it."
         );
         assert_eq!(mxids, ["@alice:example.org", "@bob:example.org"]);
 
@@ -1176,7 +1177,7 @@ mod tests {
         .unwrap();
         assert!(
             text.ends_with(&format!(
-                "React ✅ here or on [the plan]({link}) when it's done."
+                "React ✅ here or on [the plan]({link}) when it's done · 🆘 if you can't make it."
             )),
             "{text}"
         );
@@ -1735,7 +1736,7 @@ mod tests {
         assert_eq!(
             plan,
             format!(
-                "🧹 **{}**\nReact ✅ when your part is done 🫧\n\n\
+                "🧹 **{}**\nReact ✅ when your part is done 🫧 · 🆘 if you can't make it\n\n\
                  **Hall**\n{i}🧽 Stairs, Entrance\n❌ Bob · missed\n\n\
                  **Floor**\n✅ Scharni: @alice:example.org · {}\n{i}🚽 Toilet · 🚿 Shower\n❌ Colbe: Bob · missed",
                 view::week_label(year, week), crate::state::local_time(state.completions[0].completed_at).format("%a %-d %b")

@@ -312,7 +312,7 @@ fn toggle(
 
 /// Which number a reaction key is — with or without the emoji variation
 /// selector some clients leave out.
-fn number_index(key: &str) -> Option<usize> {
+pub fn number_index(key: &str) -> Option<usize> {
     let bare = |s: &str| s.replace('\u{fe0f}', "");
     NUMBERS.iter().position(|n| bare(n) == bare(key))
 }

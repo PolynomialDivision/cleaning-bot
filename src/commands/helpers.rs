@@ -1141,14 +1141,21 @@ pub(crate) struct Duty {
 impl Duty {
     /// "Bathroom", "Bathroom · Mon–Wed", "Floor / Kitchen · Thu–Sun".
     pub(crate) fn label(&self) -> String {
-        let mut label = self.group.name.clone();
-        if let Some(slot) = self.group.slots.get(self.slot_index) {
-            label.push_str(&format!(" / {}", slot.name));
-        }
+        let mut label = self.place();
         if let Some(shift) = self.turn.shift_label(&self.group.rhythm) {
             label.push_str(&format!(" · {shift}"));
         }
         label
+    }
+}
+
+impl Duty {
+    /// "Bathroom", "Floor / Kitchen" — the label without its shift.
+    pub(crate) fn place(&self) -> String {
+        match self.group.slots.get(self.slot_index) {
+            Some(slot) => format!("{} / {}", self.group.name, slot.name),
+            None => self.group.name.clone(),
+        }
     }
 }
 

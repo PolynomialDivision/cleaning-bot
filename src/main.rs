@@ -48,6 +48,8 @@ mod rhythm;
 mod schedule;
 mod scheduler;
 mod state;
+mod trades;
+mod turn_menu;
 mod validate;
 mod view;
 
@@ -149,6 +151,17 @@ async fn main() -> Result<()> {
     // Groups from before per-group rhythms keep the old global interval.
     if migrate_rhythms(&mut st, config.schedule.interval_weeks) {
         st.save(&state_path).await?;
+    }
+
+    // Plans made before the start of a split week took turns: re-seat the
+    // weeks from next week on once, so nobody keeps always starting.
+    if !st.shifts_rebalanced {
+        let (year, week) = state::current_iso_week();
+        let next = state::add_weeks(year, week, 1);
+        let n = resolver::rebalance_shifts(&mut st, next)?;
+        st.shifts_rebalanced = true;
+        st.save(&state_path).await?;
+        tracing::info!("Re-seated {n} turns so the start of split weeks takes turns.");
     }
 
     // Materialize future assignments (idempotent — skips already-stored turns).
@@ -420,6 +433,21 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                // ── Turn menu tap (in the cleaning room or a private chat) ─────
+                if turn_menu::on_reaction(
+                    &ctx,
+                    &room,
+                    &ev.event_id,
+                    &ev.sender,
+                    &reacted_to,
+                    &emoji_key,
+                    &bot_user_id,
+                )
+                .await
+                {
+                    return;
+                }
+
                 // ── Help board button ─────────────────────────────────────────
                 let on_board = room.room_id() == ctx.room_id
                     && ctx.state.lock().await.help_boards.contains(&reacted_to);
@@ -442,6 +470,21 @@ async fn main() -> Result<()> {
                     help_board::run(&ctx, &client, &room, &board, &ev.sender, action).await;
                     // Take the button press back, so it can be pressed again.
                     onboarding::consume_tap(&room, &ev.event_id, &bot_user_id).await;
+                    return;
+                }
+
+                // ── Swapping: 🆘 on the plan, taps on a request or an early swap ──
+                if room.room_id() == ctx.room_id
+                    && trades::on_reaction(
+                        &ctx,
+                        &room,
+                        &ev.event_id,
+                        &ev.sender,
+                        &reacted_to,
+                        &emoji_key,
+                    )
+                    .await
+                {
                     return;
                 }
 
@@ -485,12 +528,26 @@ async fn main() -> Result<()> {
                             r.send(content).await.ok();
                         }
                     }
-                    Ok(reactions::PlanDone::Marked) => {
+                    Ok(
+                        outcome @ (reactions::PlanDone::Marked
+                        | reactions::PlanDone::SwappedEarly(_)),
+                    ) => {
                         if let Err(e) = state.save(&ctx.state_path).await {
                             tracing::error!("Failed to save after plan reaction: {e}");
+                            return;
                         }
                         drop(state);
                         if let Some(r) = client.get_room(&ctx.room_id) {
+                            if let reactions::PlanDone::SwappedEarly(trade) = outcome {
+                                trades::post_early_swap(
+                                    &ctx,
+                                    &r,
+                                    &sender_mxid,
+                                    trade,
+                                    Some(ev.event_id.to_string()),
+                                )
+                                .await;
+                            }
                             let (year, week) = plan_week;
                             scheduler::refresh_pinned_plan(&ctx, &r, year, week).await;
                         }
@@ -501,7 +558,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── Redaction handler (undo a ✅ or a group selector tap) ──────────────────────────────────
+    // ── Redaction handler (undo a ✅, a 🆘 or a group selector tap) ───────────────────────────
     client.add_event_handler({
         let ctx = ctx.clone();
         let bot_user_id = bot_user_id.clone();
@@ -553,6 +610,10 @@ async fn main() -> Result<()> {
                 };
                 if let (Some((year, week)), Some(r)) = (refresh, client.get_room(&ctx.room_id)) {
                     scheduler::refresh_pinned_plan(&ctx, &r, year, week).await;
+                }
+                // A ✅ behind an early swap swaps back; a 🆘 withdraws.
+                if room.room_id() == ctx.room_id {
+                    trades::on_redaction(&ctx, &room, ev.sender.as_str(), &redacted_id).await;
                 }
             }
         }

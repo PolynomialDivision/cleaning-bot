@@ -64,15 +64,16 @@ pub fn board_text() -> String {
      \n\
      📋 Every Monday the plan gets pinned up top — react ✅ on it when your part is done.\n\
      ⏰ When your turn starts or is about to run out, I'll send a short reminder.\n\
+     🆘 Can't make it? React 🆘 on the plan — someone can take your turn or swap theirs for it.\n\
      \n\
      **Tap a button below and I'll do it for you:**\n\
-     📅 your next turns\n\
+     📅 your next turns — swap one, or say you can't make it\n\
      📋 the plan for the next weeks\n\
      👥 join or leave groups\n\
      📄 a printable plan (PDF)\n\
      💬 a private chat with me\n\
      \n\
-     Rather type? !next · !plan · !mygroups · !swap @user · !help"
+     Rather type? !next · !plan · !mygroups · !sos · !help"
         .to_owned()
 }
 
@@ -119,7 +120,19 @@ pub async fn run(
     let private = private_chat(ctx, client, user).await;
     let target = private.as_ref().unwrap_or(room);
     let result: Result<Option<String>> = match action {
-        Action::Next => crate::commands::cmd_next(ctx, user, &[]).await,
+        Action::Next => {
+            // The menu of their turns — the plain list when they have none.
+            let relation = private
+                .is_none()
+                .then(|| Relation::Reply(Reply::with_event_id(board.clone())));
+            match crate::turn_menu::post(ctx, target, user, crate::turn_menu::DEFAULT, relation)
+                .await
+            {
+                Ok(true) => Ok(None),
+                Ok(false) => crate::commands::cmd_next(ctx, user, &[]).await,
+                Err(e) => Err(e),
+            }
+        }
         Action::Plan => Ok(Some(crate::commands::plan_text(
             &*ctx.state.lock().await,
             6,

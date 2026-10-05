@@ -7,13 +7,30 @@ use super::*;
 // Marks the sender's own open turns of this week — those that have started,
 // or the next one if none has (see `markable_duties`). With a group named,
 // only that group; a member of a group without slots may also mark its
-// running turn for someone else (credit goes to whoever marks it).
+// running turn for someone else (credit goes to whoever marks it). With
+// their own shift still to come and the running one of the same slot open,
+// they swap onto the running one (`trades`), told in the cleaning room.
 
 pub(crate) async fn cmd_done(
     ctx: &BotContext,
     sender: &OwnedUserId,
+    room: &Room,
     args: &[&str],
 ) -> Result<Option<String>> {
+    let (reply, swapped) = mark_done(ctx, sender, args).await?;
+    if let (Some(trade), Some(main)) = (swapped, room.client().get_room(&ctx.room_id)) {
+        crate::trades::post_early_swap(ctx, &main, sender.as_str(), trade, None).await;
+    }
+    Ok(reply)
+}
+
+/// `!done` without telling anyone in the room: the answer, and the early
+/// swap made, if one was.
+pub(crate) async fn mark_done(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<(Option<String>, Option<crate::state::Trade>)> {
     let current = current_iso_week();
     let mut state = ctx.state.lock().await;
 
@@ -21,8 +38,9 @@ pub(crate) async fn cmd_done(
         .person_by_matrix_id(sender.as_str())
         .map(|p| p.id.clone())
     else {
-        return Ok(Some(
-            "❌ You're not on the plan yet — !mygroups to join a group.".into(),
+        return Ok((
+            Some("❌ You're not on the plan yet — !mygroups to join a group.".into()),
+            None,
         ));
     };
 
@@ -32,7 +50,7 @@ pub(crate) async fn cmd_done(
         let name = args.join(" ");
         match state.group_by_name(&name) {
             Some(g) => Some(g.clone()),
-            None => return Ok(Some(group_not_found(&name))),
+            None => return Ok((Some(group_not_found(&name)), None)),
         }
     };
 
@@ -43,6 +61,24 @@ pub(crate) async fn cmd_done(
         group.as_ref().map(|g| &g.id),
     );
     if duties.is_empty() {
+        if let Some((trade, cleaned)) = crate::trades::swap_early(
+            &mut state,
+            &sender_person_id,
+            sender.as_str(),
+            current,
+            group.as_ref().map(|g| &g.id),
+            crate::state::today(),
+        )? {
+            state.save(&ctx.state_path).await?;
+            let moved = crate::trades::moved(&state, &trade).join(", ");
+            let labels: Vec<String> = cleaned.iter().map(Duty::label).collect();
+            let reply = format!(
+                "✨ Cleaned: {} — thanks! Your own shift was still to come, so you swapped: \
+                 {moved} takes it now.",
+                labels.join(", ")
+            );
+            return Ok((Some(reply), Some(trade)));
+        }
         // Covering for someone: a member of a group without slots may mark
         // its running turn (or, bare, their only such group's).
         let covering: Vec<CleaningGroup> = match &group {
@@ -59,15 +95,18 @@ pub(crate) async fn cmd_done(
             [g] if !g.is_multi_slot() && g.member_ids.contains(&sender_person_id) => {
                 if let Some(turn) = state.current_turn(g) {
                     if state.is_turn_done(g, turn) {
-                        return Ok(Some(format!(
-                            "✅ Already done: {}",
-                            Duty {
-                                group: g.clone(),
-                                slot_index: 0,
-                                turn
-                            }
-                            .label()
-                        )));
+                        return Ok((
+                            Some(format!(
+                                "✅ Already done: {}",
+                                Duty {
+                                    group: g.clone(),
+                                    slot_index: 0,
+                                    turn
+                                }
+                                .label()
+                            )),
+                            None,
+                        ));
                     }
                     duties.push(Duty {
                         group: g.clone(),
@@ -77,32 +116,44 @@ pub(crate) async fn cmd_done(
                 }
             }
             [g] if !g.member_ids.contains(&sender_person_id) => {
-                return Ok(Some(format!("❌ You are not a member of «{}».", g.name)))
+                return Ok((
+                    Some(format!("❌ You are not a member of «{}».", g.name)),
+                    None,
+                ))
             }
             [g] if g.is_multi_slot() => {
-                return Ok(Some(format!(
+                return Ok((
+                    Some(format!(
                 "You have no open slot in «{}» this week. (!takeover {} <slot> to take one over.)",
                 g.name, g.name
-            )))
+            )),
+                    None,
+                ))
             }
             _ if state.groups_for_person(&sender_person_id).is_empty() => {
-                return Ok(Some("You are not in any cleaning group.".into()))
+                return Ok((Some("You are not in any cleaning group.".into()), None))
             }
             _ => {}
         }
     }
     if duties.is_empty() {
-        return Ok(Some(
-            "Nothing open for you this week. (!status shows who cleans what; \
+        return Ok((
+            Some(
+                "Nothing open for you this week. (!status shows who cleans what; \
              !done <group> marks a group you cleaned for someone else.)"
-                .into(),
+                    .into(),
+            ),
+            None,
         ));
     }
 
     mark_duties_done(&mut state, &sender_person_id, &duties)?;
     state.save(&ctx.state_path).await?;
     let labels: Vec<String> = duties.iter().map(Duty::label).collect();
-    Ok(Some(format!("✨ Cleaned: {} — thanks!", labels.join(", "))))
+    Ok((
+        Some(format!("✨ Cleaned: {} — thanks!", labels.join(", "))),
+        None,
+    ))
 }
 
 // ── !stats <person> ────────────────────────────────────────────────────────────

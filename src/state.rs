@@ -109,6 +109,151 @@ pub struct PrivateChat {
     pub greeted: bool,
 }
 
+// ── Trades ───────────────────────────────────────────────────────────────────
+
+/// One slot of one turn a trade handed from `from` to `to` (see `trades`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Reassignment {
+    pub group_id: GroupId,
+    pub slot_index: usize,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub shift: u8,
+    pub from: Option<PersonId>,
+    /// How `from` came to hold it — restored on an undo.
+    #[serde(default)]
+    pub from_source: crate::domain::AssignmentSource,
+    pub to: Option<PersonId>,
+    /// Already cleaned when traded (the running turn someone cleaned early):
+    /// that it has started doesn't stop an undo.
+    #[serde(default)]
+    pub cleaned: bool,
+}
+
+impl Reassignment {
+    pub fn turn(&self) -> Turn {
+        Turn::new(self.iso_year, self.iso_week, self.shift)
+    }
+}
+
+/// Turns handed around in one go — undone together, or not at all.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Trade {
+    pub changes: Vec<Reassignment>,
+    #[serde(default)]
+    pub undone: bool,
+}
+
+/// Someone ✅'d a later shift while an earlier one was still open: they
+/// took the running shift, its holder got theirs. The message telling the
+/// one moved, by event ID in `State::early_swaps`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct EarlySwap {
+    pub trade: Trade,
+    /// Who cleaned early (Matrix ID).
+    pub cleaner: String,
+    /// Who was moved to the later shift (Matrix IDs).
+    pub moved: Vec<String>,
+    /// The ✅ reaction behind it, if it was one: taking that back undoes
+    /// the swap too.
+    #[serde(default)]
+    pub reaction_id: Option<String>,
+    /// The text it shows now.
+    pub rendered: String,
+}
+
+/// "I can't make it — who steps in?" (🆘 / `!sos`), by event ID in
+/// `State::help_requests`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct HelpRequest {
+    /// Who asked (Matrix ID).
+    pub requester: String,
+    pub group_id: GroupId,
+    pub slot_index: usize,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub shift: u8,
+    pub status: HelpStatus,
+    /// Who stepped in (Matrix ID), and what changed hands.
+    #[serde(default)]
+    pub helper: Option<String>,
+    #[serde(default)]
+    pub trade: Option<Trade>,
+    /// The 🆘 reaction that asked, if one did: taking it back withdraws.
+    #[serde(default)]
+    pub trigger: Option<String>,
+    /// Only a swap is asked for (🔄 in the turn menu): 🙋 doesn't count.
+    #[serde(default)]
+    pub swap_only: bool,
+    /// The admins were told nobody stepped in by the time it started.
+    #[serde(default)]
+    pub admins_told: bool,
+    /// Everyone the request was sent to (its mentions), so its edits
+    /// notify only who is new.
+    #[serde(default)]
+    pub mentioned: Vec<String>,
+    /// The text it shows now.
+    pub rendered: String,
+}
+
+impl HelpRequest {
+    pub fn turn(&self) -> Turn {
+        Turn::new(self.iso_year, self.iso_week, self.shift)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HelpStatus {
+    /// Waiting for someone to step in.
+    Open,
+    /// Someone took it over.
+    Taken,
+    /// Someone took it and gave their next turn for it.
+    Swapped,
+    /// The requester can make it after all.
+    Withdrawn,
+    /// Settled otherwise: done, over, or no longer theirs.
+    Closed,
+}
+
+/// A menu of someone's next turns (`!next`, 📅 on the help board): tap a
+/// number, then 🔄 or 🆘 (see `turn_menu`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TurnMenu {
+    /// Whose turns; nobody else's taps count.
+    pub user_id: String,
+    pub room_id: String,
+    /// The turns offered, in number order (1️⃣ first) — fixed once posted,
+    /// so a number always means the same turn.
+    pub turns: Vec<MenuTurn>,
+    /// The number tapped last (0-based), waiting for 🔄 or 🆘.
+    #[serde(default)]
+    pub selected: Option<usize>,
+    /// What the last tap did.
+    #[serde(default)]
+    pub feedback: Option<String>,
+    /// The text it shows now.
+    #[serde(default)]
+    pub rendered: String,
+}
+
+/// One slot of one turn in a `TurnMenu`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MenuTurn {
+    pub group_id: GroupId,
+    pub slot_index: usize,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub shift: u8,
+}
+
+impl MenuTurn {
+    pub fn turn(&self) -> Turn {
+        Turn::new(self.iso_year, self.iso_week, self.shift)
+    }
+}
+
 /// A reminder message the bot sent, kept up to date as people finish.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ReminderMessage {
@@ -326,6 +471,19 @@ pub struct State {
     /// Help board taps already carried out, by reaction event ID.
     #[serde(default)]
     pub help_taps: RecentIds,
+    /// Early-✅ swaps by the event ID of the message telling the one moved.
+    #[serde(default)]
+    pub early_swaps: HashMap<String, EarlySwap>,
+    /// "Who steps in?" requests by event ID.
+    #[serde(default)]
+    pub help_requests: HashMap<String, HelpRequest>,
+    /// 🆘 / 🙋 / 🔄 / ↩️ reactions and turn menu taps already carried out,
+    /// by event ID.
+    #[serde(default)]
+    pub trade_taps: RecentIds,
+    /// Turn menus by event ID — the latest one per user.
+    #[serde(default)]
+    pub turn_menus: HashMap<String, TurnMenu>,
     /// Private chats the bot opened (help board 💬), by Matrix user.
     #[serde(default)]
     pub private_chats: HashMap<String, PrivateChat>,
@@ -336,6 +494,10 @@ pub struct State {
     /// before welcomes were tracked this way (see `onboarding`).
     #[serde(default)]
     pub welcomes_migrated: bool,
+    /// Plans made before the start of a split week took turns have been
+    /// re-seated (`resolver::rebalance_shifts`).
+    #[serde(default)]
+    pub shifts_rebalanced: bool,
 }
 
 // ── Load / Save ───────────────────────────────────────────────────────────────
@@ -396,6 +558,13 @@ impl State {
                 self.swap_requests.retain(|s| &s.group_id != group_id);
                 self.sent_reminders.retain(|r| &r.group_id != group_id);
                 self.reaction_dones.retain(|_, rd| &rd.group_id != group_id);
+                self.help_requests.retain(|_, r| &r.group_id != group_id);
+                for menu in self.turn_menus.values_mut() {
+                    menu.turns.retain(|t| &t.group_id != group_id);
+                    menu.selected = None;
+                }
+                self.early_swaps
+                    .retain(|_, s| s.trade.changes.iter().all(|c| &c.group_id != group_id));
                 true
             }
             E::GroupDisabled { group_id } => {
