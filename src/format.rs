@@ -10,9 +10,8 @@
 
 use mxbot_common::matrix_sdk::ruma::events::{room::message::RoomMessageEventContent, Mentions};
 
-pub use mxbot_common::format::{
-    extract_mxids, fetch_names, mentionify, mentionify_rich, mentionify_with_names,
-};
+// Display names: `crate::names` (room member, global profile, stored name).
+pub use mxbot_common::format::{extract_mxids, mentionify, mentionify_with_names};
 
 /// Notify exactly who `content` mentions — nobody when it has no `@mxid`
 /// pills. `m.mentions` is always set, even empty: an event without it falls

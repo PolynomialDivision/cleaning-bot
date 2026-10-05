@@ -1098,38 +1098,6 @@ pub(crate) fn next_assignment_summary(state: &crate::state::State, group_id: &Gr
     )
 }
 
-/// Fetch Matrix display names for all known Matrix users and update state.
-/// Keeps Person.display_name in sync with the real Matrix profile name.
-/// Called before PDF generation and whenever a command comes in.
-pub(crate) async fn refresh_display_names(ctx: &BotContext, room: &Room) {
-    let mxids: Vec<String> = ctx
-        .state
-        .lock()
-        .await
-        .persons
-        .iter()
-        .filter_map(|p| p.matrix_id.clone())
-        .collect();
-    if mxids.is_empty() {
-        return;
-    }
-    let refs: Vec<&str> = mxids.iter().map(String::as_str).collect();
-    let fetched = format::fetch_names(room, &refs).await;
-    if fetched.is_empty() {
-        return;
-    }
-    let mut state = ctx.state.lock().await;
-    for p in &mut state.persons {
-        if let Some(mxid) = &p.matrix_id {
-            if let Some(name) = fetched.get(mxid.as_str()) {
-                if !name.is_empty() && name != mxid {
-                    p.display_name = name.clone();
-                }
-            }
-        }
-    }
-}
-
 /// One slot of one turn someone is responsible for.
 #[derive(Clone)]
 pub(crate) struct Duty {

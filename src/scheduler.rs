@@ -27,6 +27,7 @@ use crate::{
 };
 
 async fn mention_message(
+    ctx: &BotContext,
     text: &str,
     mention_mxids: &[String],
     room: &Room,
@@ -35,10 +36,7 @@ async fn mention_message(
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
-    let all_mxids = crate::format::extract_mxids(text);
-    let refs: Vec<&str> = all_mxids.iter().map(String::as_str).collect();
-    let names = crate::format::fetch_names(room, &refs).await;
-    let mut content = crate::format::mentionify_with_names(text, &names);
+    let mut content = crate::names::mentionify(ctx, text, room).await;
     content.mentions = Some(Mentions::with_user_ids(parsed));
     content
 }
@@ -121,13 +119,12 @@ pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32
 
     // Only people new on the plan (a takeover, say) are notified by the
     // edit — not everyone again on every ✅.
-    let content =
-        mention_message(&msg, &mxids, room)
-            .await
-            .make_replacement(ReplacementMetadata::new(
-                canonical_eid.clone(),
-                already_mentioned,
-            ));
+    let content = mention_message(ctx, &msg, &mxids, room)
+        .await
+        .make_replacement(ReplacementMetadata::new(
+            canonical_eid.clone(),
+            already_mentioned,
+        ));
     match room.send(content).await {
         Ok(_) => {
             if let Err(e) =
@@ -233,7 +230,7 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     };
     if let Some((msg, mxids)) = plan {
         let resp = room
-            .send(mention_message(&msg, &mxids, &room).await)
+            .send(mention_message(ctx, &msg, &mxids, &room).await)
             .with_transaction_id(format!("weekly-{year}-{week}").into())
             .await
             .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
@@ -392,7 +389,7 @@ pub(crate) async fn announce_weekly_plan(
 
     // ── Phase 2: send message (no lock held) ─────────────────────────────────
     let resp = room
-        .send(mention_message(&msg, &mxids, room).await)
+        .send(mention_message(ctx, &msg, &mxids, room).await)
         .await
         .map_err(|e| anyhow::anyhow!("announce send failed: {e}"))?;
     let new_eid = resp.response.event_id.clone();
@@ -525,7 +522,7 @@ pub(crate) async fn send_reminder(
     let Some((text, mxids)) = rendered else {
         return Ok(None);
     };
-    let mut send = room.send(mention_message(&text, &mxids, room).await);
+    let mut send = room.send(mention_message(ctx, &text, &mxids, room).await);
     if let Some(txn_id) = txn_id {
         send = send.with_transaction_id(txn_id.into());
     }
@@ -627,7 +624,7 @@ async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) 
         let Ok(event_id) = id.parse::<OwnedEventId>() else {
             continue;
         };
-        let edit = crate::format::quiet(mention_message(&text, &[], room).await)
+        let edit = crate::format::quiet(mention_message(ctx, &text, &[], room).await)
             .make_replacement(ReplacementMetadata::new(event_id, None));
         match room.send(edit).await {
             Ok(_) => {
@@ -878,7 +875,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
             .collect();
         build_weekly_plan(&state, year, week, &due_groups)
     };
-    let expected_content = mention_message(&raw_msg, &mxids, &room).await;
+    let expected_content = mention_message(ctx, &raw_msg, &mxids, &room).await;
     let expected_effective_body = expected_content.body().to_owned();
 
     // What Matrix is *actually, currently* showing — following any edit,
@@ -1579,8 +1576,8 @@ mod tests {
             "person without a Matrix ID must not be listed for mention: {mxids:?}"
         );
 
-        // Even if a stale/unresolvable mxid ended up in the text, `fetch_names`
-        // simply won't have an entry for it — `mentionify_with_names` must
+        // Even if a stale/unresolvable mxid ended up in the text, `names::labels`
+        // falls back to its localpart — `mentionify_with_names` must
         // still degrade gracefully (no panic, message still sendable) rather
         // than dropping the line or failing.
         let content = crate::format::mentionify_with_names(&raw_msg, &HashMap::new());

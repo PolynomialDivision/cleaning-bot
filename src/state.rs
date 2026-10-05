@@ -392,6 +392,9 @@ pub struct State {
     pub paper_documents: HashMap<String, crate::paper::Document>,
     #[serde(default)]
     pub paper_scans: HashMap<String, crate::paper::Proposal>,
+    /// Which printable plan `!plan pdf` makes (`!plan pdf style`).
+    #[serde(default)]
+    pub paper_style: crate::paper::Style,
     #[serde(default)]
     pub persons: Vec<Person>,
     #[serde(default)]

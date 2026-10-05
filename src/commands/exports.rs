@@ -50,6 +50,46 @@ pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
     lines.join("\n")
 }
 
+// ── !plan pdf style [days | tick] ─────────────────────────────────────────
+
+/// Which sheet `!plan pdf` prints: anyone may ask, administrators change it.
+async fn cmd_pdf_style(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<RoomMessageEventContent>> {
+    use crate::paper::Style;
+    let Some(choice) = args.first() else {
+        let style = ctx.state.lock().await.paper_style;
+        return Ok(Some(format::mentionify(&format!(
+            "📄 Printable plan: {}\n\n\
+             !plan pdf style days · {}\n\
+             !plan pdf style tick · {}",
+            style.describe(),
+            Style::Days.describe(),
+            Style::Tick.describe(),
+        ))));
+    };
+    let Some(style) = Style::parse(choice) else {
+        return Ok(Some(format::mentionify(
+            "📄 Unknown style. Use !plan pdf style days or !plan pdf style tick.",
+        )));
+    };
+    require_admin(ctx, sender)?;
+    let mut state = ctx.state.lock().await;
+    state.paper_style = style;
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format::mentionify(&format!(
+        "📄 Printable plan from now on: {}{}",
+        style.describe(),
+        match style {
+            Style::Tick => "\nA tick counts as done in the middle of its days \
+                            (Thursday for a whole week), or the day of the photo if that is earlier.",
+            Style::Days => "",
+        }
+    ))))
+}
+
 // ── !plan pdf [history | next] [N] [group] ─────────────────────────────────────────────
 
 pub(crate) async fn cmd_pdf(
@@ -59,7 +99,12 @@ pub(crate) async fn cmd_pdf(
     args: &[&str],
     answer_to: Option<Answer>,
 ) -> Result<Option<RoomMessageEventContent>> {
-    let _ = sender;
+    if args
+        .first()
+        .is_some_and(|a| a.eq_ignore_ascii_case("style"))
+    {
+        return cmd_pdf_style(ctx, sender, &args[1..]).await;
+    }
     // `history`: the weeks up to this one; `next`: from next week on.
     let history = args
         .first()
@@ -103,9 +148,12 @@ pub(crate) async fn cmd_pdf(
 
     // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99"
     // — as the cleaning room knows them, also when asked in a private chat.
-    if let Some(main) = room.client().get_room(&ctx.room_id) {
-        refresh_display_names(ctx, &main).await;
-    }
+    crate::names::refresh(
+        ctx,
+        &room.client(),
+        room.client().get_room(&ctx.room_id).as_ref(),
+    )
+    .await;
 
     let (document, history_tex, file_name) = {
         let state = ctx.state.lock().await;
@@ -131,7 +179,7 @@ pub(crate) async fn cmd_pdf(
             }
         }
         if !history && !weeks_given {
-            crate::paper::one_page_per_group(&mut snapshot);
+            crate::paper::one_page_per_group(&mut snapshot, state.paper_style);
         }
         if snapshot.is_empty() {
             return Ok(Some(format::mentionify("📄 No duties in this date range.")));

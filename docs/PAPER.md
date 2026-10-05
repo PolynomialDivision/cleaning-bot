@@ -3,9 +3,36 @@
 `!plan pdf` and `!plan pdf next` produce scannable A4 forms. `!plan pdf history`
 keeps the compact, read-only history report. Nothing is automatically deployed.
 
+## Two styles
+
+An administrator chooses which sheet `!plan pdf` prints; it is kept in the
+bot state (`paper_style`), and anyone can ask with `!plan pdf style`:
+
+```
+!plan pdf style days   · a box for each day, the day is recorded (default)
+!plan pdf style tick   · one box per duty, slots side by side; done or not
+```
+
+The style is part of each sheet's manifest, so sheets printed before a switch
+keep scanning as what they are.
+
+**Tick** sheets have one line per week. The group's slots and shifts stand
+side by side as columns (for a group with two slots cleaned twice a week:
+*Stairs Mon–Tue · Hall Mon–Tue · Stairs Thu–Fri · Hall Thu–Fri*), each cell
+the name and one box. A page holds 21 weeks; without a number of weeks
+`!plan pdf` prints 21. A tick has no day, but a completion is recorded with
+one (statistics, history, "done on time"). The bot dates it in the middle of
+the duty's days — `start + (end − start) / 2`, rounded down: Thursday for
+Mon–Sun, Monday for Mon–Tue, Thursday for Thu–Fri — or the day the photo is
+processed if that is earlier, never before the first day. A tick photographed
+before the duty's days start is refused like a day in the future. The
+preview says it: `Done (counted as Thu 8 Oct)`. A duty already recorded as
+done, on whatever day (by `!done`, ✅ or an earlier photo), is no change for a
+tick; on a days sheet a different day is a conflict.
+
 ## Using the sheet
 
-Each duty has a box for each day it may be done. Put **one clear X** (two
+On a days sheet each duty has a box for each day it may be done. Put **one clear X** (two
 strokes) in the day you cleaned and leave everything else blank. There is no
 Skip box on paper: a skipped duty is recorded in Matrix. Any pen works; the example box in the footer shows
 it. Notes are for humans and are not read.
@@ -83,6 +110,7 @@ Layout version 2, in A4 millimetres from the top left (`src/paper.rs` and
 | identity QR | one, centred at `(185,276)`, 20 mm including its quiet zone, drawn as vector squares (no image); upper-case payload, so QR's compact alphanumeric mode gives 29×29 modules of 0.54 mm |
 | rows | from 31 mm, 11–14 mm each (per group, see above); centres in the manifest |
 | boxes | 4.8 mm squares on the row centre: Monday at x = 111.5, then every 13 mm (the days share the width right of *Who*) |
+| tick sheets | a line per week, same rows and heights; *Week* 14–27, *When* 27–52, the columns share 52–196 evenly; one 4.8 mm box per duty, 4.5 mm left of its column's right edge (field kind `done`, ID `<row>:done`) |
 
 The QR contains only:
 
@@ -187,9 +215,10 @@ https://zbar.sourceforge.net/api/zbar_8h.html
 Run:
 
 ```sh
-PAPER_LAYOUT_FIXTURE=/tmp/cleaning-paper-manifest.json cargo test --offline
-PAPER_LAYOUT_FIXTURE=/tmp/cleaning-paper-manifest.json OPENBLAS_NUM_THREADS=1 \
-  python3 -m unittest discover -s scripts -p 'test_paper.py' -v
+export PAPER_LAYOUT_FIXTURE=/tmp/cleaning-paper-manifest.json
+export PAPER_TICK_FIXTURE=/tmp/cleaning-paper-tick-manifest.json
+cargo test --offline
+OPENBLAS_NUM_THREADS=1 python3 -m unittest discover -s scripts -p 'test_paper.py' -v
 cargo clippy --offline --all-targets -- -D warnings
 ```
 
@@ -207,14 +236,17 @@ They render real PDFs, rasterize them, draw X marks with separate pen strokes
   a buckled band, a cropped or blurred photo, missing targets, an unrelated
   image, an old revision, two pages in one photo;
 - a complete version-1 sheet (still scannable);
-- with `PAPER_LAYOUT_FIXTURE`, a round trip through the actual Rust-generated
-  multi-slot/twice-weekly manifest, including its geometry.
+- a tick sheet: empty, ticks side by side in one week and across the page
+  (read without a day), photographed, a tick-shaped mark refused;
+- with `PAPER_LAYOUT_FIXTURE` and `PAPER_TICK_FIXTURE`, round trips through
+  the actual Rust-generated multi-slot/twice-weekly manifests in both styles.
 
 `artifacts/` (not in git; the tests write it on every run) holds synthetic,
 anonymous previews, not the house's live plan:
 `paper-{weekly,twice-weekly,multi-slot}.png` in colour, `*-bw.png` in greyscale
-(what the scanner and a black-and-white printer see), `paper-full-layout.*` from
-the Rust manifest, `paper-phone-simulation.jpg`.
+(what the scanner and a black-and-white printer see), `paper-tick.*`,
+`paper-full-layout.*` and `paper-tick-full-layout.pdf` from the Rust
+manifests, `paper-phone-simulation.jpg`.
 
 ## Deliberate limitations
 

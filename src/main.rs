@@ -38,6 +38,7 @@ mod format;
 mod help_board;
 mod http;
 mod ical;
+mod names;
 mod onboarding;
 mod paper;
 mod pdf;
@@ -675,14 +676,10 @@ async fn main() -> Result<()> {
     info!("Initial sync complete");
 
     // Show real Matrix display names in !status/!groups right away instead
-    // of Matrix usernames until each person sends their first command.
-    if let Some(room) = client.get_room(&ctx.room_id) {
-        commands::refresh_display_names(&ctx, &room).await;
-        let mut state = ctx.state.lock().await;
-        if let Err(e) = state.save(&ctx.state_path).await {
-            error!("Failed to save refreshed display names: {e}");
-        }
-    }
+    // of Matrix usernames until each person sends their first command —
+    // also for people the bot shares no room with (their global profile).
+    // Bounded in time; saved when a name changed.
+    names::refresh(&ctx, &client, client.get_room(&ctx.room_id).as_ref()).await;
 
     // Self-heal the current week's plan message against persisted state
     // before the scheduler loop (or any further event handling) starts, so

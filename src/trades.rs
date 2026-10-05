@@ -764,14 +764,20 @@ fn mentions(mxids: &[String]) -> Mentions {
     Mentions::with_user_ids(mxids.iter().filter_map(|m| m.parse::<OwnedUserId>().ok()))
 }
 
-async fn content(room: &Room, text: &str, notify: &[String]) -> RoomMessageEventContent {
-    let mut content = format::mentionify_rich(text, room).await;
+async fn content(
+    ctx: &BotContext,
+    room: &Room,
+    text: &str,
+    notify: &[String],
+) -> RoomMessageEventContent {
+    let mut content = crate::names::mentionify(ctx, text, room).await;
     content.mentions = Some(mentions(notify));
     content
 }
 
 /// Edit `event_id` to `text`, notifying who of `notify` wasn't in `before`.
 async fn edit(
+    ctx: &BotContext,
     room: &Room,
     event_id: &str,
     text: &str,
@@ -781,7 +787,7 @@ async fn edit(
     let Ok(id) = event_id.parse::<OwnedEventId>() else {
         return false;
     };
-    let edit = content(room, text, notify)
+    let edit = content(ctx, room, text, notify)
         .await
         .make_replacement(ReplacementMetadata::new(id, Some(mentions(before))));
     match room.send(edit).await {
@@ -849,7 +855,7 @@ pub async fn post_early_swap(
         record.rendered = early_text(&state, &record);
         (record.rendered.clone(), record.moved.clone(), record)
     };
-    let event_id = match room.send(content(room, &text, &notify).await).await {
+    let event_id = match room.send(content(ctx, room, &text, &notify).await).await {
         Ok(response) => response.response.event_id,
         Err(e) => {
             tracing::warn!("Failed to tell about an early swap: {e}");
@@ -871,7 +877,7 @@ pub async fn post_request(
     mut req: HelpRequest,
 ) -> Option<OwnedEventId> {
     let (text, notify) = request_text(&*ctx.state.lock().await, &req);
-    let event_id = match room.send(content(room, &text, &notify).await).await {
+    let event_id = match room.send(content(ctx, room, &text, &notify).await).await {
         Ok(response) => response.response.event_id,
         Err(e) => {
             tracing::warn!("Failed to post a 🆘 request: {e}");
@@ -1077,7 +1083,7 @@ async fn update_request(ctx: &BotContext, room: &Room, request_id: &str) {
         }
         (text, notify, req.mentioned.clone())
     };
-    if edit(room, request_id, &text, &notify, &before).await {
+    if edit(ctx, room, request_id, &text, &notify, &before).await {
         let mut state = ctx.state.lock().await;
         if let Some(req) = state.help_requests.get_mut(request_id) {
             req.rendered = text;
@@ -1131,7 +1137,7 @@ async fn undo_early(
         return;
     }
     drop(state);
-    if edit(room, notice_id, &text, &[], &[]).await {
+    if edit(ctx, room, notice_id, &text, &[], &[]).await {
         let mut state = ctx.state.lock().await;
         if let Some(swap) = state.early_swaps.get_mut(notice_id) {
             swap.rendered = text;
@@ -1221,7 +1227,7 @@ pub async fn tidy(ctx: &BotContext, room: &Room, nudge: bool) {
             label.unwrap_or_default(),
             admins.join(" ")
         );
-        let mut message = content(room, &text, &admins).await;
+        let mut message = content(ctx, room, &text, &admins).await;
         message.relates_to = Some(Relation::Reply(Reply::with_event_id(event_id)));
         if let Err(e) = room.send(message).await {
             tracing::warn!("Failed to tell the admins about a 🆘: {e}");

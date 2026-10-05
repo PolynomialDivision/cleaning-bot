@@ -222,15 +222,19 @@ pub(crate) async fn cmd_linkmatrix(
     }
 
     // Fetch the Matrix display name immediately so the record looks the same
-    // as one created via !member add from the start. This is the only step that
-    // needs a live `Room` — everything else is pure state mutation, split out
-    // into `apply_linkmatrix` so that logic (including the repair path) is
-    // directly unit-testable without a `Room`.
-    let fetched = format::fetch_names(room, &[mxid.as_str()]).await;
-    let display_name = fetched
-        .get(mxid.as_str())
-        .filter(|n| !n.is_empty() && n.as_str() != mxid.as_str())
-        .cloned();
+    // as one created via !member add from the start — from this room, else
+    // their global profile (the bot need not share a room with them). This
+    // is the only step that needs a live `Room` — everything else is pure
+    // state mutation, split out into `apply_linkmatrix` so that logic
+    // (including the repair path) is directly unit-testable without a `Room`.
+    let display_name = crate::names::live(
+        &room.client(),
+        Some(room),
+        &[mxid.as_str()],
+        crate::names::ONE,
+    )
+    .await
+    .remove(mxid.as_str());
 
     apply_linkmatrix(ctx, &name, &mxid, display_name.as_deref()).await
 }

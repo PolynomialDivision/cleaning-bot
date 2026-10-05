@@ -444,7 +444,9 @@ def read_marks(im,page):
         if not selected: continue
         if len(selected)!=1: raise ValueError('Mark exactly one day with an X per duty')
         chosen=selected[0]
-        marks.append({'row':row['id'],'skipped':chosen=='skip','day':None if chosen=='skip' else chosen})
+        # 'done' (a tick sheet's only box): done, the bot dates it.
+        day=None if chosen in ('skip','done') else chosen
+        marks.append({'row':row['id'],'skipped':chosen=='skip','day':day})
     return marks
 
 
@@ -503,6 +505,73 @@ def period(rows):
 DAY_X, DAY_STEP = 111.5, 13
 
 
+def footer(tex, text, doc, page, how):
+    """How to use the sheet, with a little example box; thanks; page number."""
+    ex, ey = 19, 271
+    tex.append(fr'\draw[black,line width=.22mm] ({ex-2},{ey-2}) rectangle ({ex+2},{ey+2});')
+    tex.append(fr'\draw[ink,line width=.35mm,line cap=round] ({ex-1.3},{ey-1.3}) -- ({ex+1.3},{ey+1.3}) ({ex-1.3},{ey+1.3}) -- ({ex+1.3},{ey-1.3});')
+    text(23.5, ey, how, 8.5, 150, True, anchor='west')
+    text(15, 280, r'\color{accent}\faHeart\enspace Thanks for keeping our home lovely.', 8, 120, True, anchor='west')
+    text(150, 280, f"{page['number']+1} / {len(doc['pages'])}", 8, 20, anchor='west', color='muted')
+
+
+#: Tick sheets: the week's dates between the badge and the slot columns (mm).
+TICK_WHEN_X, TICK_COLUMNS_X = 27, 52
+
+
+def render_ticks(tex, text, page, rows, top, first_top, half, bottom):
+    """A tick sheet's table: a line per week, the slots (and shifts) side by
+    side, in each cell who and one box. Columns and boxes from the manifest."""
+    columns = page.get('columns') or []
+    for column in columns:
+        left, width = column['left'], column['right']-column['left']
+        title = tex_escape(column['title'][:40]) or 'Who'
+        if column['subtitle']:
+            text(left+1.5, first_top-5.3, r'\textbf{'+fit(width-3, title)+'}', 8.5, width-2, True, anchor='west')
+            text(left+1.5, first_top-2.1, fit(width-3, tex_escape(column['subtitle'])), 7.5, width-2, True,
+                 anchor='west', color='muted')
+        else:
+            text(left+1.5, first_top-4, r'\textbf{'+fit(width-3, title)+'}', 8.5, width-2, True, anchor='west')
+    text(20.5, first_top-4, 'Week', 8, 12, anchor='center', align='center', color='muted')
+    text(TICK_WHEN_X+3, first_top-4, 'When', 8, 22, anchor='west', color='muted')
+
+    weeks = []
+    for row in rows:
+        if weeks and (weeks[-1][0]['year'], weeks[-1][0]['week']) == (row['year'], row['week']):
+            weeks[-1].append(row)
+        else:
+            weeks.append([row])
+    for members in weeks:
+        y = members[0]['y']
+        tex.append(fr'\draw[black!55,line width=.35mm] (14,{y-half}) -- (196,{y-half});')
+        tex.append(fr"\node[circle,draw=accent,line width=.3mm,inner sep=0,minimum size=6mm,"
+                   fr"font=\small\bfseries,text=accent] at (20.5,{y}) {{{members[0]['week']}}};")
+        start = min(datetime.date.fromisoformat(r['start']) for r in members)
+        end = max(datetime.date.fromisoformat(r['end']) for r in members)
+        text(TICK_WHEN_X+2.5, y, fit(21.5, tex_escape(span(start, end))), 8.5, 23, True, anchor='west')
+        for row in members:
+            if row.get('column', 0) >= len(columns):
+                continue
+            column = columns[row.get('column', 0)]
+            left, right = column['left'], column['right']
+            # The name stops well before the box: the scanner reads 3.6mm
+            # around it, ink there would make the box unclear.
+            width = right-left-12 if row['fields'] else right-left-3
+            name = short_name(row['name'])
+            if row['status']:
+                text(left+1.5, y-2, fit_words(width, name), min(name_size(name), 8.5), width+1, True, anchor='west')
+                text(left+1.5, y+2.6, fit(right-left-3, tex_escape(row['status'])), 7, right-left-2, True,
+                     anchor='west', color='muted')
+            else:
+                text(left+1.5, y, fit_words(width, name), name_size(name), width+1, True, anchor='west')
+            for field in row['fields']:
+                fx, fy, h = field['x'], field['y'], field['size']/2
+                tex.append(fr'\draw[black,line width=.22mm,fill=white] ({fx-h},{fy-h}) rectangle ({fx+h},{fy+h});')
+    tex.append(fr'\draw[accent,line width=.5mm] (14,{bottom}) -- (196,{bottom});')
+    for x in [14, TICK_WHEN_X, TICK_COLUMNS_X]+[c['right'] for c in columns]:
+        tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')
+
+
 def render(doc, engine='tectonic'):
     if doc.get('layout_version', 1) == 1:
         return legacy.render(doc, engine)
@@ -526,14 +595,17 @@ def render(doc, engine='tectonic'):
                        fr'font=\fontsize{{{size}}}{{{size*1.2:.1f}}}\selectfont,text={color}] at ({x},{y}) {{{value}}};')
 
         rows = page['rows']
-        # Row height from the manifest (earlier sheets used 12.5mm).
-        half = (rows[1]['y']-rows[0]['y'])/2 if len(rows) > 1 else 5.5
-        first_top = rows[0]['y']-half if rows else 31
-        top = first_top-6          # the column titles' row
-        bottom = rows[-1]['y']+half if rows else first_top
+        tick = doc.get('style') == 'tick'
+        # Row height from the manifest (earlier sheets used 12.5mm). On a
+        # tick sheet a week's duties share one line.
+        ys = sorted({r['y'] for r in rows})
+        half = (ys[1]-ys[0])/2 if len(ys) > 1 else 5.5
+        first_top = ys[0]-half if rows else 31
+        top = first_top-(8 if tick else 6)          # the column titles' row
+        bottom = ys[-1]+half if rows else first_top
         # Weekend columns, lightly shaded behind everything (never under a
         # box's surroundings the scanner reads: those stay within 3.6mm).
-        for day in (5, 6):
+        for day in (5, 6) if not tick else ():
             cx = DAY_X+day*DAY_STEP
             tex.append(fr'\fill[accent!7] ({cx-DAY_STEP/2},{top}) rectangle ({cx+DAY_STEP/2},{bottom});')
 
@@ -555,6 +627,11 @@ def render(doc, engine='tectonic'):
                    fr'\parbox[b]{{\dimexpr 180mm-\wd1-6mm}}{{\raggedright\fontsize{{9}}{{11}}\selectfont {where}}}}};')
 
         tex.append(fr'\draw[accent,line width=.6mm] (14,{top}) -- (196,{top});')
+        if tick:
+            render_ticks(tex, text, page, rows, top, first_top, half, bottom)
+            footer(tex, text, doc, page, r'\textbf{Done? Put one clear X in your box.} Leave the rest blank.')
+            tex.append(r'\end{tikzpicture}')
+            continue
         head = first_top-3
         text(20.5, head, 'Week', 8, 12, anchor='center', align='center', color='muted')
         text(30, head, 'When' + (' · task' if any(r.get('task') for r in rows) else ''), 8, 45, anchor='west', color='muted')
@@ -602,13 +679,7 @@ def render(doc, engine='tectonic'):
         for x in (14, 27, 76, 105, 196):
             tex.append(fr'\draw[black!35,line width=.15mm] ({x},{top}) -- ({x},{bottom});')
 
-        # How to use it, with a little example box.
-        ex, ey = 19, 271
-        tex.append(fr'\draw[black,line width=.22mm] ({ex-2},{ey-2}) rectangle ({ex+2},{ey+2});')
-        tex.append(fr'\draw[ink,line width=.35mm,line cap=round] ({ex-1.3},{ey-1.3}) -- ({ex+1.3},{ey+1.3}) ({ex-1.3},{ey+1.3}) -- ({ex+1.3},{ey-1.3});')
-        text(23.5, ey, r'\textbf{Done? Put one clear X in the day you cleaned.} Leave the rest blank.', 8.5, 150, True, anchor='west')
-        text(15, 280, r'\color{accent}\faHeart\enspace Thanks for keeping our home lovely.', 8, 120, True, anchor='west')
-        text(150, 280, f"{page['number']+1} / {len(doc['pages'])}", 8, 20, anchor='west', color='muted')
+        footer(tex, text, doc, page, r'\textbf{Done? Put one clear X in the day you cleaned.} Leave the rest blank.')
         tex.append(r'\end{tikzpicture}')
     tex.append(r'\end{document}')
     Path('sheet.tex').write_text('\n'.join(tex))

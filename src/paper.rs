@@ -33,11 +33,46 @@ const MAX_ROW_PITCH: f64 = 14.;
 const BOX: f64 = 4.8;
 const MONDAY_X: f64 = 111.5;
 const DAY_PITCH: f64 = 13.;
+/// Tick sheets: columns from here to the table's right edge (Week and the
+/// week's dates to the left), and each box this far left of its column's
+/// right edge (clear of the line by more than the scanner reads around it).
+const TICK_COLUMNS_LEFT: f64 = 52.;
+const TABLE_RIGHT: f64 = 196.;
+const TICK_BOX_INSET: f64 = 4.5;
+
+/// The two kinds of printable plan: a box for each day a duty may be done
+/// (the day is recorded), or one box per duty (only that it was done).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Style {
+    #[default]
+    Days,
+    Tick,
+}
+
+impl Style {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "days" | "day" => Some(Style::Days),
+            "tick" | "ticks" | "simple" => Some(Style::Tick),
+            _ => None,
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Style::Days => "days: a box for each day, the day is recorded",
+            Style::Tick => "tick: one box per duty, slots side by side; done or not, no day",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
     #[serde(default = "legacy_layout")]
     pub layout_version: u8,
+    #[serde(default)]
+    pub style: Style,
     pub id: String,
     pub revision: String,
     pub created: chrono::DateTime<Utc>,
@@ -56,11 +91,23 @@ pub struct Page {
     /// slots), each as a kind and what is left of its name — for the header.
     #[serde(default)]
     pub room_groups: Vec<RoomGroup>,
+    /// Tick sheets: the slots (and shifts) side by side, left to right.
+    #[serde(default)]
+    pub columns: Vec<Column>,
     pub rows: Vec<Row>,
     #[serde(default)]
     pub fiducials: Vec<[f64; 2]>,
     #[serde(default)]
     pub qr_center: [f64; 2],
+}
+/// A column of a tick sheet: its slot ("" without slots), its shift
+/// ("Mon–Tue", "" for a whole week) and where it is (mm).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Column {
+    pub title: String,
+    pub subtitle: String,
+    pub left: f64,
+    pub right: f64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RoomGroup {
@@ -89,6 +136,9 @@ pub struct Row {
     pub label: String,
     #[serde(default)]
     pub task: String,
+    /// Tick sheets: the column it stands in.
+    #[serde(default)]
+    pub column: usize,
     #[serde(default)]
     pub y: f64,
     pub start: NaiveDate,
@@ -194,6 +244,7 @@ fn baseline(state: &State, a: &AssignmentInstance) -> String {
     ))
 }
 pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
+    let style = state.paper_style;
     let mut pages: Vec<Page> = Vec::new();
     let mut groups: Vec<&str> = Vec::new();
     for a in &snapshot.assignments {
@@ -202,100 +253,228 @@ pub fn document(state: &State, snapshot: &ScheduleSnapshot) -> Document {
         }
     }
     for group in groups {
-        let assignments: Vec<_> = snapshot
+        let assignments: Vec<&AssignmentInstance> = snapshot
             .assignments
             .iter()
             .filter(|a| a.group_id == group)
             .collect();
-        let chunks = pages_of(&assignments, |a| (a.iso_year, a.iso_week));
-        // One row height for all of the group's pages: as tall as its
-        // fullest page allows.
-        let fullest = chunks.iter().map(|c| c.len()).max().unwrap_or(1).max(1);
-        let pitch = ((ROWS_BOTTOM - ROWS_TOP) / fullest as f64).clamp(ROW_PITCH, MAX_ROW_PITCH);
-        for chunk in chunks {
-            let mut page = Page {
-                number: pages.len(),
-                title: chunk[0].group_name.clone(),
-                rooms: chunk
-                    .iter()
-                    .flat_map(|a| a.room_names.iter().cloned())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-                room_groups: room_groups(chunk),
-                rows: Vec::new(),
-                fiducials: FIDUCIALS.to_vec(),
-                qr_center: QR_CENTER,
-            };
-            for (i, a) in chunk.iter().enumerate() {
-                let id = hash((&a.group_id, &a.slot_id, a.iso_year, a.iso_week, a.shift));
-                let mut fields = Vec::new();
-                let y = ROWS_TOP + (i as f64 + 0.5) * pitch;
-                let status = if a.is_skipped {
-                    "Skipped".into()
-                } else if a.is_completed {
-                    match a.completed_at {
-                        Some(d) => format!("Done · {}", d.format("%a %-d %b")),
-                        None => "Done".into(),
-                    }
-                } else {
-                    String::new()
-                };
-                if status.is_empty() && a.assignee.is_some() {
-                    let mut day = a.start;
-                    while day <= a.end {
-                        fields.push(Field {
-                            id: format!("{id}:{day}"),
-                            kind: day.to_string(),
-                            size: BOX,
-                            x: MONDAY_X + day.weekday().num_days_from_monday() as f64 * DAY_PITCH,
-                            y,
-                            label: day.format("%a").to_string(),
-                        });
-                        day = day.succ_opt().expect("schedule date");
-                    }
-                }
-                page.rows.push(Row {
-                    id,
-                    group: a.group_id.clone(),
-                    slot: a.slot_id.clone(),
-                    slot_index: a.slot_index,
-                    year: a.iso_year,
-                    week: a.iso_week,
-                    shift: a.shift,
-                    person: a.assignee.as_ref().map(|p| p.id.clone()),
-                    name: a.assignee_name().to_string(),
-                    label: format!(
-                        "{} {}{}",
-                        a.slot_name.as_deref().unwrap_or(""),
-                        a.period_label,
-                        match a.source {
-                            crate::domain::AssignmentSource::RoundRobin => "",
-                            crate::domain::AssignmentSource::Import => " · imported",
-                            _ => " · assigned",
-                        }
-                    ),
-                    task: a.slot_name.clone().unwrap_or_default(),
-                    y,
-                    start: a.start,
-                    end: a.end,
-                    status,
-                    baseline: baseline(state, a),
-                    fields,
-                });
-            }
-            pages.push(page);
+        match style {
+            Style::Days => days_pages(state, &assignments, &mut pages),
+            Style::Tick => tick_pages(state, &assignments, &mut pages),
         }
     }
     Document {
         layout_version: 2,
+        style,
         id: uuid::Uuid::new_v4().simple().to_string(),
-        revision: hash((2, &pages))[..12].into(),
+        revision: hash((2, style, &pages))[..12].into(),
         created: Utc::now(),
         pages,
     }
 }
+
+/// A page of `duties` (all of one group) without rows yet.
+fn page_for(number: usize, duties: &[&AssignmentInstance]) -> Page {
+    Page {
+        number,
+        title: duties[0].group_name.clone(),
+        rooms: duties
+            .iter()
+            .flat_map(|a| a.room_names.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" · "),
+        room_groups: room_groups(duties),
+        columns: Vec::new(),
+        rows: Vec::new(),
+        fiducials: FIDUCIALS.to_vec(),
+        qr_center: QR_CENTER,
+    }
+}
+
+/// The row of one duty, at height `y` (in `column` of a tick sheet), with
+/// `fields` to fill in unless it is already done, skipped or unassigned.
+fn duty_row(
+    state: &State,
+    a: &AssignmentInstance,
+    y: f64,
+    column: usize,
+    fields: impl FnOnce(&str) -> Vec<Field>,
+) -> Row {
+    let id = hash((&a.group_id, &a.slot_id, a.iso_year, a.iso_week, a.shift));
+    let status = if a.is_skipped {
+        "Skipped".into()
+    } else if a.is_completed {
+        match a.completed_at {
+            Some(d) => format!("Done · {}", d.format("%a %-d %b")),
+            None => "Done".into(),
+        }
+    } else {
+        String::new()
+    };
+    let fields = if status.is_empty() && a.assignee.is_some() {
+        fields(&id)
+    } else {
+        Vec::new()
+    };
+    Row {
+        group: a.group_id.clone(),
+        slot: a.slot_id.clone(),
+        slot_index: a.slot_index,
+        year: a.iso_year,
+        week: a.iso_week,
+        shift: a.shift,
+        person: a.assignee.as_ref().map(|p| p.id.clone()),
+        name: a.assignee_name().to_string(),
+        label: format!(
+            "{} {}{}",
+            a.slot_name.as_deref().unwrap_or(""),
+            a.period_label,
+            match a.source {
+                crate::domain::AssignmentSource::RoundRobin => "",
+                crate::domain::AssignmentSource::Import => " · imported",
+                _ => " · assigned",
+            }
+        ),
+        task: a.slot_name.clone().unwrap_or_default(),
+        column,
+        y,
+        start: a.start,
+        end: a.end,
+        status,
+        baseline: baseline(state, a),
+        fields,
+        id,
+    }
+}
+
+/// Row height for pages whose fullest one holds `fullest` rows.
+fn pitch_for(fullest: usize) -> f64 {
+    ((ROWS_BOTTOM - ROWS_TOP) / fullest.max(1) as f64).clamp(ROW_PITCH, MAX_ROW_PITCH)
+}
+
+/// One row per duty, a box for each day it may be done.
+fn days_pages(state: &State, assignments: &[&AssignmentInstance], pages: &mut Vec<Page>) {
+    let chunks = pages_of(assignments, |a| (a.iso_year, a.iso_week));
+    // One row height for all of the group's pages: as tall as its fullest
+    // page allows.
+    let pitch = pitch_for(chunks.iter().map(|c| c.len()).max().unwrap_or(1));
+    for chunk in chunks {
+        let mut page = page_for(pages.len(), chunk);
+        for (i, a) in chunk.iter().enumerate() {
+            let y = ROWS_TOP + (i as f64 + 0.5) * pitch;
+            page.rows.push(duty_row(state, a, y, 0, |id| {
+                let mut fields = Vec::new();
+                let mut day = a.start;
+                while day <= a.end {
+                    fields.push(Field {
+                        id: format!("{id}:{day}"),
+                        kind: day.to_string(),
+                        size: BOX,
+                        x: MONDAY_X + day.weekday().num_days_from_monday() as f64 * DAY_PITCH,
+                        y,
+                        label: day.format("%a").to_string(),
+                    });
+                    day = day.succ_opt().expect("schedule date");
+                }
+                fields
+            }));
+        }
+        pages.push(page);
+    }
+}
+
+/// One row per week; the group's slots (and shifts) side by side, each duty
+/// a name and a single box: done or not, without a day.
+fn tick_pages(state: &State, assignments: &[&AssignmentInstance], pages: &mut Vec<Page>) {
+    // Columns: every shift × slot the group has in these weeks, in order.
+    let mut keys: Vec<(u8, usize)> = assignments
+        .iter()
+        .map(|a| (a.shift, a.slot_index))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let width = (TABLE_RIGHT - TICK_COLUMNS_LEFT) / keys.len().max(1) as f64;
+    let columns: Vec<Column> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let a = assignments
+                .iter()
+                .find(|a| (a.shift, a.slot_index) == *key)
+                .expect("a duty for each column");
+            Column {
+                title: a.slot_name.clone().unwrap_or_default(),
+                subtitle: a.shift_label.clone().unwrap_or_default(),
+                left: TICK_COLUMNS_LEFT + i as f64 * width,
+                right: TICK_COLUMNS_LEFT + (i + 1) as f64 * width,
+            }
+        })
+        .collect();
+    let mut weeks: Vec<Vec<&AssignmentInstance>> = Vec::new();
+    for a in assignments {
+        match weeks.last_mut() {
+            Some(week) if (week[0].iso_year, week[0].iso_week) == (a.iso_year, a.iso_week) => {
+                week.push(a)
+            }
+            _ => weeks.push(vec![a]),
+        }
+    }
+    let chunks = pages_of(&weeks, |w| (w[0].iso_year, w[0].iso_week));
+    let pitch = pitch_for(chunks.iter().map(|c| c.len()).max().unwrap_or(1));
+    for chunk in chunks {
+        let duties: Vec<&AssignmentInstance> = chunk.iter().flatten().copied().collect();
+        let mut page = page_for(pages.len(), &duties);
+        page.columns = columns.clone();
+        for (i, week) in chunk.iter().enumerate() {
+            let y = ROWS_TOP + (i as f64 + 0.5) * pitch;
+            for a in week {
+                let column = keys
+                    .iter()
+                    .position(|k| *k == (a.shift, a.slot_index))
+                    .expect("a column for each duty");
+                let x = columns[column].right - TICK_BOX_INSET;
+                page.rows.push(duty_row(state, a, y, column, |id| {
+                    vec![Field {
+                        id: format!("{id}:done"),
+                        kind: "done".into(),
+                        size: BOX,
+                        x,
+                        y,
+                        label: "Done".into(),
+                    }]
+                }));
+            }
+        }
+        pages.push(page);
+    }
+}
+
+/// A tick has no day. It counts as done in the middle of its window —
+/// Thursday for a whole week, Monday for Mon–Tue — but never later than
+/// `today`. (Before the window starts there is nothing to count: that day
+/// lies in the future and the import refuses it.)
+pub fn tick_day(start: NaiveDate, end: NaiveDate, today: NaiveDate) -> NaiveDate {
+    let middle = start + chrono::Duration::days((end - start).num_days() / 2);
+    middle.min(today).max(start)
+}
+
+/// Give the ticks scanned from a tick sheet their day (see `tick_day`).
+pub fn date_ticks(doc: &Document, page: usize, marks: &mut [Mark], today: NaiveDate) {
+    if doc.style != Style::Tick {
+        return;
+    }
+    let Some(page) = doc.pages.get(page) else {
+        return;
+    };
+    for mark in marks.iter_mut().filter(|m| !m.skipped && m.day.is_none()) {
+        if let Some(row) = page.rows.iter().find(|r| r.id == mark.row) {
+            mark.day = Some(tick_day(row.start, row.end, today));
+        }
+    }
+}
+
 /// The rooms of `chunk`'s duties, per slot in slot order.
 fn room_groups(chunk: &[&AssignmentInstance]) -> Vec<RoomGroup> {
     let mut groups: Vec<(usize, RoomGroup)> = Vec::new();
@@ -361,15 +540,20 @@ fn room(slot: Option<&str>, name: &str) -> RoomLabel {
 
 /// Keep, for each group, only as many whole weeks as fill one page — what
 /// `!plan pdf` prints when no number of weeks is asked for (a group cleaned
-/// by two slots gets ten weeks, a weekly one-slot group 21).
-pub fn one_page_per_group(snapshot: &mut ScheduleSnapshot) {
+/// by two slots gets ten weeks, a weekly one-slot group 21). A tick sheet
+/// has one row per week, so it always gets 21.
+pub fn one_page_per_group(snapshot: &mut ScheduleSnapshot, style: Style) {
     use std::collections::{HashMap, HashSet};
     let all = std::mem::take(&mut snapshot.assignments);
     let mut rows_in_week: HashMap<(&str, (i32, u32)), usize> = HashMap::new();
     for a in &all {
-        *rows_in_week
+        let rows = rows_in_week
             .entry((&a.group_id, (a.iso_year, a.iso_week)))
-            .or_default() += 1;
+            .or_default();
+        *rows = match style {
+            Style::Days => *rows + 1,
+            Style::Tick => 1,
+        };
     }
     // Weeks each group keeps, in order, while they fit (a first week always).
     let mut keep: HashSet<(&str, (i32, u32))> = HashSet::new();
@@ -431,6 +615,10 @@ fn current(state: &State, row: &Row) -> Option<AssignmentInstance> {
         .into_iter()
         .find(|a| a.group_id == row.group && a.slot_id == row.slot && a.shift == row.shift)
 }
+/// A row of a tick sheet: one box, no day.
+fn ticked(row: &Row) -> bool {
+    row.fields.iter().any(|f| f.kind == "done")
+}
 fn validate(state: &State, row: &Row, mark: &Mark, user: &str, admin: bool) -> Result<bool> {
     let a = current(state, row).ok_or_else(|| anyhow::anyhow!("Duty no longer exists"))?;
     let actor = state
@@ -449,6 +637,10 @@ fn validate(state: &State, row: &Row, mark: &Mark, user: &str, admin: bool) -> R
         baseline(state, &a) == row.baseline,
         "Printed assignment changed; request a fresh PDF"
     );
+    // A tick only says "done": recorded on any day, that is no change.
+    if a.is_completed && !mark.skipped && ticked(row) {
+        return Ok(false);
+    }
     if a.is_completed || a.is_skipped {
         ensure!(
             a.is_skipped == mark.skipped && (mark.skipped || a.completed_at == mark.day),
@@ -662,6 +854,12 @@ pub async fn image(
         created: Utc::now(),
         result: None,
     };
+    date_ticks(
+        &doc,
+        proposal.page,
+        &mut proposal.changes,
+        crate::state::today(),
+    );
     {
         let state = ctx.state.lock().await;
         if state.paper_scans.values().any(|p| {
@@ -704,9 +902,14 @@ pub async fn image(
                         r.week,
                         r.name,
                         r.label,
-                        m.day
-                            .map(|d| format!("Done {d}"))
-                            .unwrap_or("Skipped".into())
+                        match m.day {
+                            // No day on a tick sheet: the middle of the window.
+                            Some(d) if ticked(r) => {
+                                format!("Done (counted as {})", d.format("%a %-d %b"))
+                            }
+                            Some(d) => format!("Done {d}"),
+                            None => "Skipped".into(),
+                        }
                     )
                 })
                 .collect();
@@ -1082,8 +1285,8 @@ mod tests {
         assert_eq!(sizes(&[]), Vec::<usize>::new());
     }
 
-    #[test]
-    fn by_default_each_group_fills_one_page() {
+    /// "Upper Floor": cleaned twice a week by two slots, four people.
+    fn upper_floor() -> State {
         let (mut s, _, _) = fixture();
         for name in ["Bob", "Carol", "Dan"] {
             let person = Person::new_named(name);
@@ -1100,8 +1303,14 @@ mod tests {
         let mut hall = CleaningSlot::new("Hall");
         hall.room_names = vec!["Hall Toilet".into(), "Shower Room".into()];
         g.slots = vec![stairs, hall];
+        s
+    }
+
+    #[test]
+    fn by_default_each_group_fills_one_page() {
+        let s = upper_floor();
         let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
-        one_page_per_group(&mut snapshot);
+        one_page_per_group(&mut snapshot, Style::Days);
         let weeks: std::collections::BTreeSet<_> = snapshot
             .assignments
             .iter()
@@ -1118,6 +1327,121 @@ mod tests {
         // The page is filled: 20 rows of 11.55mm reach the footer.
         let rows = &doc.pages[0].rows;
         assert!(rows.last().unwrap().y + (rows[1].y - rows[0].y) / 2. > ROWS_BOTTOM - 0.1);
+    }
+
+    #[test]
+    fn a_tick_sheet_puts_the_slots_side_by_side() {
+        let mut s = upper_floor();
+        s.paper_style = Style::Tick;
+        let mut snapshot = crate::schedule::build_schedule(&s, ROWS_PER_PAGE);
+        one_page_per_group(&mut snapshot, s.paper_style);
+        // One line a week: 21 weeks of four duties on one page.
+        assert_eq!(snapshot.assignments.len(), 4 * ROWS_PER_PAGE);
+        let doc = document(&s, &snapshot);
+        // What `!plan pdf` prints in this style — the Python tests scan it.
+        if let Ok(path) = std::env::var("PAPER_TICK_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        }
+        assert_eq!(doc.style, Style::Tick);
+        assert_eq!(doc.pages.len(), 1);
+        let page = &doc.pages[0];
+        let titles: Vec<_> = page.columns.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["Stairs", "Hall", "Stairs", "Hall"]);
+        assert_eq!(page.columns[0].subtitle, page.columns[1].subtitle);
+        assert_ne!(page.columns[0].subtitle, page.columns[2].subtitle);
+        assert!(page.columns.iter().all(|c| !c.subtitle.is_empty()));
+        let lines: std::collections::BTreeSet<_> =
+            page.rows.iter().map(|r| (r.y * 100.) as i64).collect();
+        assert_eq!(lines.len(), ROWS_PER_PAGE);
+        for row in &page.rows {
+            let column = &page.columns[row.column];
+            assert_eq!(column.title, row.task);
+            assert!(row.fields.len() <= 1);
+            for f in &row.fields {
+                assert_eq!(f.kind, "done");
+                assert_eq!(f.y, row.y);
+                // What the scanner reads around the box (3.6mm) stays clear
+                // of the column's line and leaves room for the name.
+                assert!(column.right - f.x > 3.6, "{column:?} {f:?}");
+                assert!(f.x - column.left > 3.6 + 20., "{column:?} {f:?}");
+            }
+        }
+        // Neither the style nor the columns are the same sheet as days.
+        s.paper_style = Style::Days;
+        assert_ne!(document(&s, &snapshot).revision, doc.revision);
+    }
+
+    #[test]
+    fn a_tick_counts_in_the_middle_of_its_days() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 10, day).unwrap();
+        let later = d(20);
+        assert_eq!(tick_day(d(5), d(11), later), d(8)); // Mon–Sun: Thursday
+        assert_eq!(tick_day(d(5), d(6), later), d(5)); // Mon–Tue: Monday
+        assert_eq!(tick_day(d(8), d(9), later), d(8)); // Thu–Fri: Thursday
+        assert_eq!(tick_day(d(8), d(8), later), d(8));
+        // Never later than the photo; before the window, its first day
+        // (which the import then refuses as the future).
+        assert_eq!(tick_day(d(5), d(11), d(6)), d(6));
+        assert_eq!(tick_day(d(5), d(11), d(1)), d(5));
+    }
+
+    #[test]
+    fn ticks_are_dated_and_count_once() {
+        let (mut s, _, _) = fixture();
+        s.paper_style = Style::Tick;
+        let (y, w) = crate::state::current_iso_week();
+        let snapshot =
+            crate::schedule::build_schedule_from(&s, crate::state::add_weeks(y, w, -1), 1);
+        let doc = document(&s, &snapshot);
+        s.paper_documents.insert(doc.id.clone(), doc.clone());
+        let row = &doc.pages[0].rows[0];
+        assert_eq!(row.fields[0].kind, "done");
+        let tick = |day| Proposal {
+            document: doc.id.clone(),
+            page: 0,
+            user: "@alice:test".into(),
+            room: "!room:test".into(),
+            source_event: "$image".into(),
+            changes: vec![Mark {
+                row: row.id.clone(),
+                skipped: false,
+                day,
+            }],
+            created: Utc::now(),
+            result: None,
+        };
+        let mut p = tick(None);
+        // Undated, it is refused…
+        assert!(changes(&s, &p, false).is_err());
+        // …dated, it is last week's Thursday.
+        date_ticks(&doc, 0, &mut p.changes, crate::state::today());
+        let thursday = row.start + chrono::Duration::days(3);
+        assert_eq!(p.changes[0].day, Some(thursday));
+        assert_eq!(apply(&mut s, &p, false).unwrap(), 1);
+        assert_eq!(s.completions[0].completed_on, Some(thursday));
+        // Done already, on whatever day: another photo of the tick changes
+        // nothing (on a days sheet another day would be refused).
+        assert_eq!(apply(&mut s, &tick(Some(row.start)), false).unwrap(), 0);
+        assert_eq!(s.completions.len(), 1);
+    }
+
+    #[test]
+    fn the_style_is_kept_and_defaults_to_days() {
+        assert_eq!(Style::parse("Tick"), Some(Style::Tick));
+        assert_eq!(Style::parse("days"), Some(Style::Days));
+        assert_eq!(Style::parse("weekly"), None);
+        let mut s = State::default();
+        assert_eq!(s.paper_style, Style::Days);
+        s.paper_style = Style::Tick;
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["paper_style"], "tick");
+        let loaded: State = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.paper_style, Style::Tick);
+        // Manifests and state from before: days.
+        let mut old = serde_json::to_value(&loaded).unwrap();
+        old.as_object_mut().unwrap().remove("paper_style");
+        let old: State = serde_json::from_value(old).unwrap();
+        assert_eq!(old.paper_style, Style::Days);
     }
 
     #[test]

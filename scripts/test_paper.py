@@ -50,6 +50,33 @@ def document():
     return dict(layout_version=2,id='0123456789abcdef0123456789abcdef',revision='abcdef012345',pages=pages)
 
 
+def tick_document():
+    """A tick sheet as src/paper.rs lays it out: a line per week, the slots
+    and shifts side by side from x 52 to 196, one box per duty 4.5mm left of
+    its column's right edge."""
+    columns=[]
+    for i,(title,subtitle) in enumerate([('Stairs','Mon–Tue'),('Hallway','Mon–Tue'),('Stairs','Thu–Fri'),('Hallway','Thu–Fri')]):
+        columns.append(dict(title=title,subtitle=subtitle,left=52+i*36,right=52+(i+1)*36))
+    names=['Alice','Wolkenschieberin','Zoë Maximiliane Schwarzenberger-Lüdenscheidt','Kim 🌸 Straße','Bo']
+    rows=[]
+    for week in range(21):
+        y=31+(week+.5)*11;monday=dt.date(2026,9,28)+dt.timedelta(weeks=week)
+        for column,c in enumerate(columns):
+            start=monday+dt.timedelta(days=3 if column>=2 else 0);end=start+dt.timedelta(days=1)
+            rowid=f't-{week}-{column}'
+            # Week 0 is partly closed: done in one cell, skipped in another.
+            status={(0,0):'Done · Mon 28 Sep',(0,1):'Skipped'}.get((week,column),'')
+            fields=[] if status else [dict(id=f'{rowid}:done',kind='done',x=c['right']-4.5,y=y,size=4.8,label='Done')]
+            rows.append(dict(id=rowid,week=start.isocalendar().week,year=start.isocalendar().year,
+                             name=names[(week+column)%len(names)],label='',task=c['title'],column=column,
+                             start=str(start),end=str(end),y=y,status=status,fields=fields))
+    page=dict(number=0,title='Upper Floor',rooms='Stairs · Hallway',columns=columns,
+              room_groups=[dict(slot='Stairs',rooms=[dict(kind='toilet',label='3rd')]),
+                           dict(slot='Hallway',rooms=[dict(kind='shower',label='')])],
+              rows=rows,fiducials=[[10,10],[200,10],[200,287],[10,287]],qr_center=[185,276])
+    return dict(layout_version=2,style='tick',id='fedcba9876543210fedcba9876543210',revision='0123456789ab',pages=[page])
+
+
 def encoded(im,jpeg=False):
     b=io.BytesIO();im.save(b,format='JPEG' if jpeg else 'PNG',**({'quality':78} if jpeg else {}));return b.getvalue()
 
@@ -305,5 +332,64 @@ class PaperTests(unittest.TestCase):
         out=Path(__file__).resolve().parent.parent/'artifacts'
         (out/'paper-full-layout.pdf').write_bytes(Path('sheet.pdf').read_bytes())
         Image.open('actual.png').save(out/'paper-full-layout.png')
+
+class TickSheetTests(unittest.TestCase):
+    """The second model: one box per duty, done or not (the bot dates it)."""
+    @classmethod
+    def setUpClass(cls):
+        cls.doc=tick_document();cls.tmp=tempfile.TemporaryDirectory();cls.old=os.getcwd();os.chdir(cls.tmp.name)
+        paper.render(cls.doc,engine=ENGINE);cls.blank=raster(0,'tick')
+        out=Path(__file__).resolve().parent.parent/'artifacts';out.mkdir(exist_ok=True)
+        (out/'paper-tick.pdf').write_bytes(Path('sheet.pdf').read_bytes())
+        subprocess.run(['pdftoppm','-r','150','-png','-singlefile','sheet.pdf','colour'],check=True,stdout=subprocess.DEVNULL)
+        Image.open('colour.png').save(out/'paper-tick.png')
+
+    @classmethod
+    def tearDownClass(cls):os.chdir(cls.old);cls.tmp.cleanup()
+
+    def field(self,rowid):
+        return next(r for r in self.doc['pages'][0]['rows'] if r['id']==rowid)['fields'][0]
+
+    def test_empty_sheet_has_no_marks(self):
+        self.assertEqual(paper.scan(encoded(self.blank),self.doc).get('marks'),[])
+
+    def test_ticks_side_by_side_are_read_without_a_day(self):
+        im=self.blank.copy()
+        for rowid in ['t-0-2','t-0-3','t-7-0','t-20-3']:pen_x(im,self.field(rowid))
+        result=paper.scan(encoded(im),self.doc)
+        self.assertEqual(result.get('marks'),[dict(row=r,skipped=False,day=None) for r in ['t-0-2','t-0-3','t-7-0','t-20-3']],result)
+
+    def test_photographed_tick_sheet(self):
+        im=self.blank.copy();pen_x(im,self.field('t-3-1'),width=3,uneven=True)
+        src=[(0,0),(1260,0),(1260,1782),(0,1782)];dst=[(180,110),(1450,50),(1330,2080),(60,1860)]
+        photo=im.transform((1560,2160),Image.Transform.PERSPECTIVE,paper.homography(dst,src),Image.Resampling.BICUBIC,fillcolor=220)
+        for angle in [0,13]:
+            result=paper.scan(encoded(photo.rotate(angle,expand=True,fillcolor=220),jpeg=True),self.doc)
+            self.assertEqual(result.get('marks'),[dict(row='t-3-1',skipped=False,day=None)],(angle,result))
+
+    def test_a_tick_instead_of_an_x_is_unclear(self):
+        f=self.field('t-2-2');x,y=f['x']*6,f['y']*6;im=self.blank.copy()
+        ImageDraw.Draw(im).line([(x-8,y),(x-2,y+7),(x+8,y-8)],fill=0,width=2)
+        self.assertIn('error',paper.scan(encoded(im),self.doc))
+
+    def test_ascii_source_and_no_raster_images(self):
+        self.assertTrue(Path('sheet.tex').read_text().isascii())
+        images=subprocess.run(['pdfimages','-list','sheet.pdf'],capture_output=True,text=True).stdout
+        self.assertEqual(len(images.splitlines()),2,images)
+
+    @unittest.skipUnless(os.environ.get('PAPER_TICK_FIXTURE'),'set PAPER_TICK_FIXTURE to test the Rust tick manifest')
+    def test_actual_rust_tick_layout_round_trip(self):
+        doc=json.loads(Path(os.environ['PAPER_TICK_FIXTURE']).read_text())
+        self.assertEqual(doc['style'],'tick')
+        paper.render(doc,engine=ENGINE);im=raster(0,'actual-tick')
+        self.assertEqual(paper.scan(encoded(im),doc).get('marks'),[])
+        rows=[r for r in doc['pages'][0]['rows'] if r['fields']]
+        week=[r for r in rows if (r['year'],r['week'])==(rows[0]['year'],rows[0]['week'])]
+        for row in week:pen_x(im,row['fields'][0])
+        result=paper.scan(encoded(im),doc)
+        self.assertEqual(result.get('marks'),[dict(row=r['id'],skipped=False,day=None) for r in week],result)
+        out=Path(__file__).resolve().parent.parent/'artifacts'
+        (out/'paper-tick-full-layout.pdf').write_bytes(Path('sheet.pdf').read_bytes())
+
 
 if __name__=='__main__':unittest.main()

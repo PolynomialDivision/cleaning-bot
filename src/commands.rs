@@ -109,24 +109,9 @@ pub async fn handle(
         ))));
     }
 
-    // Update the sender's display name from Matrix on every command (lightweight).
-    {
-        let sender_mxid = sender.as_str().to_owned();
-        let refs = vec![sender_mxid.as_str()];
-        let fetched = format::fetch_names(room, &refs).await;
-        if let Some(name) = fetched.get(sender_mxid.as_str()) {
-            if !name.is_empty() && name != &sender_mxid {
-                let mut state = ctx.state.lock().await;
-                if let Some(p) = state
-                    .persons
-                    .iter_mut()
-                    .find(|p| p.matrix_id.as_deref() == Some(&sender_mxid))
-                {
-                    p.display_name = name.clone();
-                }
-            }
-        }
-    }
+    // Update the sender's display name from Matrix on every command
+    // (lightweight: their name here, else their cached global profile).
+    crate::names::refresh_one(ctx, room, sender.as_str()).await;
 
     // Multi-word group/person names work without quotes: regroup the tokens
     // so each name is a single argument before any command sees them.
@@ -268,7 +253,7 @@ pub async fn handle(
     match reply {
         None => Ok(None),
         Some(s) => Ok(Some(format::intentional(
-            format::mentionify_rich(&s, room).await,
+            crate::names::mentionify(ctx, &s, room).await,
         ))),
     }
 }
@@ -484,6 +469,7 @@ fn admin_help_text() -> String {
 !plan reset <group> · redistribute future weeks from the rotation
 !plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
 !plan pdf [next | history] [N] [group] · printable plan (next = from next week)
+!plan pdf style [days | tick] · a box per day, or one tick per duty with the slots side by side
 
 **Groups**
 !groups <group> · details: rhythm, turn order, slots, rooms, weights

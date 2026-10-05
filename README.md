@@ -220,6 +220,18 @@ the inviter is allowed by `security.allowed_inviters` — so residents who
 should use it privately need to be listed there (or `"all"`). Changes made
 from a private chat update the plan in the cleaning room.
 
+### Names
+
+Plans, PDFs and messages call people with a Matrix account by their display
+name in the room at hand; else by their global Matrix profile's name, which
+the bot can look up without sharing a room with them; else by the name it
+stored last time; else by their Matrix username. What the room or the profile
+says is stored on the person (startup, before a PDF, on each of their
+commands, on `!member link`), so plans render without asking again. Profile
+lookups are cached and bounded in time; when a server refuses (403/404) or
+can't be reached, the stored name stays. Nothing depends on them, and a
+lookup never creates a person. All of this lives in `src/names.rs`.
+
 ### Calendar feeds (`!ical`)
 
 With `[ical_server]` configured, `!ical` gives a personal subscription URL
@@ -320,9 +332,19 @@ assignments — use `!plan` and `!validate` for the real thing.
 
 ## Paper plans and photos
 
-Current/upcoming `!plan pdf` exports are printable, scannable wall plans: one
-row per duty with a box for each allowed day. Put one clear X in the day you
-cleaned, then send a full-page photo to the cleaning
+Current/upcoming `!plan pdf` exports are printable, scannable wall plans in
+one of two styles, chosen by an administrator with `!plan pdf style days` or
+`!plan pdf style tick` (`!plan pdf style` shows the current one):
+
+- **days** (default): one row per duty with a box for each allowed day. Put
+  one clear X in the day you cleaned; that day is recorded.
+- **tick**: one line per week, the slots and shifts side by side, one box per
+  duty. Put one clear X in your box. The sheet only says *that* it was done,
+  so the bot records the middle of the duty's days (Thursday for a whole
+  week, Monday for Mon–Tue, Thursday for Thu–Fri), or the day of the photo if
+  that is earlier.
+
+Then send a full-page photo to the cleaning
 room or an authorized encrypted DM. The bot previews changes and asks for ✅ Apply / ❌ Cancel.
 Nothing is applied before confirmation. Residents can record their own duties;
 administrators can confirm a shared sheet. `!plan pdf history` remains a compact

@@ -277,7 +277,7 @@ pub async fn post(
         menu.rendered = text.clone();
         (menu, text)
     };
-    let mut content = format::intentional(format::mentionify_rich(&text, room).await);
+    let mut content = format::intentional(crate::names::mentionify(ctx, &text, room).await);
     content.relates_to = relation;
     let event_id = room.send(content).await?.response.event_id;
     let buttons = menu.turns.len();
@@ -409,7 +409,7 @@ pub async fn refresh_all(ctx: &BotContext, client: &Client) {
         let Some(room) = client.get_room(&room_id) else {
             continue;
         };
-        let edit = format::quiet(format::mentionify_rich(&text, &room).await)
+        let edit = format::quiet(crate::names::mentionify(ctx, &text, &room).await)
             .make_replacement(ReplacementMetadata::new(event_id, None));
         match room.send(edit).await {
             Ok(_) => {
