@@ -4,7 +4,7 @@ use super::*;
 
 // ── !done [group] ─────────────────────────────────────────────────────────────
 //
-// Marks the sender's own open turns of this week — those that have started,
+// Marks the sender's own open turns of this week. Those that have started,
 // or the next one if none has (see `markable_duties`). With a group named,
 // only that group; a member of a group without slots may also mark its
 // running turn for someone else (credit goes to whoever marks it). With
@@ -39,7 +39,7 @@ pub(crate) async fn mark_done(
         .map(|p| p.id.clone())
     else {
         return Ok((
-            Some("❌ You're not on the plan yet — !mygroups to join a group.".into()),
+            Some("❌ You're not on the plan yet.\n👉 !mygroups to join a group.".into()),
             None,
         ));
     };
@@ -73,7 +73,7 @@ pub(crate) async fn mark_done(
             let moved = crate::trades::moved(&state, &trade).join(", ");
             let labels: Vec<String> = cleaned.iter().map(Duty::label).collect();
             let reply = format!(
-                "✨ Cleaned: {} — thanks! Your own shift was still to come, so you swapped: \
+                "✨ Cleaned: {}. Thanks!\n🔄 Your own shift was still to come, so you swapped: \
                  {moved} takes it now.",
                 labels.join(", ")
             );
@@ -131,7 +131,7 @@ pub(crate) async fn mark_done(
                 ))
             }
             _ if state.groups_for_person(&sender_person_id).is_empty() => {
-                return Ok((Some("You are not in any cleaning group.".into()), None))
+                return Ok((Some("🤷 You are not in any cleaning group.".into()), None))
             }
             _ => {}
         }
@@ -151,7 +151,7 @@ pub(crate) async fn mark_done(
     state.save(&ctx.state_path).await?;
     let labels: Vec<String> = duties.iter().map(Duty::label).collect();
     Ok((
-        Some(format!("✨ Cleaned: {} — thanks!", labels.join(", "))),
+        Some(format!("✨ Cleaned: {}. Thanks!", labels.join(", "))),
         None,
     ))
 }
@@ -234,13 +234,13 @@ pub(crate) async fn cmd_stats(ctx: &BotContext, args: &[&str]) -> Result<Option<
     }
 
     Ok(Some(
-        "Usage: !stats [person | group | fairness | load]".into(),
+        "💡 Usage: !stats [person | group | fairness | load]".into(),
     ))
 }
 
 // ── !mygroups ────────────────────────────────────────────────────────────
 
-/// `!help post` (admin) — the help board, with its buttons, in the cleaning
+/// `!help post` (admin). The help board, with its buttons, in the cleaning
 /// room (see `help_board`).
 pub(crate) async fn cmd_help_post(
     ctx: &BotContext,
@@ -257,7 +257,7 @@ pub(crate) async fn cmd_help_post(
         .then(|| format::mentionify("✅ Help board posted in the cleaning room.")))
 }
 
-/// `!mygroups` — the group selector again (the welcome, the first time).
+/// `!mygroups`: the group selector again (the welcome, the first time).
 pub(crate) async fn cmd_mygroups(
     ctx: &BotContext,
     sender: &OwnedUserId,
@@ -275,7 +275,7 @@ pub(crate) async fn cmd_mygroups(
 
 // ── !member welcome <person> ─────────────────────────────────────────────
 
-/// `!member welcome <name | @user:server>` (admin) — the full welcome with
+/// `!member welcome <name | @user:server>` (admin). The full welcome with
 /// the group list for someone, in the cleaning room, even if they've had
 /// it before. It replaces their previous list, like `!mygroups`.
 pub(crate) async fn cmd_member_welcome(
@@ -317,12 +317,12 @@ pub(crate) fn welcome_target(
     query: &str,
 ) -> std::result::Result<String, String> {
     if query.is_empty() {
-        return Err("Usage: !member welcome <name | @user:server>".into());
+        return Err("💡 Usage: !member welcome <name | @user:server>".into());
     }
     match lookup_person(state, query)? {
         Some(person) => person.matrix_id.clone().ok_or_else(|| {
             format!(
-                "{} has no Matrix account — link one first (!member link).",
+                "🔗 {} has no Matrix account. Link one first (!member link).",
                 person.display_name
             )
         }),
@@ -342,7 +342,7 @@ pub(crate) async fn cmd_joinfloor(
     args: &[&str],
 ) -> Result<Option<String>> {
     let Some(group_name) = args.first() else {
-        return Ok(Some("Usage: !join <group>".into()));
+        return Ok(Some("💡 Usage: !join <group>".into()));
     };
     let mut state = ctx.state.lock().await;
     let Some(group_id) = state.group_by_name(group_name).map(|g| g.id.clone()) else {
@@ -365,7 +365,7 @@ pub(crate) async fn cmd_leavefloor(
     args: &[&str],
 ) -> Result<Option<String>> {
     let Some(group_name) = args.first() else {
-        return Ok(Some("Usage: !leave <group>".into()));
+        return Ok(Some("💡 Usage: !leave <group>".into()));
     };
     let mut state = ctx.state.lock().await;
     if state.person_by_matrix_id(sender.as_str()).is_none() {
@@ -386,7 +386,7 @@ pub(crate) async fn cmd_leavefloor(
 }
 
 /// A Matrix user joins a group on their own (`!join`, the group selector):
-/// their person is created if it doesn't exist yet — never a second one —
+/// their person is created if it doesn't exist yet (never a second one)
 /// and the rotation re-planned from the next cycle (`apply_group_join`).
 /// `Ok(summary)` for the reply, `Err(why)` when nothing changed.
 pub(crate) fn join_group(
@@ -398,7 +398,7 @@ pub(crate) fn join_group(
     if !state.group_by_id(group_id).is_some_and(|g| g.is_active) {
         return Ok(Err("⚠️ This group is paused.".into()));
     }
-    // PersonCreated is idempotent — safe even if this Matrix user already exists.
+    // PersonCreated is idempotent: safe even if this Matrix user already exists.
     state.apply_event(DomainEvent::PersonCreated {
         person_id: uuid::Uuid::new_v4().to_string(),
         display_name: mxid.to_owned(),
@@ -424,7 +424,7 @@ pub(crate) fn join_group(
 }
 
 /// A Matrix user leaves a group on their own (`!leave`, the group
-/// selector) — refused while their turn of this week is still open; their
+/// selector): refused while their turn of this week is still open; their
 /// upcoming turns are handed on (`apply_group_departure`). `Ok(summary)`
 /// for the reply, `Err(why)` when nothing changed.
 pub(crate) fn leave_group(

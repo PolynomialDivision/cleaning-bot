@@ -4,7 +4,7 @@
 //! nothing that only works as a wide table.
 //!
 //! Icons: one per concept, the same in every message, at most one leading
-//! a line — and every line still reads without it.
+//! a line, and every line still reads without it.
 //!
 //! | 🧹 this week's cleaning | 📋 the plan ahead | 📅 dates, weeks |
 //! | 🔄 rotation changes, swaps | 🏠 a group | 👥 members |
@@ -19,7 +19,7 @@ use crate::{
     state::current_iso_week,
 };
 
-/// Indentation for a detail line under an item. An em space — unlike
+/// Indentation for a detail line under an item. An em space: unlike
 /// ordinary spaces, HTML rendering keeps it at the start of a line.
 pub const INDENT: &str = "\u{2003}";
 
@@ -72,7 +72,7 @@ pub fn relative(turn: Turn, rhythm: &Rhythm, today: NaiveDate) -> String {
 /// a `[name](https://matrix.to/#/@user:server)` link, which the formatter
 /// renders as a user pill (clickable, avatar in Element and FluffyChat) but
 /// *without* an `m.mentions` entry, so looking at the plan pings nobody.
-/// Without Matrix — or with an ID that can't sit in a link — the plain name.
+/// Without Matrix (or with an ID that can't sit in a link) the plain name.
 pub fn user_link(person: &Person) -> String {
     match person.matrix_id.as_deref() {
         Some(mxid) => link_to(mxid, &person.display_name),
@@ -80,7 +80,7 @@ pub fn user_link(person: &Person) -> String {
     }
 }
 
-/// A Matrix ID shown as itself — for "use the Matrix ID instead" — as a
+/// A Matrix ID shown as itself (for "use the Matrix ID instead") as a
 /// pill that pings nobody, like `user_link`.
 pub fn user_id_link(mxid: &str) -> String {
     link_to(mxid, mxid)
@@ -125,7 +125,7 @@ pub fn rooms(names: &[String]) -> String {
         .join(" · ")
 }
 
-/// What kind of room a name is (English or German names) — for its icon
+/// What kind of room a name is (English or German names), for its icon
 /// here and in the PDF.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomKind {

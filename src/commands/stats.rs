@@ -8,7 +8,7 @@ pub(crate) async fn cmd_leaderboard(ctx: &BotContext) -> Result<Option<String>> 
     let state = ctx.state.lock().await;
     let board = analytics::global_leaderboard(&state);
     if board.is_empty() {
-        return Ok(Some("No members assigned to any group yet.".into()));
+        return Ok(Some("🤷 No members assigned to any group yet.".into()));
     }
 
     let mut lines = vec!["🏆 Cleaning Leaderboard".to_owned(), String::new()];
@@ -59,7 +59,7 @@ pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Opti
     };
 
     if groups.is_empty() {
-        return Ok(Some("No cleaning groups configured yet.".into()));
+        return Ok(Some("🤷 No cleaning groups configured yet.".into()));
     }
 
     let mut out = Vec::new();
@@ -87,7 +87,7 @@ pub(crate) async fn cmd_fairness(ctx: &BotContext, args: &[&str]) -> Result<Opti
 
     if out.is_empty() {
         return Ok(Some(
-            "No history yet — run some cleaning cycles first.".into(),
+            "🤷 No history yet. Run some cleaning cycles first.".into(),
         ));
     }
     Ok(Some(out.join("\n")))
@@ -100,7 +100,7 @@ pub(crate) async fn cmd_workload(ctx: &BotContext) -> Result<Option<String>> {
     let report = analytics::workload_report(&state);
 
     if report.entries.is_empty() {
-        return Ok(Some("No members assigned to any group yet.".into()));
+        return Ok(Some("🤷 No members assigned to any group yet.".into()));
     }
 
     let yrs = report.years_tracked;
@@ -181,7 +181,7 @@ pub(crate) async fn cmd_groupstats(ctx: &BotContext) -> Result<Option<String>> {
         .filter(|g| g.is_active)
         .collect();
     if active.is_empty() {
-        return Ok(Some("No active cleaning groups configured.".into()));
+        return Ok(Some("🤷 No active cleaning groups configured.".into()));
     }
 
     let models: Vec<_> = active

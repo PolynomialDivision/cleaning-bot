@@ -23,10 +23,10 @@ fn away_marker(
     }
 }
 
-/// One status line per slot of each turn of the week — "✅ Scharni: Alice",
-/// "⬜ Thu–Sun: Carol ← now", "❌ Bob · missed" — so everyone sharing a week
+/// One status line per slot of each turn of the week ("✅ Scharni: Alice",
+/// "⬜ Thu–Sun: Carol ← now", "❌ Bob · missed") so everyone sharing a week
 /// (slots, shifts) shows with their own done/open state. Each comes with
-/// whether it is done — `None` when skipped, which needs no doing at all.
+/// whether it is done: `None` when skipped, which needs no doing at all.
 pub(crate) fn week_task_lines(
     state: &State,
     group: &CleaningGroup,
@@ -77,7 +77,7 @@ fn week_people(state: &State, group: &CleaningGroup, (y, w): (i32, u32)) -> Stri
     parts.join(", ")
 }
 
-/// "Next week: Dave" / "Week 43: Dave" — the group's first due week after
+/// "Next week: Dave" / "Week 43: Dave". The group's first due week after
 /// `after`, with everyone on it.
 pub(crate) fn next_week_line(
     state: &State,
@@ -112,7 +112,7 @@ pub(crate) fn status_text(state: &State, year: i32, week: u32) -> String {
         .filter(|g| g.is_active)
         .collect();
     if active.is_empty() {
-        return "No active cleaning groups configured yet.".into();
+        return "🤷 No active cleaning groups configured yet.".into();
     }
 
     let mut body = Vec::new();
@@ -155,7 +155,7 @@ pub(crate) fn status_text(state: &State, year: i32, week: u32) -> String {
     lines.extend(body);
     if !not_due.is_empty() {
         lines.push(String::new());
-        lines.push(format!("Not due this week: {}", not_due.join(", ")));
+        lines.push(format!("💤 Not due this week: {}", not_due.join(", ")));
     }
     lines.join("\n")
 }
@@ -179,7 +179,7 @@ pub(crate) async fn cmd_groups(
 /// Every group with its members at a glance.
 pub(crate) fn groups_text(state: &State) -> String {
     if state.cleaning_groups.is_empty() {
-        return "No cleaning groups configured yet.".into();
+        return "🤷 No cleaning groups configured yet.".into();
     }
     let (year, week) = current_iso_week();
     let mut lines = vec!["🏠 **Groups** · !groups <name> for details".to_owned()];
@@ -251,7 +251,7 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String 
             .iter()
             .map(|s| format!("{}{}", s.name, weight_of(s.weight)))
             .collect();
-        lines.push(format!("Slots: {}", slots.join(", ")));
+        lines.push(format!("🧩 Slots: {}", slots.join(", ")));
     } else if group.is_multi_slot() {
         for slot in &group.slots {
             lines.push(format!(
@@ -290,7 +290,7 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String 
     lines.push(String::new());
     lines.push(format!("👥 **Members** · {}", members.len()));
     if members.is_empty() {
-        lines.push("No members yet — !member add or !mygroups.".into());
+        lines.push("🤷 No members yet. Use !member add or !mygroups.".into());
     } else {
         lines.push(
             members
@@ -321,7 +321,7 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String 
         .collect();
     room_weights.sort();
     if !room_weights.is_empty() {
-        lines.push(format!("Room weights: {}", room_weights.join(", ")));
+        lines.push(format!("⚖️ Room weights: {}", room_weights.join(", ")));
     }
     lines.join("\n")
 }

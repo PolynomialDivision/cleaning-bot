@@ -2,10 +2,10 @@
 //!
 //! Every group has a `Rhythm`: it is due every `every_weeks` weeks (aligned
 //! to the tracking start), and each due week is split into one or more
-//! **shifts** — e.g. one shift for the whole week (the classic model), or
+//! **shifts**: e.g. one shift for the whole week (the classic model), or
 //! the windows Mon–Tue + Thu–Fri for "twice a week" (`2x`), with the days
 //! between free. One shift of one due week is a `Turn`: the unit everything
-//! else works with — one person per turn (and slot) is responsible, gets
+//! else works with. One person per turn (and slot) is responsible, gets
 //! reminded, marks it done, can swap it, take it over, and is counted in
 //! stats. A window only says when a turn is due; nothing stops a late
 //! cleaning from landing right before the next one.
@@ -15,7 +15,7 @@
 //!
 //! Stored records keep their ISO year/week fields and add a `shift` index
 //! defaulting to 0, so data from before rhythms existed reads as shift 0 of
-//! a whole-week rhythm — exactly what it was.
+//! a whole-week rhythm: exactly what it was.
 
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Short weekday names, Monday first.
 pub const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-/// How often a group is cleaned — `CleaningGroup::rhythm`.
+/// How often a group is cleaned: `CleaningGroup::rhythm`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Rhythm {
     /// Due every N weeks. `None` only in data from before per-group
@@ -37,8 +37,8 @@ pub struct Rhythm {
     pub shift_starts: Vec<u8>,
     /// Last weekday of each shift, for explicit windows with free days in
     /// between (`2x` = Mon–Tue + Thu–Fri). Empty = each shift runs until
-    /// the next one starts, as rhythms stored before windows existed do —
-    /// those keep their Mon–Wed / Thu–Sun.
+    /// the next one starts, as rhythms stored before windows existed do.
+    /// Those keep their Mon–Wed / Thu–Sun.
     #[serde(default)]
     pub shift_ends: Vec<u8>,
     /// Monday from which this rhythm applies (a change starts next week);
@@ -74,7 +74,7 @@ impl Shift {
 
 impl Rhythm {
     /// The rhythm in force on `date`: this one from `effective_from` on,
-    /// before that the `previous` version that was — so a change never
+    /// before that the `previous` version that was, so a change never
     /// rewrites past or running weeks.
     pub fn at(&self, date: NaiveDate) -> &Self {
         if self.effective_from.is_some_and(|from| date < from) {
@@ -95,7 +95,7 @@ impl Rhythm {
         self.at(week_monday(year, week))
     }
 
-    /// Whether `weekday` (0 = Monday) lies in one of the shifts — with
+    /// Whether `weekday` (0 = Monday) lies in one of the shifts, with
     /// explicit windows (`mon-tue thu-fri`) some days are free.
     pub fn contains_weekday(&self, weekday: u8) -> bool {
         self.shifts()

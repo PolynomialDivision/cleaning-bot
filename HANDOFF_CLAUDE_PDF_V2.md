@@ -101,7 +101,7 @@ Zu Beginn war `git status --short` sauber. Die ältere V1-Implementierung war al
 - Optionaler Roundtrip mit dem **tatsächlichen Rust-Manifest**, via `PAPER_LAYOUT_FIXTURE`.
 - Alte V1-Identifikation separat getestet.
 
-## Aktueller Teststand — wichtig!
+## Aktueller Teststand: wichtig!
 
 Rust nach Manifeständerungen:
 
@@ -150,7 +150,7 @@ Noch nicht abschließend visuell freigegeben. Insbesondere:
 - Die gespeicherten Vorschau-PNGs werden derzeit aus `.convert('L')` gespeichert und sind daher absichtlich/versehentlich nur Graustufen. Das PDF selbst enthält Teal. Für eine faire Designbeurteilung zusätzlich RGB-Vorschauen aus den originalen `pdftoppm`-PNGs speichern und ansehen, und B/W weiterhin testen.
 - Zeile `Cleaning` wiederholt sich bei jeder Single-Slot-Aufgabe ohne Mehrwert. Besser bei fehlendem Slot weglassen und Fenster/Datum vertikal zentrieren; bei Multi-Slot weiterhin zweite Zeile mit Slot behalten.
 - **Datumsformat-Bug:** `window=f"{start:%a}–{end:%a} {start.day}–{end.day} {end:%b}"` unterschlägt Startmonat bei Monatswechsel. Für z.B. 28 Sep–4 Oct korrekt beide Monate anzeigen, nicht `28–4 Oct`. Auch Jahreswechsel/Ein-Tages-Fenster sauber formatieren. Manifestdaten selbst sind korrekt; nur Anzeige betroffen.
-- Headerdatum ist derzeit ISO `2026-09-28 — 2026-11-20`; ein freundlicheres `28 Sep – 20 Nov 2026` wäre hübscher, ohne Datenverlust.
+- Headerdatum ist derzeit ISO `2026-09-28 – 2026-11-20`; ein freundlicheres `28 Sep – 20 Nov 2026` wäre hübscher, ohne Datenverlust.
 - Räume sind aktuell nur Text. Kleine monochrome Shower/Toilet/Utensils-Icons wie im alten Renderer könnten wieder dazu, aber nicht überladen.
 - Titel ist Gruppenname mit Broom; prüfen, ob eine kleine „Cleaning plan“-Orientierung sinnvoll ist.
 - Namen werden aktuell nach 28 Zeichen abgeschnitten. Who-Spalte ist 26mm breit; lange Namen umbrechen maximal sinnvoll, keine Kollision mit Kästchen. Bei sehr langen Gruppennamen/Tasknamen prüfen.

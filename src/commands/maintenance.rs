@@ -12,7 +12,7 @@ pub(crate) async fn cmd_disablegroup(
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !groups disable <group>".into())),
+        None => return Ok(Some("💡 Usage: !groups disable <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
@@ -26,7 +26,7 @@ pub(crate) async fn cmd_disablegroup(
     state.apply_event(DomainEvent::GroupDisabled { group_id })?;
     state.save(&ctx.state_path).await?;
     let mut reply =
-        format!("🚫 {name} disabled — no turns, reminders or stats until it's enabled again.");
+        format!("🚫 {name} disabled. No turns, reminders or stats until it's enabled again.");
     if !returned.is_empty() {
         reply.push_str(&format!(
             "\n{} planned week(s) cleared; the rotation picks up there when enabled.",
@@ -46,7 +46,7 @@ pub(crate) async fn cmd_enablegroup(
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !groups enable <group>".into())),
+        None => return Ok(Some("💡 Usage: !groups enable <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&name) {
@@ -88,7 +88,7 @@ pub(crate) async fn cmd_announceweek(
             "🧹 Weekly plan posted and pinned.",
         ))),
         Ok(None) => Ok(Some(format::mentionify(
-            "Nothing is due this week — no plan to announce.",
+            "🤷 Nothing is due this week, so there is no plan to announce.",
         ))),
         Err(e) => {
             tracing::error!("!plan announce failed: {e}");

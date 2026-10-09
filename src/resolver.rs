@@ -1,34 +1,34 @@
 //! Slot assignment resolver.
 //!
 //! `materialize` computes frozen assignments for the upcoming turns of every
-//! group (one turn = one shift of one due week, in the group's own rhythm —
+//! group (one turn = one shift of one due week, in the group's own rhythm,
 //! see `rhythm`) and returns them as `SlotAssigned` (+ `RotationQueueSet`)
-//! events. It is a pure function — reads state, returns events to apply.
+//! events. It is a pure function: reads state, returns events to apply.
 //! Idempotent: already-assigned turns are skipped and never recomputed or
 //! overwritten.
 //!
 //! # Rotation queue
 //!
-//! Each `CleaningGroup` carries a persisted `rotation_queue: Vec<PersonId>` —
-//! the literal turn order, front = next up. For every not-yet-frozen turn,
+//! Each `CleaningGroup` carries a persisted `rotation_queue: Vec<PersonId>`.
+//! The literal turn order, front = next up. For every not-yet-frozen turn,
 //! `materialize` pops one member per slot from the front of the queue and
 //! pushes them to the back (a classic round-robin turn queue), then freezes
 //! that pick as a `SlotAssigned` event. All turns and slots of the same week
 //! draw from the same shared queue in sequence, so nobody is drawn twice in
-//! one week — including when there are *fewer* members than turns × slots,
+//! one week, including when there are *fewer* members than turns × slots,
 //! in which case the leftovers are left unassigned (`person_id: None`)
 //! rather than silently double-booking someone.
 //!
 //! This deliberately replaces a stateless `index % member_count` formula.
 //! That formula has to recompute *every* future week's assignee from
-//! scratch whenever the member count changes — join or leave one person and
+//! scratch whenever the member count changes: join or leave one person and
 //! the whole rotation shifts. A persisted queue only has to say where a
 //! *new* member enters the line: everyone already queued keeps their
 //! existing relative order, and every already-frozen week is left alone.
 //!
 //! `reconcile_queue` keeps the queue in sync with `member_ids`: it drops
 //! anyone no longer a member and appends anyone missing. It is also the only
-//! "migration" a pre-queue `state.json` needs — see its docs below.
+//! "migration" a pre-queue `state.json` needs, see its docs below.
 //! `commands::apply_group_join` / `apply_group_departure` call it too: a
 //! join re-plans everything from the next cycle on (`cycle_anchor`,
 //! `next_cycle_start`, `spread_newcomers`), a leave drops the leaver.
@@ -94,7 +94,7 @@ pub fn reconcile_queue(state: &State, group: &CleaningGroup) -> Vec<PersonId> {
 /// weeks (from the current week on, each group in its own rhythm).
 ///
 /// Every shift of a due week is its own turn, and every slot of a turn draws
-/// the next person from the group's rotation queue — so a group cleaned
+/// the next person from the group's rotation queue, so a group cleaned
 /// twice a week hands its two shifts to two consecutive people in the
 /// rotation. Nobody is drawn twice within one week. Which of them gets the
 /// start of the week takes turns (`seat_by_shift`).
@@ -102,8 +102,8 @@ pub fn reconcile_queue(state: &State, group: &CleaningGroup) -> Vec<PersonId> {
 /// Returns `SlotAssigned` events plus, for each group that had at least one
 /// turn filled, a trailing `RotationQueueSet` capturing the queue's new
 /// state. Already-stored assignments are skipped so this is safe to call
-/// repeatedly, and it never revisits or changes a turn it already froze —
-/// callers rely on that to make join/leave additive rather than destructive.
+/// repeatedly, and it never revisits or changes a turn it already froze.
+/// Callers rely on that to make join/leave additive rather than destructive.
 pub fn materialize(state: &State, cycles_ahead: usize) -> Vec<DomainEvent> {
     let mut events = Vec::new();
     for group in &state.cleaning_groups {
@@ -151,7 +151,7 @@ pub fn materialize_group(
         due = state.next_due_week(group, add_weeks(dy, dw, 1));
 
         // Track who's already been drawn for *this* week so nobody is
-        // picked twice — skipping absent members means a draw can land past
+        // picked twice: skipping absent members means a draw can land past
         // the front, so identity (not count) is what has to be deduplicated.
         let mut used_this_week: HashSet<PersonId> = state
             .slot_assignments
@@ -163,7 +163,7 @@ pub fn materialize_group(
         let mut drawn: Vec<(Turn, usize, Option<PersonId>)> = Vec::new();
         for turn in state.turns_in_week(group, dy, dw) {
             for si in 0..num_slots {
-                // Skip if already frozen — this is what makes materialize additive.
+                // Skip if already frozen. This is what makes materialize additive.
                 if let Some(frozen) = state.slot_assignments.iter().find(|a| {
                     a.group_id == group.id
                         && a.slot_index == si
@@ -183,7 +183,7 @@ pub fn materialize_group(
 
                 // First queue member not already used this week and not on
                 // record absence. Removed from wherever they sit and pushed
-                // to the back like a normal draw — an absent member in front
+                // to the back like a normal draw. An absent member in front
                 // of them is skipped over, not touched, so they keep their
                 // place in line and lose no turn.
                 let pick_pos = queue.iter().position(|pid| {
@@ -211,7 +211,7 @@ pub fn materialize_group(
                 shift: turn.shift,
                 person_id,
                 source: AssignmentSource::RoundRobin,
-                // Automatic — nobody "did" this, and materialize only ever
+                // Automatic: nobody "did" this, and materialize only ever
                 // fills a not-yet-frozen turn, so there is no prior occupant
                 // to record either.
                 actor_id: None,
@@ -232,7 +232,7 @@ pub fn materialize_group(
 /// Who of the people drawn for one week (`drawn`, in turn order) cleans
 /// which shift: slot by slot, everyone gets the shift after the one they
 /// had last time, so in a week split into Mon–Wed / Thu–Sun nobody always
-/// has the start of the week — a plain draw would, whenever the group has
+/// has the start of the week. A plain draw would, whenever the group has
 /// an even number of members. Who cleans in which week stays as drawn.
 fn seat_by_shift(
     state: &State,
@@ -276,7 +276,7 @@ fn seat_by_shift(
 }
 
 /// The shift `person` had on their last turn in `group` before week
-/// `before`, counting only weeks split into shifts — from what is stored
+/// `before`, counting only weeks split into shifts, from what is stored
 /// and from `planned` (draws not stored yet).
 fn last_shift(
     state: &State,
@@ -303,7 +303,7 @@ fn last_shift(
 
 /// Once, for plans made before `seat_by_shift`: re-seats the weeks from
 /// `from` on the same way, so the start of the week takes turns there too.
-/// Only plain rotation is touched — a slot's week whose turns were all
+/// Only plain rotation is touched. A slot's week whose turns were all
 /// drawn by the rotation, none of them done or asked about; anything
 /// assigned, swapped or taken over stays as it is. Only swaps who has
 /// which shift within a week: nobody gains or loses a week. Returns how
@@ -353,7 +353,7 @@ pub fn rebalance_shifts(state: &mut State, from: (i32, u32)) -> anyhow::Result<u
     Ok(changed)
 }
 
-/// The turns of one slot's week as the rotation drew them — `None` unless
+/// The turns of one slot's week as the rotation drew them: `None` unless
 /// each one was drawn for someone and nothing happened to any of them yet
 /// (done, skipped, asked about, a swap pending).
 fn plain_rotation(
@@ -425,7 +425,7 @@ pub fn preview_slot_assignee(
 }
 
 /// Put the people drawn for `dropped` assignments back at the front of the
-/// queue, in the order they were drawn — undoing those draws, so clearing
+/// queue, in the order they were drawn: undoing those draws, so clearing
 /// future turns (e.g. after a rhythm change) costs nobody their place.
 pub fn rewind_queue(
     queue: &[PersonId],
@@ -452,7 +452,7 @@ pub fn rewind_queue(
 }
 
 /// The member every rotation cycle starts with: of the current members, the
-/// one whose first frozen turn in the group comes earliest — the head of the
+/// one whose first frozen turn in the group comes earliest. The head of the
 /// original rotation. Later joiners never displace them, so cycle boundaries
 /// stay put as the group grows. `None` while nobody has a turn yet.
 pub fn cycle_anchor(state: &State, group: &CleaningGroup) -> Option<PersonId> {
@@ -495,7 +495,7 @@ pub fn next_cycle_start(
 /// One cycle's turn order with `newcomers` seated into `old` (which starts
 /// with the cycle's anchor): newcomer `i` follows `old[i·n/k]`, so with one
 /// newcomer they come right after the anchor and several are spread evenly
-/// through the cycle — only ever side by side when they outnumber `old`.
+/// through the cycle, only ever side by side when they outnumber `old`.
 pub fn spread_newcomers(old: &[PersonId], newcomers: &[PersonId]) -> Vec<PersonId> {
     let (n, k) = (old.len(), newcomers.len());
     if n == 0 {
@@ -788,12 +788,12 @@ mod tests {
         assert_eq!(week0[1], Some(ids[1].clone()));
         assert_eq!(
             week0[2], None,
-            "no third distinct member — must not repeat P0"
+            "no third distinct member: must not repeat P0"
         );
 
         // Next week: with only 2 people ever available, both are drawn
         // again (2 picks exactly returns a 2-length queue to its starting
-        // order) — same pairing, still no repeat *within* the week, and
+        // order): same pairing, still no repeat *within* the week, and
         // still no third pick.
         let (st, _gid, ids) = make_group("Floor", 2, 3);
         let evs = materialize(&st, 2);
@@ -881,7 +881,7 @@ mod tests {
         }
         st.cleaning_groups[0].rotation_queue.clear();
 
-        // 4 prior assignments (2 past, 2 future — reconcile doesn't
+        // 4 prior assignments (2 past, 2 future, reconcile doesn't
         // distinguish), 3 members → shift by 1 → queue continues at P1.
         let queue = reconcile_queue(&st, &st.cleaning_groups[0]);
         assert_eq!(queue, vec![ids[1].clone(), ids[2].clone(), ids[0].clone()]);
@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn returning_from_absence_continues_the_rotation_fairly() {
         // Anna is absent for weeks 1-2, back for week 3. Over three weeks
-        // everyone should clean exactly once — Anna's own turn deferred to
+        // everyone should clean exactly once: Anna's own turn deferred to
         // her return, never lost, never doubled up.
         let (mut st, gid, ids) = make_group("Floor", 3, 0);
         let (anna, bob, carla) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
@@ -1018,9 +1018,9 @@ mod tests {
         assert_eq!(
             week_slot_picks(&evs, 0, 1),
             vec![None],
-            "nobody eligible — must stay unassigned, not fall back to an absent member"
+            "nobody eligible: must stay unassigned, not fall back to an absent member"
         );
-        // Nobody was actually drawn, so the queue is untouched — no RotationQueueSet.
+        // Nobody was actually drawn, so the queue is untouched. No RotationQueueSet.
         assert!(!evs
             .iter()
             .any(|e| matches!(e, DomainEvent::RotationQueueSet { .. })));
@@ -1028,8 +1028,8 @@ mod tests {
 
     #[test]
     fn multi_slot_with_one_member_absent_does_not_double_book_the_rest() {
-        // 3 members, 2 slots, one absent: the other two fill both slots —
-        // no repeat, and the absent member is never drawn as a fallback.
+        // 3 members, 2 slots, one absent: the other two fill both slots.
+        // No repeat, and the absent member is never drawn as a fallback.
         let (mut st, gid, ids) = make_group("Floor", 3, 2);
         let (anna, bob, carla) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
         let due = current_iso_week();
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn materialize_with_absences_is_deterministic_across_repeated_runs() {
         // Same guarantee as `materialize_is_deterministic`, but exercising
-        // the absence-skip path — matters for restart/event-replay, which
+        // the absence-skip path: matters for restart/event-replay, which
         // must reproduce the identical queue and assignments every time.
         let (mut st, gid, ids) = make_group("Floor", 3, 0);
         let due = current_iso_week();
@@ -1078,7 +1078,7 @@ mod tests {
             .collect();
 
         // Simulate a restart: materialize again over the same now-frozen
-        // horizon (idempotent — every slot is already stored).
+        // horizon (idempotent, every slot is already stored).
         let replay_evs = materialize(&st, 6);
         assert!(
             replay_evs.is_empty(),
@@ -1205,7 +1205,7 @@ mod tests {
             st.apply_event(ev).unwrap();
         }
         // Carla goes to the back after her pinned week like anyone who
-        // cleaned — the rotation doesn't hand her week 3 straight after.
+        // cleaned: the rotation doesn't hand her week 3 straight after.
         assert_eq!(
             plan(&st, 6),
             [anna, carla, bob, anna, carla, bob].map(|p| Some(p.clone()))
@@ -1217,7 +1217,7 @@ mod tests {
     #[test]
     fn pins_the_rotation_already_drew_past_change_nothing() {
         // A week pinned after it was already planned (a takeover, say) was
-        // planned with the old draw — re-applying it later would shift
+        // planned with the old draw: re-applying it later would shift
         // everyone, so it's left alone.
         let (mut st, ids) = three_member_state();
         for ev in materialize(&st, 4) {

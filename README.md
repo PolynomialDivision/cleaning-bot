@@ -7,7 +7,7 @@ keeps track of who actually cleaned.
 ## Using it (for housemates)
 
 ```
-📅 !next · your turns — swap one or 🆘 from there
+📅 !next · your turns: swap one or 🆘 from there
 📋 !plan · see the plan
 👥 !mygroups · join or leave groups
 ✅ !done · done! (or ✅ on the plan)
@@ -16,11 +16,11 @@ keeps track of who actually cleaned.
 📄 !plan pdf · printable plan
 ```
 
-The bot answers a command as a reply to it — in the thread, if you wrote
+The bot answers a command as a reply to it, in the thread, if you wrote
 it in one.
 
 **The help board.** An admin can post a friendly overview with `!help post`.
-Its reactions are buttons — 📅 your next turns (as the menu below), 📋 the
+Its reactions are buttons: 📅 your next turns (as the menu below), 📋 the
 plan, 👥 your groups, 📄 a PDF, 💬 a private chat: the bot answers privately if you
 have a private chat with it, else as a reply to the board, addressed to
 you, and then takes the reaction away so the button stays clean. 💬 makes
@@ -50,11 +50,11 @@ React ✅ here or on the plan when it's done · 🆘 if you can't make it.
 
 A ✅ on the reminder counts the same as one on the plan. The reminder is
 edited as people finish (without pinging anyone again), until it reads
-"✨ All done — thanks!". A shift starting mid-week gets a "🔔 Your turn
+"✨ All done. Thanks!". A shift starting mid-week gets a "🔔 Your turn
 starts today" one; `!plan remind` (admin) sends a "Still open this week".
 
 **Your turns, as a menu.** `!next` (or `!next N`, up to 10) and 📅 on the
-help board show your next turns as a menu to tap — in a private chat with
+help board show your next turns as a menu to tap, in a private chat with
 the bot if you have one, else in the cleaning room:
 
 ```
@@ -63,7 +63,8 @@ the bot if you have one, else in the cleaning room:
 2️⃣ 👉 Kitchen · 13 – 19 Oct · next week
 3️⃣ 2nd Floor · Mon–Wed (20 – 22 Oct) · in 2 weeks · 🆘 asked
 
-👉 Kitchen · 13 – 19 Oct — 🔄 swap it · 🆘 I can't make it
+👉 Kitchen · 13 – 19 Oct
+🔄 swap it · 🆘 I can't make it
 ```
 
 Tap a number to pick a turn, then 🔄 to ask the room who swaps with you
@@ -71,18 +72,18 @@ Tap a number to pick a turn, then 🔄 to ask the room who swaps with you
 of the group), or 🆘 if you can't make it (the request below: 🙋 or 🔄).
 Only your own taps count; the menu is edited in place and your tap taken
 back, so the same buttons work again. It keeps showing what became of each
-turn — done, asked, or someone else's now. Only your latest menu is live.
+turn: done, asked, or someone else's now. Only your latest menu is live.
 `!next <person>` and `!next 11`+ give the plain list.
 
 **Swapping without commands.** Two ways, both by reaction:
 
 - *Cleaning early.* ✅ (or `!done`) while your own shift of the week is
-  still to come — Thu–Sun, say — and the running shift of the same slot is
+  still to come (Thu–Sun, say) and the running shift of the same slot is
   still open: you did that one, so you swap. You get the running shift,
   marked done; its holder gets your later one and is told:
 
   ```
-  🔄 @alice — bob already cleaned **2nd Floor · Mon–Wed** for you, so you two swapped: you're on **Thu–Sun (8 – 11 Oct)** now.
+  🔄 @alice, bob already cleaned **2nd Floor · Mon–Wed** for you, so you two swapped: you're on **Thu–Sun (8 – 11 Oct)** now.
   Doesn't suit you? React ↩️ and I'll swap you back.
   ```
 
@@ -96,12 +97,13 @@ turn — done, asked, or someone else's now. Only your latest menu is live.
   ```
   🆘 Who can step in? bob can't make it:
   2nd Floor · Thu–Sun (8 – 11 Oct) · week 41
-  🙋 I'll do it · 🔄 swap — you take it, bob takes your next turn
+  🙋 I'll do it
+  🔄 swap: you take it, bob takes your next turn
   (bob: ↩️ if you can make it after all)
   @alice @carol
   ```
 
-  🙋 — anyone in the room — takes the turn over. 🔄 takes it and hands the
+  🙋 (anyone in the room) takes the turn over. 🔄 takes it and hands the
   helper's next turn of that group (not yet started, not one where the asker
   already cleans) to the asker; without such a turn, the bot says so and 🙋
   still works. The request is edited to "✅ Sorted!" / "✅ Swapped!", which
@@ -114,7 +116,7 @@ turn — done, asked, or someone else's now. Only your latest menu is live.
 `!swap @user` (ask one person, who accepts with `!swap accept <id>`) and
 `!takeover` still work.
 
-**Welcome and groups.** Everyone gets one welcome, ever — when they join the
+**Welcome and groups.** Everyone gets one welcome, ever, when they join the
 room, or with their first command or reaction there, also if an admin added
 them before. The welcome is a group selector:
 
@@ -128,12 +130,13 @@ Tap a number to join or leave a group:
 ✅ Joined **2nd Floor**
 
 📅 Next: 2nd Floor · 5 – 11 Oct
-🗓 Your calendar: subscribe — add it in your calendar app
+🗓 Your calendar: subscribe
+📲 Add it in your calendar app.
 !mygroups reopens this · !join / !leave · !help
 ```
 
-Tapping a number toggles that group. The bot edits the selector — no extra
-message — and, once the tap is saved, removes your reaction so the same
+Tapping a number toggles that group. The bot edits the selector (no extra
+message) and, once the tap is saved, removes your reaction so the same
 number can be tapped again (that is what "tap again to leave" means). If the
 bot lacks the power level to remove other people's reactions, your reaction
 stays; removing it yourself then undoes that tap. `!mygroups` posts a fresh
@@ -142,7 +145,7 @@ rest via `!groups` and `!join`.
 
 **A private chat with the bot** (encrypted) also takes `!next`, `!plan`,
 `!plan pdf`, `!mygroups`, `!join`, `!leave`, `!done`, `!undo`, `!sos`,
-`!help` and `!ical` — only about yourself, never about others, and never admin commands
+`!help` and `!ical`, only about yourself, never about others, and never admin commands
 (admins have their own admin DM). See *Private chats* below for what it
 takes.
 
@@ -181,7 +184,7 @@ with `weekly …`.
 - Future turns from the rotation are re-planned, and the rotation rewinds so
   nobody loses or gains a turn. Turns that were assigned by hand, imported,
   taken over, swapped or already done are never moved silently: a change that
-  would move one is refused — change or remove that turn first.
+  would move one is refused: change or remove that turn first.
 - Groups set up before windows existed (`2x` used to mean Mon–Wed + Thu–Sun)
   keep exactly that until an admin sets a new rhythm.
 - A window says when a turn is *due*; nothing enforces when it is actually
@@ -196,7 +199,7 @@ with `weekly …`.
 
 The rotation gives one person at most one automatic duty per group and week.
 When a group has more duties per week (slots × shifts) than members, the rest
-stay *nobody assigned* — visible in the plan, fillable with `!plan assign`.
+stay *nobody assigned*: visible in the plan, fillable with `!plan assign`.
 `!validate` warns about such groups.
 
 ### Private chats
@@ -207,7 +210,7 @@ reaction and redaction there):
 
 1. the bot is in the cleaning room, and the resident and the bot are both
    joined members of it;
-2. the private room has exactly two members — the bot and the resident — and
+2. the private room has exactly two members (the bot and the resident) and
    nobody else invited or knocking;
 3. the private room is end-to-end encrypted (Megolm).
 
@@ -216,7 +219,7 @@ runs right before each answer; someone joining in the moment between check
 and answer isn't caught.) Display
 names and `m.direct` never decide this (`m.direct` is only used to find an
 existing chat for a welcome). The bot only joins a chat it is invited to if
-the inviter is allowed by `security.allowed_inviters` — so residents who
+the inviter is allowed by `security.allowed_inviters`, so residents who
 should use it privately need to be listed there (or `"all"`). Changes made
 from a private chat update the plan in the cleaning room.
 
@@ -238,7 +241,7 @@ With `[ical_server]` configured, `!ical` gives a personal subscription URL
 (`https://…/ical/<token>.ics`); without it, a .ics file. The welcome and
 every group selector show the link too. It isn't treated as a secret: a
 feed holds only that person's own turns, which the plan in the room shows
-anyway — but anyone with the link can follow those turns.
+anyway, but anyone with the link can follow those turns.
 
 - Tokens are 256 bits of randomness. The server checks the exact token
   format, that the token isn't revoked, and that its person is active and
@@ -250,7 +253,7 @@ anyway — but anyone with the link can follow those turns.
 - `!ical reset` replaces your link (the old one stops working); `!ical
   revoke` switches it off; admins can `!ical revoke <person>` without ever
   seeing the link.
-- A feed keeps working after someone leaves the room — the server doesn't
+- A feed keeps working after someone leaves the room. The server doesn't
   check room membership live. Revoke it, or remove the person.
 - A feed belongs to a person. When `!member link` joins a name to a Matrix
   user who already had a feed, the feed moves along.
@@ -260,7 +263,7 @@ anyway — but anyone with the link can follow those turns.
 
 ### PDF
 
-`!plan pdf [N] [group]` renders N weeks from this one — without N, as many
+`!plan pdf [N] [group]` renders N weeks from this one. Without N, as many
 whole weeks as fill one page per group (ten for a group with two slots, 21
 for a weekly one); `!plan pdf next [N] [group]` the same from next week on;
 `!plan pdf history [N] [group]` the last N weeks up to this one (default 8). It is made to be printed in black and
@@ -277,7 +280,7 @@ tectonic's cache at build time from `docker/tex-warmup.tex`, which must use
 everything the renderer does (a test checks).
 
 The PDF fonts cover Latin-1 (German, French, Scandinavian, …) and common
-punctuation. Other characters — Polish ł, Cyrillic, Greek, emoji — are
+punctuation. Other characters (Polish ł, Cyrillic, Greek, emoji) are
 missing from the PDF.
 
 ## Reliability, honestly
@@ -308,7 +311,7 @@ delivery of every message.
 All new state fields have defaults, so an existing `state.json` loads as is:
 
 - group rhythms gain windows (`shift_ends`), a start date and earlier
-  versions — old rhythms keep their meaning;
+  versions: old rhythms keep their meaning;
 - old calendar tokens (hash only) keep working; `!ical` issues a new link
   that can be shown again, and the old URL still works until `!ical reset`;
 - selectors without a room belong to the cleaning room;
@@ -328,12 +331,12 @@ forget earlier rhythm versions.
 
 `cargo run --bin state_debug -- state.json` prints a quick report of a state
 file, but its schedule is a simple guess that ignores rhythms and slot
-assignments — use `!plan` and `!validate` for the real thing.
+assignments: use `!plan` and `!validate` for the real thing.
 
 ## Paper plans and photos
 
 Current/upcoming `!plan pdf` exports are printable, scannable wall plans in
-one of two styles, chosen by an administrator — for every group with
+one of two styles, chosen by an administrator, for every group with
 `!plan pdf style days` or `!plan pdf style tick`, for one group with
 `!plan pdf style <group> tick` (`<group> default`: like everyone again).
 `!plan pdf style` shows what each group prints. One PDF can hold pages of
@@ -348,7 +351,7 @@ both styles:
   week, Monday for Mon–Tue, Thursday for Thu–Fri), or the day of the photo if
   that is earlier.
 
-`!plan pdf view [next] [N] [group]` prints the same plan only to look at —
+`!plan pdf view [next] [N] [group]` prints the same plan only to look at,
 for hanging up where nobody ticks: each group's table in its style, without
 boxes (on a days plan a solid bar across the days a duty may be done), without QR
 code or corner targets, and with "View only, not for ticking" at the top and

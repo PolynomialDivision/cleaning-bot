@@ -34,7 +34,7 @@ FROM chef AS builder
 # instead of racing while unpacking crates. sccache stays shared.
 COPY --from=planner /build/recipe.json recipe.json
 
-# Cook deps only — this layer is invalidated ONLY when Cargo.lock changes.
+# Cook deps only. This layer is invalidated ONLY when Cargo.lock changes.
 RUN --mount=type=cache,id=shared-cargo-git,target=/usr/local/cargo/git,sharing=private \
     --mount=type=cache,id=shared-cargo-registry,target=/usr/local/cargo/registry,sharing=private \
     --mount=type=cache,id=shared-sccache,target=/sccache \
@@ -73,7 +73,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-0 python3 python3-pil python3-numpy libzbar0 qrencode \
     && rm -rf /var/lib/apt/lists/*
 
-# Static musl binary — no extra runtime deps needed.
+# Static musl binary. No extra runtime deps needed.
 COPY --from=tectonic /usr/local/bin/tectonic  /usr/local/bin/tectonic
 # Pre-warmed LaTeX package cache baked in so first !pdf is instant and offline.
 COPY --from=tectonic /root/.cache/Tectonic    /root/.cache/Tectonic

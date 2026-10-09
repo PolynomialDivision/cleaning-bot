@@ -1,18 +1,18 @@
-//! What reactions mean — as plain state changes, so the Matrix handlers in
+//! What reactions mean, as plain state changes, so the Matrix handlers in
 //! `main` only feed events in, then save and refresh the messages. (Group
 //! selector taps themselves are `onboarding::tap`.)
 //!
 //! A ✅ on the weekly plan marks the reacting person's open duties of that
-//! week done — or, when their shift is still to come, swaps them onto the
+//! week done, or, when their shift is still to come, swaps them onto the
 //! running one (`trades`). Two kinds of reactions can be taken back:
 //!   * a group selector tap (`onboarding`): its owner undoes it, as long as
 //!     that still applies;
-//!   * a ✅ on the weekly plan: whoever reacted takes their done mark back —
+//!   * a ✅ on the weekly plan: whoever reacted takes their done mark back,
 //!     unless the turn has been marked done anew since.
 //!
 //! Every redaction is remembered (`State::redacted_reactions`), so a
-//! reaction that only arrives after its redaction — or again, after a
-//! restart — doesn't count. The bot's own redactions (it clears consumed
+//! reaction that only arrives after its redaction, or again, after a
+//! restart: doesn't count. The bot's own redactions (it clears consumed
 //! taps, see `onboarding::consume_tap`) never get here.
 
 use mxbot_common::matrix_sdk::ruma::RoomId;
@@ -33,12 +33,12 @@ pub enum PlanDone {
     /// Their open duties were marked done.
     Marked,
     /// Their own shift was still to come, so they took the running one
-    /// (marked done) and its holder theirs — see `trades`.
+    /// (marked done) and its holder theirs, see `trades`.
     SwappedEarly(crate::state::Trade),
 }
 
 /// `sender` reacted ✅ (`reaction_id`) on the plan of `week`: mark their
-/// open duties of that week done — those that have started, or the next
+/// open duties of that week done. Those that have started, or the next
 /// one, as `!done` would.
 pub fn plan_done(
     state: &mut State,
@@ -111,7 +111,7 @@ pub fn plan_done(
 /// What a redaction did.
 #[derive(Debug, PartialEq)]
 pub enum Redaction {
-    /// Someone else's tap or ✅ — not theirs to take back. Nothing changed.
+    /// Someone else's tap or ✅, not theirs to take back. Nothing changed.
     Refused,
     /// Nothing to undo (any longer); remembered against late delivery.
     Noted,

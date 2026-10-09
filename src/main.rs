@@ -72,7 +72,7 @@ fn migrate_rhythms(state: &mut State, interval_weeks: u32) -> bool {
 }
 
 /// How the bot answers a message: as a plain reply, visible in the room in
-/// every client — or, when it was written in a thread, in that thread.
+/// every client, or, when it was written in a thread, in that thread.
 /// (Answers used to go into a thread always, which some clients tuck away
 /// behind a reply counter.)
 fn answer_relation(ev: &OriginalSyncRoomMessageEvent) -> commands::Answer {
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
     if let Some(ical) = &config.ical_server {
         if !ical.public_url.starts_with("https://") {
             tracing::warn!(
-                "ical_server.public_url is not HTTPS — calendar feed tokens would travel in clear text"
+                "ical_server.public_url is not HTTPS: calendar feed tokens would travel in clear text"
             );
         }
     }
@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
         tracing::info!("Re-seated {n} turns so the start of split weeks takes turns.");
     }
 
-    // Materialize future assignments (idempotent — skips already-stored turns).
+    // Materialize future assignments (idempotent, skips already-stored turns).
     {
         let mat_events = resolver::materialize(&st, config.schedule.materialize_weeks as usize);
         let n = mat_events.len();
@@ -179,7 +179,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Validate on startup — log issues but never abort.
+    // Validate on startup: log issues but never abort.
     {
         let report = validate::validate_state(&st);
         if !report.errors.is_empty() {
@@ -274,7 +274,7 @@ async fn main() -> Result<()> {
                     return;
                 }
                 // Outside the cleaning room: admins in their DM, or a resident
-                // in a verified private chat (see `private`) — checked only
+                // in a verified private chat (see `private`): checked only
                 // for commands, as it asks the server for both rooms' members.
                 let private = room.room_id() != ctx.room_id;
                 if private && !admin_dm && !private::authorized(&ctx, &room, &ev.sender).await {
@@ -446,7 +446,7 @@ async fn main() -> Result<()> {
                         }
                         // Only once the tap is safely saved: take the
                         // reaction away, so the same number can be tapped
-                        // again. Never an undo — see the redaction handler.
+                        // again. Never an undo, see the redaction handler.
                         if saved && recorded {
                             onboarding::consume_tap(&room, &ev.event_id, &bot_user_id).await;
                         }
@@ -515,7 +515,7 @@ async fn main() -> Result<()> {
 
                 // ── Consolidated weekly plan reaction ─────────────────────────
                 let mut state = ctx.state.lock().await;
-                // ✅ on the plan — or on one of that week's reminders.
+                // ✅ on the plan, or on one of that week's reminders.
                 let Some(plan_week) = state
                     .weekly_plan_event_ids
                     .get(&reacted_to)
@@ -540,7 +540,7 @@ async fn main() -> Result<()> {
                         drop(state);
                         // Said to them, as a reply to what they reacted on.
                         let mut content = format::intentional(format::mentionify(&format!(
-                            "{sender_mxid} — you have no open turn this week, nothing to mark."
+                            "{sender_mxid} 🤷 You have no open turn this week, nothing to mark."
                         )));
                         content.relates_to = Some(Relation::Reply(Reply::with_event_id(
                             ev.content.relates_to.event_id.clone(),
@@ -588,7 +588,7 @@ async fn main() -> Result<()> {
             let bot_user_id = bot_user_id.clone();
             async move {
                 // The bot's own redactions only clear consumed selector
-                // taps (`onboarding::consume_tap`) — never an undo.
+                // taps (`onboarding::consume_tap`), never an undo.
                 if ev.sender == bot_user_id {
                     return;
                 }
@@ -676,7 +676,7 @@ async fn main() -> Result<()> {
     info!("Initial sync complete");
 
     // Show real Matrix display names in !status/!groups right away instead
-    // of Matrix usernames until each person sends their first command —
+    // of Matrix usernames until each person sends their first command:
     // also for people the bot shares no room with (their global profile).
     // Bounded in time; saved when a name changed.
     names::refresh(&ctx, &client, client.get_room(&ctx.room_id).as_ref()).await;

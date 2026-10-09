@@ -7,12 +7,12 @@ use super::*;
 // Directly sets who is responsible for one group/slot in one turn (default:
 // the current week; `on <day>` picks the shift of a group split into
 // shifts), overriding the rotation for that turn only. Stored as a frozen
-// `SlotAssignment` — the same record the resolver produces, so !plan,
+// `SlotAssignment`: the same record the resolver produces, so !plan,
 // !status, reminders, the PDF/iCal exports and the pinned weekly plan all
 // pick it up for free.
 //
-// This does not touch group membership (`!member add/remove` own that) —
-// it only edits who is on the hook for one turn, which is why the target
+// This does not touch group membership (`!member add/remove` own that).
+// It only edits who is on the hook for one turn, which is why the target
 // person does not need to already be a rotation member.
 
 /// Group, slot and turn named by `<group> [<slot>] … [week <N>] [on <day>]`;
@@ -64,7 +64,7 @@ pub(crate) async fn cmd_assign(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let usage = "Usage: !plan assign <group> [<slot>] <person> [week <1-53>] [on <day>]";
+    let usage = "💡 Usage: !plan assign <group> [<slot>] <person> [week <1-53>] [on <day>]";
     let mut state = ctx.state.lock().await;
     let (group, slot_index, turn, rest) = match resolve_admin_turn(&state, args) {
         Ok(v) => v,
@@ -103,7 +103,7 @@ pub(crate) async fn cmd_assign(
     let membership_note = if group.member_ids.contains(&person.id) {
         String::new()
     } else {
-        format!(" (not a member of «{}» — one-off assignment)", group.name)
+        format!(" (not a member of «{}», one-off assignment)", group.name)
     };
     let changed_note = match previous_id {
         Some(prev_id) if prev_id != person.id => {
@@ -133,7 +133,7 @@ pub(crate) async fn cmd_unassign(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let usage = "Usage: !plan unassign <group> [<slot>] [week <1-53>] [on <day>]";
+    let usage = "💡 Usage: !plan unassign <group> [<slot>] [week <1-53>] [on <day>]";
     let mut state = ctx.state.lock().await;
     let (group, slot_index, turn, _rest) = match resolve_admin_turn(&state, args) {
         Ok(v) => v,
@@ -155,7 +155,7 @@ pub(crate) async fn cmd_unassign(
     })?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!(
-        "✅ Cleared {} — left unassigned.",
+        "✅ Cleared {}. Left unassigned.",
         turn_title(&group, slot_index, turn)
     )))
 }
@@ -167,10 +167,10 @@ pub(crate) async fn cmd_unassign(
 // assignment; entries are frozen via the exact same `SlotAssigned` event and
 // upsert semantics as `!plan assign` (`AssignmentSource::Import` only for a
 // clearer audit trail), so imported weeks behave exactly like a normal
-// manual assignment and — crucially — never touch `rotation_queue`. Normal
+// manual assignment and (crucially) never touch `rotation_queue`. Normal
 // round-robin scheduling (`resolver::materialize`) simply skips every
 // already-frozen (group, slot, week) it sees, so it picks up on its own,
-// from wherever the queue already was, right after the last imported week —
+// from wherever the queue already was, right after the last imported week,
 // including a week this command *replaced*, since replacing just upserts
 // the same `SlotAssignment` record and never touches the queue either.
 //
@@ -178,10 +178,10 @@ pub(crate) async fn cmd_unassign(
 // Multiple entries share one command line, separated by a standalone `;`:
 //   !plan import 2025-W36 Kitchen @alice:example.org ; 2025-W36 Bathroom/Sink @bob:example.org
 //
-// Every entry is validated — ISO week format, future/current week, known
+// Every entry is validated: ISO week format, future/current week, known
 // group/slot, known person, no two entries fighting over the same slot, and
 // (in default mode) no conflict with whatever is already frozen for that
-// slot — before *any* entry is written; one bad line aborts the whole
+// slot: before *any* entry is written; one bad line aborts the whole
 // command with no state change, and every problem found is reported at once
 // rather than stopping at the first. An entry that already matches
 // persisted state exactly is treated as already-imported and quietly
@@ -189,10 +189,10 @@ pub(crate) async fn cmd_unassign(
 //
 // `--replace` (a flag token anywhere in the args) additionally allows
 // overwriting an existing *different* assignment for the same (group, slot,
-// week) — needed because most upcoming weeks are typically already
+// week): needed because most upcoming weeks are typically already
 // materialized by the normal scheduler by the time a paper-plan migration
 // happens. It never allows overwriting a week that's already completed or
-// skipped, in either mode — that's historical record, not an open slot.
+// skipped, in either mode. That's historical record, not an open slot.
 /// `YYYY-Www`, or `YYYY-Www:<day>` to name the shift containing that weekday.
 pub(crate) fn parse_iso_week_token(s: &str) -> Option<(i32, u32, Option<u8>)> {
     let (week_part, day) = match s.split_once(':') {
@@ -227,7 +227,7 @@ pub(crate) async fn cmd_importplan(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let usage = "Usage: !plan import [--replace] <YYYY-Www[:day]> <group>[/<slot>] <person> [; <YYYY-Www[:day]> <group>[/<slot>] <person> ...]";
+    let usage = "💡 Usage: !plan import [--replace] <YYYY-Www[:day]> <group>[/<slot>] <person> [; <YYYY-Www[:day]> <group>[/<slot>] <person> ...]";
     let replace_mode = args.contains(&"--replace");
     let args: Vec<&str> = args.iter().copied().filter(|&a| a != "--replace").collect();
     if args.is_empty() {
@@ -251,7 +251,7 @@ pub(crate) async fn cmd_importplan(
     for chunk in &entries {
         let raw = chunk.join(" ");
         let Some((&week_token, rest)) = chunk.split_first() else {
-            errors.push(format!("«{raw}» — {usage}"));
+            errors.push(format!("«{raw}»: {usage}"));
             continue;
         };
         let Some((year, week, day)) = parse_iso_week_token(week_token) else {
@@ -268,7 +268,7 @@ pub(crate) async fn cmd_importplan(
             continue;
         }
         let Some((&group_name, rest)) = rest.split_first() else {
-            errors.push(format!("«{raw}» — {usage}"));
+            errors.push(format!("«{raw}»: {usage}"));
             continue;
         };
         let (group_id, slot_index, rest) = match resolve_group_and_slot(&state, group_name, rest) {
@@ -282,7 +282,7 @@ pub(crate) async fn cmd_importplan(
             .group_by_id(&group_id)
             .expect("resolved group must exist");
         let Some(&person_query) = rest.first() else {
-            errors.push(format!("«{raw}» — {usage}"));
+            errors.push(format!("«{raw}»: {usage}"));
             continue;
         };
         if rest.len() > 1 {
@@ -338,7 +338,7 @@ pub(crate) async fn cmd_importplan(
                 && a.person.id != b.person.id
             {
                 errors.push(format!(
-                    "«{}» and «{}» both claim {}{} {} — conflicting entries in this import.",
+                    "«{}» and «{}» both claim {}{} {}. Conflicting entries in this import.",
                     a.raw, b.raw, a.group_name, a.slot_suffix, a.period
                 ));
             }
@@ -348,7 +348,7 @@ pub(crate) async fn cmd_importplan(
     // Conflicts against whatever is already persisted (round-robin, a prior
     // manual !plan assign, or an earlier import). A slot with no record at all is
     // always safe to fill; one that already matches this entry exactly is a
-    // no-op either way; anything else is only writable under `--replace` —
+    // no-op either way; anything else is only writable under `--replace`,
     // and never at all if the slot/week is already completed or skipped,
     // since that's a historical record, not an open assignment to override.
     let mut to_add: Vec<&PlannedImport> = Vec::new();
@@ -372,7 +372,7 @@ pub(crate) async fn cmd_importplan(
             state.is_turn_slot_done(group, p.slot_index, Turn::new(p.year, p.week, p.shift));
         if already_done {
             errors.push(format!(
-                "«{}»: {}{} for {} is already completed/skipped — cannot import over a finished turn.",
+                "«{}»: {}{} for {} is already done or skipped. Cannot import over a finished turn.",
                 p.raw, p.group_name, p.slot_suffix, p.period
             ));
             continue;
@@ -397,7 +397,7 @@ pub(crate) async fn cmd_importplan(
                     .map(person_label)
                     .unwrap_or_else(|| "nobody".into());
                 errors.push(format!(
-                    "«{}»: {}{} for {} is already assigned to {holder} — use !plan import --replace to override, or !plan unassign it first.",
+                    "«{}»: {}{} for {} is already assigned to {holder}. Use !plan import --replace to override, or !plan unassign it first.",
                     p.raw, p.group_name, p.slot_suffix, p.period
                 ));
             }
@@ -406,7 +406,7 @@ pub(crate) async fn cmd_importplan(
 
     if !errors.is_empty() {
         return Ok(Some(format!(
-            "❌ Import aborted, no changes made — {} problem(s):\n{}",
+            "❌ Import aborted, no changes made. {} problem(s):\n{}",
             errors.len(),
             errors.join("\n")
         )));
@@ -414,7 +414,7 @@ pub(crate) async fn cmd_importplan(
 
     if to_add.is_empty() && to_replace.is_empty() {
         return Ok(Some(format!(
-            "✅ Nothing to do — all {already_imported} entr{} already imported.",
+            "✅ Nothing to do. All {already_imported} entr{} already imported.",
             if already_imported == 1 { "y" } else { "ies" }
         )));
     }
@@ -464,7 +464,7 @@ pub(crate) async fn cmd_importplan(
     state.save(&ctx.state_path).await?;
 
     Ok(Some(format!(
-        "✅ Import complete — {added_count} added, {replaced_count} replaced, {already_imported} unchanged:\n{}",
+        "✅ Import complete: {added_count} added, {replaced_count} replaced, {already_imported} unchanged:\n{}",
         lines.join("\n")
     )))
 }
@@ -473,13 +473,13 @@ pub(crate) async fn cmd_importplan(
 //
 // Self-service handoff: the sender claims a turn away from whoever currently
 // has it, whether that's the regular rotation pick or an earlier manual
-// assignment — a frozen `SlotAssigned` with `source: Takeover`, so it never
+// assignment: a frozen `SlotAssigned` with `source: Takeover`, so it never
 // touches `rotation_queue` or any other turn.
 //
 // Group, slot, week and shift are all optional (see
 // `resolve_takeover_target`): bare `!takeover` means the sender's own group,
 // the running (or only open) turn, and auto-picks the slot when exactly one
-// is takeable — never guessing between several.
+// is takeable, never guessing between several.
 //
 // Refuses a turn that's already completed or skipped, so a finished task
 // can't be silently reassigned out from under its record.
@@ -489,7 +489,7 @@ pub(crate) async fn cmd_takeover(
     sender: &OwnedUserId,
     args: &[&str],
 ) -> Result<Option<String>> {
-    let usage = "Usage: !takeover [<group>] [<slot>] [week <1-53>] [on <day>]";
+    let usage = "💡 Usage: !takeover [<group>] [<slot>] [week <1-53>] [on <day>]";
     let Some(parsed) = extract_turn_args(args) else {
         return Ok(Some(usage.into()));
     };
@@ -505,7 +505,7 @@ pub(crate) async fn cmd_takeover(
     let sender_mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
 
-    // PersonCreated is idempotent — same self-registration as !join.
+    // PersonCreated is idempotent: same self-registration as !join.
     state.apply_event(DomainEvent::PersonCreated {
         person_id: Uuid::new_v4().to_string(),
         display_name: sender_mxid.to_owned(),
@@ -526,14 +526,14 @@ pub(crate) async fn cmd_takeover(
     let title = turn_title(&group, slot_index, turn);
     if state.is_turn_slot_done(&group, slot_index, turn) {
         return Ok(Some(format!(
-            "{title} is already completed or skipped — nothing to take over."
+            "🤷 {title} is already done or skipped. Nothing to take over."
         )));
     }
     let previous_id = state
         .slot_assignee(&group, slot_index, turn)
         .map(|p| p.id.clone());
     if previous_id.as_deref() == Some(sender_person_id.as_str()) {
-        return Ok(Some(format!("You are already responsible for {title}.")));
+        return Ok(Some(format!("ℹ️ You are already responsible for {title}.")));
     }
 
     state.apply_event(DomainEvent::SlotAssigned {
@@ -552,7 +552,7 @@ pub(crate) async fn cmd_takeover(
     let membership_note = if group.member_ids.contains(&sender_person_id) {
         String::new()
     } else {
-        format!(" (not a member of «{}» — one-off takeover)", group.name)
+        format!(" (not a member of «{}», one-off takeover)", group.name)
     };
     let from_note = previous_id
         .map(|prev_id| {
@@ -571,8 +571,8 @@ pub(crate) async fn cmd_takeover(
 // ── !undo [group] ─────────────────────────────────────────────────────────────
 //
 // Takes back this week's done marks. When several people share the week
-// (slots, or shifts), a member only takes back *their own* marks — the
-// slots/shifts they hold or marked — never someone else's. An admin naming
+// (slots, or shifts), a member only takes back *their own* marks (the
+// slots/shifts they hold or marked) never someone else's. An admin naming
 // the group explicitly clears the whole group's week (including skips).
 
 pub(crate) async fn cmd_undo(
@@ -608,7 +608,7 @@ pub(crate) async fn cmd_undo(
         }
     };
     if groups.is_empty() {
-        return Ok(Some("You are not assigned to any group.".into()));
+        return Ok(Some("🤷 You are not assigned to any group.".into()));
     }
 
     let mut undone = vec![];
@@ -694,7 +694,7 @@ pub(crate) async fn cmd_undo(
         lines.push(format!("❌ Not your group: {}", no_perm.join(", ")));
     }
     if lines.is_empty() {
-        lines.push("Nothing of yours to undo this week.".into());
+        lines.push("🤷 Nothing of yours to undo this week.".into());
     }
     Ok(Some(lines.join("\n")))
 }
@@ -714,9 +714,9 @@ pub(crate) fn holds_any_turn(
 
 // ── !next [person] [N] ───────────────────────────────────────────────────────
 //
-// Someone's next N open turns (default 3) across every active group —
+// Someone's next N open turns (default 3) across every active group,
 // including turns they hold in a group they're not a member of (a takeover,
-// a swap) — frozen plan first, rotation preview beyond it, which is marked
+// a swap), frozen plan first, rotation preview beyond it, which is marked
 // tentative. Anyone may look anyone up: the plan itself is public via
 // `!plan`. `!myplan`, `!mycleaning` and `!cleaning person <who>` are the
 // same command.
@@ -741,7 +741,7 @@ pub(crate) async fn cmd_next(
         Ok(Some(p)) => p.clone(),
         Ok(None) if is_self => {
             return Ok(Some(
-                "You're not on the cleaning plan yet — !mygroups to join a group.".into(),
+                "🤷 You're not on the cleaning plan yet.\n👉 !mygroups to join a group.".into(),
             ))
         }
         Ok(None) => return Ok(Some(format!("❌ {query} is not registered."))),
@@ -755,7 +755,7 @@ pub(crate) async fn cmd_next(
     )))
 }
 
-/// `!cleaning person <name | @user:server> [N]` — `!next` for someone else.
+/// `!cleaning person <name | @user:server> [N]`: `!next` for someone else.
 pub(crate) async fn cmd_cleaning_person(
     ctx: &BotContext,
     sender: &OwnedUserId,
@@ -763,7 +763,7 @@ pub(crate) async fn cmd_cleaning_person(
 ) -> Result<Option<String>> {
     if args.is_empty() {
         return Ok(Some(
-            "Usage: !cleaning person <name | @user:server> [N]".into(),
+            "💡 Usage: !cleaning person <name | @user:server> [N]".into(),
         ));
     }
     cmd_next(ctx, sender, args).await
@@ -812,7 +812,7 @@ pub(crate) fn next_text(
     if duties.is_empty() {
         let mut reply = if !in_a_group {
             if own {
-                "You're not in any cleaning group — !mygroups to join one.".to_owned()
+                "🤷 You're not in any cleaning group.\n👉 !mygroups to join one.".to_owned()
             } else {
                 format!("{who} is not in any cleaning group.")
             }
@@ -874,7 +874,7 @@ pub(crate) fn next_text(
         lines.push(format!("✅ Done this week: {}", done_now.join(", ")));
     }
     if any_tentative {
-        lines.push("Tentative = not fixed yet; may shift if members change.".into());
+        lines.push("⏳ Tentative = not fixed yet, may shift if members change.".into());
     }
     lines.join("\n")
 }
@@ -934,7 +934,7 @@ pub(crate) fn upcoming_duties(
 // ── Admin: !plan skip [group [slot]] [on <day>] ───────────────────────────────
 //
 // Excuses this week's open turns (not counted as missed): every due group,
-// one group, one slot of it, and/or — with `on <day>` — one shift.
+// one group, one slot of it, and/or (with `on <day>`) one shift.
 
 pub(crate) async fn cmd_skip(
     ctx: &BotContext,
@@ -942,7 +942,7 @@ pub(crate) async fn cmd_skip(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let usage = "Usage: !plan skip [<group> [<slot>]] [on <day>]";
+    let usage = "💡 Usage: !plan skip [<group> [<slot>]] [on <day>]";
     let (year, week) = current_iso_week();
     let Some(parsed) = extract_turn_args(args) else {
         return Ok(Some(usage.into()));
@@ -1045,7 +1045,7 @@ pub(crate) async fn cmd_skip(
         lines.push(format!("✅ Already done: {}", already.join(", ")));
     }
     if lines.is_empty() {
-        lines.push("Nothing due this week.".into());
+        lines.push("😌 Nothing due this week.".into());
     }
     Ok(Some(lines.join("\n")))
 }
@@ -1053,7 +1053,7 @@ pub(crate) async fn cmd_skip(
 // ── Admin: !plan remind [group] ───────────────────────────────────────────────
 //
 // Sends the reminder now: every open turn of this week that has started (or,
-// if none has, the next one) — one line per open slot, mentioning whoever
+// if none has, the next one). One line per open slot, mentioning whoever
 // holds it.
 
 pub(crate) async fn cmd_remind(
@@ -1083,7 +1083,7 @@ pub(crate) async fn cmd_remind(
                 .cloned()
                 .collect(),
         };
-        // Per group: its open turns that have started — or else its next one.
+        // Per group: its open turns that have started, or else its next one.
         let mut chosen: Vec<(GroupId, u8)> = Vec::new();
         for group in &groups {
             let open: Vec<Turn> = state
@@ -1121,7 +1121,7 @@ pub(crate) async fn cmd_remind(
     .await;
     Ok(Some(format::mentionify(match sent {
         Ok(Some(_)) => "✅ Reminder sent.",
-        Ok(None) => "⚠️ Nobody is assigned to the open turns — !plan assign.",
+        Ok(None) => "⚠️ Nobody is assigned to the open turns.\n👉 !plan assign",
         Err(e) => {
             tracing::warn!("!plan remind send failed: {e}");
             "❌ Sending the reminder failed."

@@ -1,14 +1,14 @@
-//! Handing turns around without typing commands — two ways, both by
+//! Handing turns around without typing commands: two ways, both by
 //! reaction in the cleaning room:
 //!
 //!   * **Cleaning early.** Someone ✅s (or `!done`s) while their own shift of
 //!     the week is still to come and the running shift of the same slot is
-//!     still open: they did the running one, so they swap — they get the
+//!     still open: they did the running one, so they swap. They get the
 //!     running shift (done), its holder gets their later one. A message
 //!     tells the one moved; ↩️ on it swaps back until the later shift
 //!     starts, and taking the ✅ back undoes it all.
-//!   * **🆘 Who steps in?** 🆘 on the plan or a reminder — or `!sos` for a
-//!     later week — asks the room to cover one of your turns. 🙋 on the
+//!   * **🆘 Who steps in?** 🆘 on the plan or a reminder, or `!sos` for a
+//!     later week: asks the room to cover one of your turns. 🙋 on the
 //!     request takes it over; 🔄 takes it and gives you the helper's next
 //!     turn of that group in return. ↩️ withdraws an open request, or undoes
 //!     the handover until its turns start. If nobody has stepped in by the
@@ -133,7 +133,7 @@ fn apply(state: &mut State, trade: &Trade, source: AssignmentSource, actor: &str
 }
 
 /// Whether `trade` can still be undone on `today`: everything it handed
-/// over is still where it went, and none of it has started or been done —
+/// over is still where it went, and none of it has started or been done,
 /// except a turn that was already cleaned when traded.
 pub fn undoable(state: &State, trade: &Trade, today: NaiveDate) -> bool {
     !trade.undone
@@ -232,8 +232,8 @@ fn early_swaps(
 }
 
 /// `person_id` (`mxid`) cleaned in `week` with nothing of theirs running:
-/// if the running shift of a slot they hold later is still open, swap —
-/// they take it, marked done; its holder takes their later shift. `None`
+/// if the running shift of a slot they hold later is still open, swap.
+/// They take it, marked done; its holder takes their later shift. `None`
 /// when there's nothing to swap. Only for someone with no started turn
 /// open (`commands::markable_duties` is empty).
 pub fn swap_early(
@@ -311,7 +311,7 @@ fn duty_of(state: &State, c: &Reassignment) -> Option<Duty> {
     })
 }
 
-/// "Thu–Sun (8 – 11 Oct)" — a shift of a group split into shifts, else the
+/// "Thu–Sun (8 – 11 Oct)". A shift of a group split into shifts, else the
 /// week's dates.
 pub fn when(duty: &Duty) -> String {
     let (start, end) = duty.turn.dates(&duty.group.rhythm);
@@ -324,7 +324,7 @@ pub fn when(duty: &Duty) -> String {
 /// The message to whoever an early swap moved.
 ///
 /// ```text
-/// 🔄 @bob — alice already cleaned **2nd Floor / Scharni · Mon–Wed** for you, so you two swapped: you're on **Thu–Sun (8 – 11 Oct)** now.
+/// 🔄 @bob, alice already cleaned **2nd Floor / Scharni · Mon–Wed** for you, so you two swapped: you're on **Thu–Sun (8 – 11 Oct)** now.
 /// Doesn't suit you? React ↩️ and I'll swap you back.
 /// ```
 pub fn early_text(state: &State, swap: &EarlySwap) -> String {
@@ -344,7 +344,7 @@ pub fn early_text(state: &State, swap: &EarlySwap) -> String {
             )
         } else {
             format!(
-                "🔄 {moved} — {cleaner} already cleaned **{}** for you, so you two swapped: \
+                "🔄 {moved}, {cleaner} already cleaned **{}** for you, so you two swapped: \
                  you're on **{}** now.",
                 done.label(),
                 when(&theirs)
@@ -352,7 +352,7 @@ pub fn early_text(state: &State, swap: &EarlySwap) -> String {
         });
     }
     if !swap.trade.undone {
-        lines.push("Doesn't suit you? React ↩️ and I'll swap you back.".to_owned());
+        lines.push("🤔 Doesn't suit you? React ↩️ and I'll swap you back.".to_owned());
     }
     lines.join("\n")
 }
@@ -457,13 +457,14 @@ fn helper_link(state: &State, req: &HelpRequest) -> String {
 /// ```text
 /// 🆘 **Who can step in?** alice can't make it:
 /// **2nd Floor / Scharni · Thu–Sun (8 – 11 Oct)** · week 41
-/// 🙋 I'll do it · 🔄 swap — you take it, alice takes your next turn
+/// 🙋 I'll do it
+/// 🔄 swap: you take it, alice takes your next turn
 /// (alice: ↩️ if you can make it after all)
 /// @bob @carl
 /// ```
 pub fn request_text(state: &State, req: &HelpRequest) -> (String, Vec<String>) {
     let Some(duty) = request_duty(state, req) else {
-        return ("⌛ Closed — that group is gone.".to_owned(), Vec::new());
+        return ("⌛ Closed. That group is gone.".to_owned(), Vec::new());
     };
     let what = format!(
         "**{} · {}** · week {}",
@@ -483,14 +484,14 @@ pub fn request_text(state: &State, req: &HelpRequest) -> (String, Vec<String>) {
                 vec![
                     format!("🔄 **Who swaps?** {asker} would like to swap:"),
                     what,
-                    format!("🔄 swap — you take it, {name} takes your next turn"),
+                    format!("🔄 swap: you take it, {name} takes your next turn"),
                     format!("({name}: ↩️ to take it back)"),
                 ]
             } else {
                 vec![
                     format!("🆘 **Who can step in?** {asker} can't make it:"),
                     what,
-                    format!("🙋 I'll do it · 🔄 swap — you take it, {name} takes your next turn"),
+                    format!("🙋 I'll do it\n🔄 swap: you take it, {name} takes your next turn"),
                     format!("({name}: ↩️ if you can make it after all)"),
                 ]
             };
@@ -501,7 +502,7 @@ pub fn request_text(state: &State, req: &HelpRequest) -> (String, Vec<String>) {
         }
         HelpStatus::Taken => (
             format!(
-                "✅ **Sorted!** {} does {what} for {} — thank you 💛\n↩️ undoes it, until it starts.",
+                "✅ **Sorted!** {} does {what} for {}. Thank you 💛\n↩️ undoes it, until it starts.",
                 helper_link(state, req),
                 req.requester
             ),
@@ -515,7 +516,7 @@ pub fn request_text(state: &State, req: &HelpRequest) -> (String, Vec<String>) {
                 .and_then(|c| duty_of(state, c))
                 .map(|d| {
                     format!(
-                        " — and {} does **{} · {}** · week {} instead",
+                        ", and {} does **{} · {}** · week {} instead",
                         req.requester,
                         d.place(),
                         when(&d),
@@ -544,7 +545,7 @@ pub fn request_text(state: &State, req: &HelpRequest) -> (String, Vec<String>) {
             let done = state.is_turn_slot_done(&duty.group, duty.slot_index, duty.turn);
             (
                 if done {
-                    format!("✨ {what} got done — closed.")
+                    format!("✨ {what} got done. Closed.")
                 } else {
                     format!("⌛ Closed: {what} ({asker}).")
                 },
@@ -569,7 +570,7 @@ pub enum Taken {
     SwapOnly,
 }
 
-/// `helper` (Matrix ID) steps in on `req` — with `swap`, giving their next
+/// `helper` (Matrix ID) steps in on `req`, with `swap`, giving their next
 /// turn of the group for it.
 pub fn take(
     state: &mut State,
@@ -987,7 +988,7 @@ async fn ask(
             room,
             reacted_to,
             sender.as_str(),
-            "— you have no open turn this week, nothing to ask cover for.",
+            "🤷 You have no open turn this week, nothing to ask cover for.",
         )
         .await;
         return;
@@ -997,7 +998,7 @@ async fn ask(
             room,
             reacted_to,
             sender.as_str(),
-            "— you already asked, see your 🆘 above.",
+            "☝️ You already asked, see your 🆘 above.",
         )
         .await;
         return;
@@ -1027,24 +1028,24 @@ async fn on_request(
     let result = if is_undo(key) {
         back(&mut state, &mut req, who, today).map(|outcome| {
             if outcome == Back::TooLate {
-                answer = Some("— too late to undo, it has started (or changed since).");
+                answer = Some("⌛ Too late to undo, it has started (or changed since).");
             }
         })
     } else {
         take(&mut state, &mut req, who, is_swap(key), today).map(|outcome| match outcome {
             Taken::Own => {
-                answer = Some("— that's your own request. ↩️ withdraws it.");
+                answer = Some("🙃 That's your own request. ↩️ withdraws it.");
             }
             Taken::NothingToSwap if swap_only => {
-                answer = Some("— you have no upcoming turn in that group to swap.");
+                answer = Some("🤷 You have no upcoming turn in that group to swap.");
             }
             Taken::NothingToSwap => {
                 answer = Some(
-                    "— you have no upcoming turn in that group to swap. 🙋 takes it over instead.",
+                    "🤷 You have no upcoming turn in that group to swap. 🙋 takes it over instead.",
                 );
             }
             Taken::SwapOnly => {
-                answer = Some("— this one is a swap: 🔄 takes it and gives them your next turn.");
+                answer = Some("🔄 This one is a swap: 🔄 takes it and gives them your next turn.");
             }
             Taken::Done | Taken::NotOpen => {}
         })
@@ -1120,7 +1121,7 @@ async fn undo_early(
                     room,
                     notice_id,
                     who,
-                    "— too late to swap back, the later shift has started (or changed since).",
+                    "⌛ Too late to swap back, the later shift has started (or changed since).",
                 )
                 .await;
             }
@@ -1223,7 +1224,7 @@ pub async fn tidy(ctx: &BotContext, room: &Room, nudge: bool) {
             continue;
         };
         let text = format!(
-            "👀 Nobody has stepped in yet for **{}** — {} can you help sort it out? (!plan assign)",
+            "👀 Nobody has stepped in yet for **{}**.\n{} can you help sort it out? (!plan assign)",
             label.unwrap_or_default(),
             admins.join(" ")
         );
@@ -1317,14 +1318,14 @@ mod tests {
             rendered: String::new(),
         };
         let text = early_text(&state, &swap);
-        assert!(text.starts_with("🔄 @alice:x.org — [bob]"), "{text}");
+        assert!(text.starts_with("🔄 @alice:x.org, [bob]"), "{text}");
         assert!(text.contains("**2nd Floor · Mon–Wed**"), "{text}");
         assert!(text.contains("you're on **Thu–Sun ("), "{text}");
         assert!(text.contains("↩️"), "{text}");
 
         // Once Thursday came, it stays.
         assert!(!undoable(&state, &trade, day(week, 3)));
-        // Before, it goes back — the cleaning stays recorded.
+        // Before, it goes back. The cleaning stays recorded.
         assert!(undo(&mut state, &mut trade, "@alice:x.org", day(week, 2)).unwrap());
         assert_eq!(who(&state, &group, week, 0), "@alice:x.org");
         assert_eq!(who(&state, &group, week, 1), "@bob:x.org");
@@ -1399,7 +1400,7 @@ mod tests {
         let (text, pings) = request_text(&state, &req);
         assert!(text.starts_with("🆘 **Who can step in?** [bob]"), "{text}");
         assert!(text.contains("**2nd Floor · Thu–Sun ("), "{text}");
-        assert!(text.contains("🙋 I'll do it · 🔄 swap"), "{text}");
+        assert!(text.contains("🙋 I'll do it\n🔄 swap"), "{text}");
         assert_eq!(pings, ["@alice:x.org", "@carol:x.org"]);
 
         assert_eq!(

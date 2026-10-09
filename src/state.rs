@@ -71,7 +71,7 @@ pub struct Absence {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SwapRequest {
     pub id: u64,
-    /// Requester / target are Matrix MXIDs — swaps are Matrix-only.
+    /// Requester / target are Matrix MXIDs: swaps are Matrix-only.
     pub requester: String,
     pub target: String,
     pub group_id: GroupId,
@@ -123,7 +123,7 @@ pub struct Reassignment {
     pub iso_week: u32,
     pub shift: u8,
     pub from: Option<PersonId>,
-    /// How `from` came to hold it — restored on an undo.
+    /// How `from` came to hold it: restored on an undo.
     #[serde(default)]
     pub from_source: crate::domain::AssignmentSource,
     pub to: Option<PersonId>,
@@ -139,7 +139,7 @@ impl Reassignment {
     }
 }
 
-/// Turns handed around in one go — undone together, or not at all.
+/// Turns handed around in one go: undone together, or not at all.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Trade {
     pub changes: Vec<Reassignment>,
@@ -165,7 +165,7 @@ pub struct EarlySwap {
     pub rendered: String,
 }
 
-/// "I can't make it — who steps in?" (🆘 / `!sos`), by event ID in
+/// "I can't make it: who steps in?" (🆘 / `!sos`), by event ID in
 /// `State::help_requests`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct HelpRequest {
@@ -227,7 +227,7 @@ pub struct TurnMenu {
     /// Whose turns; nobody else's taps count.
     pub user_id: String,
     pub room_id: String,
-    /// The turns offered, in number order (1️⃣ first) — fixed once posted,
+    /// The turns offered, in number order (1️⃣ first): fixed once posted,
     /// so a number always means the same turn.
     pub turns: Vec<MenuTurn>,
     /// The number tapped last (0-based), waiting for 🔄 or 🆘.
@@ -328,7 +328,7 @@ pub struct GroupSelector {
     /// counts once, and taking one back undoes exactly that tap.
     #[serde(default)]
     pub taps: HashMap<String, SelectorTap>,
-    /// The text last sent or edited in — edit only when it changes.
+    /// The text last sent or edited in: edit only when it changes.
     #[serde(default)]
     pub rendered: String,
 }
@@ -358,7 +358,7 @@ pub use crate::domain::CalendarToken;
 
 /// Event IDs seen recently, oldest first, capped at `RecentIds::CAP`.
 /// Matrix only re-delivers recent events (after a restart, from the last
-/// sync token), so older IDs can go. Serialized as a plain list — the same
+/// sync token), so older IDs can go. Serialized as a plain list. The same
 /// JSON as the `HashSet` it replaces.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 #[serde(transparent)]
@@ -440,7 +440,7 @@ pub struct State {
     /// that week's canonical plan message. Used to detect drift between
     /// persisted state and the live Matrix message (e.g. after a crash
     /// between applying a domain event and editing the message) without
-    /// having to parse Matrix edit-aggregation data back out of the room —
+    /// having to parse Matrix edit-aggregation data back out of the room:
     /// state stays the sole source of truth; Matrix is only ever read to
     /// confirm the event still exists. `#[serde(default)]` so old
     /// `state.json` files without it just re-render (and re-check) on the
@@ -453,8 +453,8 @@ pub struct State {
     /// people finish, and a ✅ on them counts like one on the plan.
     #[serde(default)]
     pub reminder_messages: HashMap<String, ReminderMessage>,
-    /// Reactions that were redacted — by their sender (an undo) or by the
-    /// bot (a consumed selector tap) — so a late or repeated delivery of the
+    /// Reactions that were redacted, by their sender (an undo) or by the
+    /// bot (a consumed selector tap), so a late or repeated delivery of the
     /// reaction itself is ignored. Only the most recent are kept.
     #[serde(default)]
     pub redacted_reactions: RecentIds,
@@ -471,7 +471,7 @@ pub struct State {
     /// first change, so a crash after that doesn't run it again.
     #[serde(skip)]
     pub active_command: Option<String>,
-    /// Matrix users who have had their welcome — once each, ever. (Named
+    /// Matrix users who have had their welcome, once each, ever. (Named
     /// for the old greeting, so everyone greeted by it still counts.)
     #[serde(default)]
     pub greeted_users: HashSet<String>,
@@ -495,13 +495,13 @@ pub struct State {
     /// by event ID.
     #[serde(default)]
     pub trade_taps: RecentIds,
-    /// Turn menus by event ID — the latest one per user.
+    /// Turn menus by event ID. The latest one per user.
     #[serde(default)]
     pub turn_menus: HashMap<String, TurnMenu>,
     /// Private chats the bot opened (help board 💬), by Matrix user.
     #[serde(default)]
     pub private_chats: HashMap<String, PrivateChat>,
-    /// Live group selectors by event ID — the latest one per user.
+    /// Live group selectors by event ID. The latest one per user.
     #[serde(default)]
     pub group_selectors: HashMap<String, GroupSelector>,
     /// `greeted_users` has been seeded with everyone who used the bot
@@ -640,12 +640,12 @@ impl State {
                     }
                 };
                 // `SlotAssignment.slot_index` is a raw position into
-                // `group.slots`, not a stable id — removing a slot shifts
+                // `group.slots`, not a stable id: removing a slot shifts
                 // every later slot down by one, so an untouched frozen
                 // assignment would silently start referring to the wrong
                 // slot. Drop the (now homeless) assignments for the removed
                 // slot FIRST, using their original index, then re-point the
-                // survivors at the same physical slot — reversing the order
+                // survivors at the same physical slot: reversing the order
                 // would shift a later assignment down onto `removed_index`
                 // and have it deleted by the very next step.
                 self.slot_assignments
@@ -946,7 +946,7 @@ impl State {
                     .group_by_id(group_id)
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
-                // Skip every open (slot, shift) of the week — or just the
+                // Skip every open (slot, shift) of the week, or just the
                 // given slot and/or shift.
                 let shifts: Vec<u8> = match shift {
                     Some(s) => vec![*s],
@@ -1159,7 +1159,7 @@ impl State {
             .find(|p| p.id == query || p.matches(query))
     }
     /// Everyone `query` could mean: the one person whose id or Matrix ID it
-    /// is, or else every person with that display name (case-insensitive) —
+    /// is, or else every person with that display name (case-insensitive):
     /// several when names collide, so callers can ask instead of guessing.
     pub fn find_persons(&self, query: &str) -> Vec<&Person> {
         let exact: Vec<&Person> = self
@@ -1217,7 +1217,7 @@ impl State {
 // ── Scheduling queries ────────────────────────────────────────────────────────
 //
 // Everything is expressed in `Turn`s (one shift of one due week, see
-// `rhythm`) and each group's own rhythm — nothing here assumes that a turn
+// `rhythm`) and each group's own rhythm. Nothing here assumes that a turn
 // is a calendar week or that all groups share one interval.
 
 impl State {
@@ -1229,7 +1229,7 @@ impl State {
         offset.rem_euclid(every) == 0
     }
 
-    /// The group's turns in this week — one per shift, none in a week it
+    /// The group's turns in this week. One per shift, none in a week it
     /// isn't due.
     pub fn turns_in_week(&self, group: &CleaningGroup, year: i32, week: u32) -> Vec<Turn> {
         if !self.is_due_week(group, year, week) {
@@ -1540,7 +1540,7 @@ pub fn weeks_between(from: (i32, u32), to: (i32, u32)) -> i64 {
 }
 /// The configured wall-clock timezone (`schedule.timezone`), set once at
 /// startup by `main` before any command runs. Everything that decides "what
-/// week is it" — `!done`, `!plan skip`, materialize, the scheduler tick, etc. —
+/// week is it" (`!done`, `!plan skip`, materialize, the scheduler tick, etc.)
 /// goes through `current_iso_week()`, so this is the single place that needs
 /// to know about local time rather than threading `Config` through every
 /// call site. Falls back to UTC when unset (e.g. in unit tests), which keeps
@@ -1549,7 +1549,7 @@ static TIMEZONE: OnceLock<chrono_tz::Tz> = OnceLock::new();
 
 /// Must be called at most once, before the first `current_iso_week()` call
 /// that should observe it (i.e. very early in `main`, right after the config
-/// is parsed). Later calls are ignored — matches the "set once at startup"
+/// is parsed). Later calls are ignored: matches the "set once at startup"
 /// contract.
 pub fn set_timezone(tz: chrono_tz::Tz) {
     let _ = TIMEZONE.set(tz);
@@ -1622,7 +1622,7 @@ mod tests {
     #[test]
     fn iso_week_follows_local_midnight_not_utc_midnight() {
         // Sunday 23:30 UTC in January is already Monday 00:30 CET in
-        // Europe/Berlin (UTC+1) — a new ISO week for anyone actually living
+        // Europe/Berlin (UTC+1). A new ISO week for anyone actually living
         // there, even though UTC itself hasn't rolled over yet. Before this
         // fix, `current_iso_week()` always used raw UTC, so for up to two
         // hours (CEST in summer) around every weekly rollover, `!done`,

@@ -6,7 +6,7 @@ use super::*;
 
 /// True for every command (and lower-cased first argument, for commands
 /// with subcommands) whose successful effect can change who's responsible
-/// for, or the completion status of, the currently displayed weekly plan —
+/// for, or the completion status of, the currently displayed weekly plan:
 /// `handle` re-renders the pinned message from `State` after any of these
 /// instead of leaving it to drift until the next scheduler tick or restart.
 /// Kept as its own function so the list is covered by a direct unit test.
@@ -52,7 +52,7 @@ pub(crate) fn load_icon(actual: f64, expected: f64) -> &'static str {
 
 pub(crate) fn load_delta_pct(actual: f64, expected: f64) -> (String, &'static str) {
     if expected < 0.01 {
-        // No expected history yet — can't compute a meaningful percentage.
+        // No expected history yet: can't compute a meaningful percentage.
         return ("n/a".to_owned(), "balanced");
     }
     let pct = (actual - expected) / expected * 100.0;
@@ -129,15 +129,15 @@ pub(crate) fn reset_and_rematerialize(
         })?;
     }
     // Explicit admin escape hatch: commit the full configured horizon, not
-    // just one more due-cycle — unlike a join/leave, this is a deliberate
+    // just one more due-cycle: unlike a join/leave, this is a deliberate
     // "redistribute everything now" action.
     let cycles = ctx.config.schedule.materialize_weeks as usize;
     materialize_group_and_apply(state, &group_id.to_owned(), cycles)?;
     Ok(cleared)
 }
 
-/// "Discarded 3 pinned week(s): 41 (imported), 42 (imported), 50 (assigned)."
-/// — or nothing when only plain rotation weeks were cleared.
+/// "Discarded 3 pinned week(s): 41 (imported), 42 (imported), 50 (assigned).":
+/// or nothing when only plain rotation weeks were cleared.
 pub(crate) fn discarded_pins_note(cleared: &[crate::domain::SlotAssignment]) -> Option<String> {
     let mut pinned: Vec<&crate::domain::SlotAssignment> = cleared
         .iter()
@@ -180,7 +180,7 @@ pub(crate) fn drop_future_assignments(
 /// Change a group's rhythm. Turns of the current week that already exist
 /// keep their assignee (and new shifts of this week are filled); everything
 /// after it is re-planned in the new rhythm, with the people drawn for the
-/// dropped turns put back at the front of the queue in their order — so
+/// dropped turns put back at the front of the queue in their order, so
 /// nobody loses or gains a turn by the change.
 pub(crate) fn apply_rhythm_change(
     ctx: &BotContext,
@@ -260,8 +260,8 @@ pub(crate) fn apply_rhythm_change(
 /// A cycle starts whenever the group's anchor (`resolver::cycle_anchor`,
 /// the head of the original rotation) is due again. From that turn on, the
 /// round-robin weeks are dropped, their draws rewound onto the queue, and
-/// the next cycle is re-seated with every newcomer — this joiner plus anyone
-/// who joined earlier and hasn't had a turn before that boundary — spread
+/// the next cycle is re-seated with every newcomer (this joiner plus anyone
+/// who joined earlier and hasn't had a turn before that boundary) spread
 /// through it by `resolver::spread_newcomers`. Then the same horizon is
 /// filled again (extended only if the joiner would otherwise have no
 /// frozen turn yet). No randomness: the same state always yields the same
@@ -287,7 +287,7 @@ pub(crate) fn apply_group_join(
 
     if rotation_was_empty {
         // First-ever member: don't let materialize hand them a week that's
-        // already underway — their first real turn starts next week.
+        // already underway. Their first real turn starts next week.
         keep_active_week_unassigned_for_first_member(ctx, state, group_id)?;
     }
 
@@ -390,7 +390,7 @@ fn refill_replanned(
     Ok(())
 }
 
-/// The first of the `replaced` turns whose assignee is different now — the
+/// The first of the `replaced` turns whose assignee is different now. The
 /// first dropped turn may be redrawn identically (or not be redrawn at all).
 fn first_changed_turn(
     state: &crate::state::State,
@@ -411,7 +411,7 @@ fn first_changed_turn(
 }
 
 /// Give the group's plain rotation turns after the current week back to the
-/// queue, in the order they were drawn — as if they had never been planned.
+/// queue, in the order they were drawn, as if they had never been planned.
 /// Pinned weeks and anything done stay. Used when a group is disabled
 /// (nothing may advance its rotation while nobody cleans) and re-enabled
 /// (pick up exactly where it stopped).
@@ -434,7 +434,7 @@ pub(crate) fn return_future_rotation_turns(
 }
 
 /// Remove and return the group's round-robin assignments from turn `from`
-/// on — the ones a re-plan may redraw. Admin/self-service/imported weeks
+/// on: the ones a re-plan may redraw. Admin/self-service/imported weeks
 /// and anything already done or skipped stay where they are.
 fn take_replannable_assignments(
     state: &mut crate::state::State,
@@ -476,7 +476,7 @@ pub(crate) fn first_turn_of(
 /// The group's name as configured (whatever case the command used).
 /// The reply when a group name matches nothing.
 pub(crate) fn group_not_found(name: &str) -> String {
-    format!("❌ Group «{name}» not found — !groups lists them.")
+    format!("❌ Group «{name}» not found.\n👉 !groups lists them.")
 }
 
 pub(crate) fn group_name_of(state: &crate::state::State, group_id: &GroupId) -> String {
@@ -499,7 +499,7 @@ pub(crate) fn join_summary(
     };
     if !group.is_active {
         return format!(
-            "🚫 {} is disabled — turns start once it's enabled again.",
+            "🚫 {} is disabled. Turns start once it's enabled again.",
             group.name
         );
     }
@@ -515,7 +515,7 @@ pub(crate) fn join_summary(
             "🔄 Re-planned from week {} on; earlier weeks unchanged.",
             turn.week
         ),
-        None => "No planned week had to change.".to_owned(),
+        None => "🤷 No planned week had to change.".to_owned(),
     };
     format!("{first}\n{plan}")
 }
@@ -569,7 +569,7 @@ pub(crate) fn apply_group_departure(
         queue,
     })?;
 
-    // Refill within whatever horizon this group already had — a leave
+    // Refill within whatever horizon this group already had. A leave
     // creates gaps, it never needs to extend the horizon further out.
     replaced.extend(vacated.iter().cloned());
     refill_replanned(state, group_id, horizon, &replaced)?;
@@ -590,12 +590,12 @@ pub(crate) fn departure_summary(
         return String::new();
     };
     if departure.vacated.is_empty() {
-        return "No upcoming turns to hand on — nothing else changed.".to_owned();
+        return "🤷 No upcoming turns to hand on. Nothing else changed.".to_owned();
     }
     let turns = crate::view::plural(departure.vacated.len(), "upcoming turn", "upcoming turns");
     let mut lines = vec![match departure.changed_from {
         Some(turn) => format!(
-            "🔄 {turns} handed on — from week {}, everyone after moves up one turn.",
+            "🔄 {turns} handed on. From week {}, everyone after moves up one turn.",
             turn.week
         ),
         None => format!("🔄 {turns} handed on."),
@@ -625,7 +625,7 @@ pub(crate) fn departure_summary(
         ));
     }
     if !pinned.is_empty() {
-        lines.push("Use !plan assign if that was arranged differently.".into());
+        lines.push("💡 Use !plan assign if that was arranged differently.".into());
     }
     lines.join("\n")
 }
@@ -662,7 +662,7 @@ pub(crate) fn remove_future_assignments_for_person(
 pub(crate) struct TurnArgs<'a> {
     /// The arguments without those clauses.
     pub(crate) rest: Vec<&'a str>,
-    /// The named week, or the current one — rolling into next year when the
+    /// The named week, or the current one: rolling into next year when the
     /// week number has already passed this year.
     pub(crate) week: (i32, u32),
     /// Weekday (0 = Monday) selecting a shift in a group split into shifts.
@@ -745,7 +745,7 @@ pub(crate) fn single_turn(
     }
 }
 
-/// "«Bathroom» is cleaned in shifts (Mon–Wed, Thu–Sun) — add `on <day>`, e.g. `on thu`."
+/// "«Bathroom» is cleaned in shifts (Mon–Wed, Thu–Sun): add `on <day>`, e.g. `on thu`."
 pub(crate) fn shift_hint(group: &CleaningGroup, week: (i32, u32)) -> String {
     let rhythm = group.rhythm.for_week(week.0, week.1);
     let shifts: Vec<String> = rhythm.shifts().iter().map(|s| s.label()).collect();
@@ -753,7 +753,7 @@ pub(crate) fn shift_hint(group: &CleaningGroup, week: (i32, u32)) -> String {
         ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][s.start as usize]
     });
     format!(
-        "«{}» is cleaned in shifts ({}) — add `on <day>`, e.g. `on {example}`.",
+        "🗓️ «{}» is cleaned in shifts ({}).\n💡 Add `on <day>`, e.g. `on {example}`.",
         group.name,
         shifts.join(", ")
     )
@@ -799,7 +799,7 @@ pub(crate) fn resolve_group_and_slot<'r, 'a>(
 /// defaults instead of requiring the full explicit syntax:
 ///
 /// - No group given → the sender's own group, provided they're in exactly
-///   one (never guessed among several — that returns a message listing them).
+///   one (never guessed among several, that returns a message listing them).
 /// - A single token that isn't a group name is read as a slot of that group.
 /// - Turn and slot are picked automatically when exactly one candidate
 ///   (not done, not already the sender's) is left; in the current week the
@@ -819,7 +819,7 @@ pub(crate) fn resolve_takeover_target(
             [] => Err("You are not in any cleaning group. Specify one: !takeover <group> [<slot>]".into()),
             [g] => Ok((*g).clone()),
             many => Err(format!(
-                "You are in multiple groups — specify one: {}\nUsage: !takeover <group> [<slot>] [week <N>] [on <day>]",
+                "🤔 You are in several groups. Name one: {}\n💡 Usage: !takeover <group> [<slot>] [week <N>] [on <day>]",
                 many.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
             )),
         }
@@ -837,7 +837,7 @@ pub(crate) fn resolve_takeover_target(
     let slots: Vec<usize> = match slot_token {
         Some(name) => {
             if !group.is_multi_slot() {
-                return Err(format!("«{}» does not have slots.", group.name));
+                return Err(format!("🤷 «{}» does not have slots.", group.name));
             }
             match group
                 .slots
@@ -888,9 +888,9 @@ pub(crate) fn resolve_takeover_target(
         ([one], _) | ([], [one]) => *one,
         (_, []) => {
             return Err(format!(
-                "Nothing to take over in «{}» then — already completed or skipped, over, or yours.",
-                group.name
-            ))
+            "🤷 Nothing to take over in «{}» then. It is already done or skipped, over, or yours.",
+            group.name
+        ))
         }
         _ => {
             let options: Vec<String> = candidates
@@ -912,7 +912,7 @@ pub(crate) fn resolve_takeover_target(
                 "`on <day>`"
             };
             return Err(format!(
-                "Several open turns: {} — specify {how}: !takeover {} …",
+                "🤔 Several open turns: {}\n💡 Specify {how}: !takeover {} …",
                 options.join(", "),
                 group.name
             ));
@@ -1021,7 +1021,7 @@ pub(crate) fn current_open_assignments(
 }
 
 /// Resolve a person argument (see `State::find_persons`): `Ok(None)` when
-/// nobody matches — callers word that themselves — and an error message
+/// nobody matches (callers word that themselves) and an error message
 /// listing the candidates when a display name is ambiguous, rather than
 /// silently picking one of them.
 pub(crate) fn lookup_person<'a>(
@@ -1032,7 +1032,7 @@ pub(crate) fn lookup_person<'a>(
         [] => Ok(None),
         [one] => Ok(Some(one)),
         several => {
-            // The candidates' IDs as pills that ping nobody — they're only
+            // The candidates' IDs as pills that ping nobody: they're only
             // being looked up.
             let who: Vec<String> = several
                 .iter()
@@ -1044,7 +1044,7 @@ pub(crate) fn lookup_person<'a>(
                 })
                 .collect();
             Err(format!(
-                "«{query}» matches {} people: {} — use the Matrix ID instead.",
+                "🤔 «{query}» matches {} people: {}\n💡 Use the Matrix ID instead.",
                 several.len(),
                 who.join(", ")
             ))
@@ -1060,7 +1060,7 @@ pub(crate) fn person_label(person: &Person) -> String {
     }
 }
 
-/// "Next: Bob · Thu–Sun 25 – 28 Sep (week 39)." — the group's first turn
+/// "Next: Bob · Thu–Sun 25 – 28 Sep (week 39).". The group's first turn
 /// that starts after today.
 pub(crate) fn next_assignment_summary(state: &crate::state::State, group_id: &GroupId) -> String {
     let Some(group) = state.group_by_id(group_id) else {
@@ -1118,7 +1118,7 @@ impl Duty {
 }
 
 impl Duty {
-    /// "Bathroom", "Floor / Kitchen" — the label without its shift.
+    /// "Bathroom", "Floor / Kitchen". The label without its shift.
     pub(crate) fn place(&self) -> String {
         match self.group.slots.get(self.slot_index) {
             Some(slot) => format!("{} / {}", self.group.name, slot.name),
@@ -1128,7 +1128,7 @@ impl Duty {
 }
 
 /// `person_id`'s open duties in one week (optionally one group): those whose
-/// turn has started — or, if none has yet, the week's next one, since
+/// turn has started, or, if none has yet, the week's next one, since
 /// cleaning a little early is fine. Shared by `!done` and the ✅ reaction.
 pub(crate) fn markable_duties(
     state: &crate::state::State,
@@ -1171,7 +1171,7 @@ pub(crate) fn markable_duties(
 }
 
 /// Take back what a ✅ reaction marked (its redaction), through the event
-/// log like `!undo`. Only marks still made by the reacting person go — a
+/// log like `!undo`. Only marks still made by the reacting person go. A
 /// skip or someone else's mark on the same duty since then stays. Returns
 /// whether anything changed.
 pub(crate) fn undo_reaction_done(

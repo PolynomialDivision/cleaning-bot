@@ -24,13 +24,13 @@ pub(crate) fn plan_message(state: &crate::state::State, n: usize) -> RoomMessage
     format::intentional(format::mentionify(&plan_text(state, n)))
 }
 
-/// The next `n` weeks, week by week — everyone as a user pill that pings
+/// The next `n` weeks, week by week: everyone as a user pill that pings
 /// nobody (`view::user_link`). This week's lines show their status
 /// (⬜ ✅ ⏭️ ❌); later weeks are plain bullets.
 pub(crate) fn plan_text(state: &crate::state::State, n: usize) -> String {
     let snapshot = build_schedule(state, n);
     if snapshot.is_empty() {
-        return "No active cleaning groups configured yet.".into();
+        return "🤷 No active cleaning groups configured yet.".into();
     }
     let mut lines = vec![format!(
         "📋 **Plan · next {}**",
@@ -213,8 +213,8 @@ pub(crate) async fn cmd_pdf(
         }
     };
 
-    // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99"
-    // — as the cleaning room knows them, also when asked in a private chat.
+    // Refresh Matrix display names so the PDF shows "Thomas" not "thomas99":
+    // as the cleaning room knows them, also when asked in a private chat.
     crate::names::refresh(
         ctx,
         &room.client(),
@@ -327,7 +327,7 @@ pub(crate) async fn cmd_pdf(
 
 /// `m.relates_to` making a file the same kind of answer as a text reply
 /// (see `answer_relation` in `main`). Passed as extra content rather than an
-/// SDK `Reply`, which would first fetch the event answered — and lose the
+/// SDK `Reply`, which would first fetch the event answered, and lose the
 /// file if that fails. The SDK still encrypts the event and the upload in
 /// encrypted rooms.
 fn relation_content(relation: Answer) -> serde_json::Map<String, serde_json::Value> {

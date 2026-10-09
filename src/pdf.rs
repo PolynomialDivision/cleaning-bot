@@ -115,13 +115,13 @@ const COLUMN_RULE: &str = "!{\\color{black!45}\\vrule width 0.4pt}";
 const HEAVY_RULE: &str =
     "\\noalign{\\global\\arrayrulewidth=1.2pt}\\hline\n\\noalign{\\global\\arrayrulewidth=0.5pt}\n";
 
-// Made to be printed — in black and white, too: no dark fills, and nothing
+// Made to be printed, in black and white, too: no dark fills, and nothing
 // told by colour alone (done is a tick, skipped a dash).
 //
 // Printed in black and white, the structure has to come from the lines: a
 // heavy frame, heavy rules around the header and between weeks, dashed
 // rules between the shifts of a week and dotted ones between the slots of a
-// shift, fine lines between columns. Colour is only a bonus on screens —
+// shift, fine lines between columns. Colour is only a bonus on screens,
 // and rows are never filled: cell colour would paint over the dashed lines. The week number and the dates are centred over their rows
 // (`\multirow` with a negative count, placed in the block's last row so the
 // shading of later rows can't paint over it), so every row has the same
@@ -312,14 +312,14 @@ fn group_section(
                 s.push_str(&format!(" \\\\\n{HEAVY_RULE}"));
             } else {
                 // Inside a week: dashed between its shifts, dotted between the
-                // slots of a shift — under the cells that change only, so the
+                // slots of a shift: under the cells that change only, so the
                 // merged week (and shift) cells stay one box.
                 let (from, pattern) = if last_of_shift {
                     (2, "[3pt/2pt]")
                 } else {
                     (3, "[0.8pt/1.6pt]")
                 };
-                // No page break inside a week — after the row, nor after its
+                // No page break inside a week, after the row, nor after its
                 // line (itself a row of its own).
                 s.push_str(&format!(
                     " \\\\*\n\\cdashline{{{from}-{cols}}}{pattern}\n\\noalign{{\\penalty10000}}\n"
@@ -342,7 +342,7 @@ fn group_section(
     s
 }
 
-/// "\faToilet Scharni Toilet \faShower Shower Room" — each room with the
+/// "\faToilet Scharni Toilet \faShower Shower Room". Each room with the
 /// icon of its kind, as in the chat.
 fn rooms_with_icons(rooms: &[String]) -> String {
     use crate::view::RoomKind;
@@ -365,7 +365,7 @@ fn rooms_with_icons(rooms: &[String]) -> String {
 }
 
 /// `content` centred over the `rows` rows ending here (a negative
-/// `\multirow`, see above) — or just the content in a row of its own,
+/// `\multirow`, see above), or just the content in a row of its own,
 /// which `\multirow` would set a little off the line.
 fn merged(rows: usize, width: &str, content: &str) -> String {
     if rows > 1 {
@@ -417,7 +417,7 @@ fn tex_esc(s: &str) -> String {
             '\u{2014}' => out.push_str("---"), // em dash
             // The T1 font encoding agrees with Latin-1 on accented letters,
             // but not on these: as raw characters, XeTeX (tectonic) prints
-            // the T1 glyph in that slot — "2×" came out as "2Œ", "ß" as "SS".
+            // the T1 glyph in that slot: "2×" came out as "2Œ", "ß" as "SS".
             // Anything else outside Latin-1 has no glyph in these fonts.
             '×' => out.push_str(r"$\times$"),
             '÷' => out.push_str(r"$\div$"),

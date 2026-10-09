@@ -5,7 +5,7 @@
 //! summary.
 //!
 //! It reads its own simplified copy of the types and knows nothing of
-//! per-group rhythms (shifts, windows, versions) or slot assignments — its
+//! per-group rhythms (shifts, windows, versions) or slot assignments. Its
 //! "schedule" is a plain weekly rotation guess, not what the bot plans. Use
 //! the bot's `!plan`, `!status` and `!validate` for that.
 //!
@@ -345,7 +345,7 @@ fn main() -> anyhow::Result<()> {
         for p in &stubs {
             let reason = if !p.active { "INACTIVE" } else { "no group" };
             println!(
-                "  {} ({}) — {reason}",
+                "  {} ({}): {reason}",
                 p.display_name,
                 p.matrix_id.as_deref().unwrap_or("no mxid")
             );

@@ -126,7 +126,7 @@ pub async fn handle(
     let rest = args.get(1..).unwrap_or_default();
 
     // Your own next turns: a menu to pick one and swap it or ask for cover
-    // (`turn_menu`) — as plain text only for more than it has numbers.
+    // (`turn_menu`): as plain text only for more than it has numbers.
     if matches!(cmd, "!next" | "!myplan" | "!mycleaning") {
         let count = match args.as_slice() {
             [] => Some(crate::turn_menu::DEFAULT),
@@ -240,8 +240,8 @@ pub async fn handle(
     }?;
 
     // Every mutation that can change who's responsible for, or the status
-    // of, the running week's plan goes through this single refresh call —
-    // the pinned Matrix message is re-rendered straight from `State`, never
+    // of, the running week's plan goes through this single refresh call.
+    // The pinned Matrix message is re-rendered straight from `State`, never
     // patched in place, so it can never drift from the persisted domain state.
     if command_may_change_current_plan(cmd, sub) {
         let (year, week) = current_iso_week();
@@ -303,7 +303,7 @@ fn person_then_number(args: &[&str]) -> Vec<String> {
 }
 
 /// Regroup the tokens of one command so multi-word names need no quotes.
-/// Quoted input still works — it simply already arrives as one token.
+/// Quoted input still works. It simply already arrives as one token.
 pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&str]) -> Vec<String> {
     let owned = |a: &[&str]| a.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     let with_sub = |sub: &str, rest: Vec<String>| {
@@ -385,12 +385,12 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
 
 // ── help ─────────────────────────────────────────────────────────────────────
 
-const PLAN_USAGE: &str = "Usage: !plan [N] | !plan assign|unassign|skip|remind|announce|pdf|reset|import … (see !help admin)";
-const MEMBER_USAGE: &str = "Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person> · !member welcome <person>";
+const PLAN_USAGE: &str = "💡 Usage: !plan [N] | !plan assign|unassign|skip|remind|announce|pdf|reset|import … (see !help admin)";
+const MEMBER_USAGE: &str = "💡 Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person> · !member welcome <person>";
 
 /// What a resident may do in a verified private chat with the bot: their
-/// own turns, groups, completions and calendar, and the public plan —
-/// nothing about other people, nothing for admins (they have their own DM).
+/// own turns, groups, completions and calendar, and the public plan.
+/// Nothing about other people, nothing for admins (they have their own DM).
 pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
     match cmd {
         "!help" | "!mygroups" | "!join" | "!leave" | "!done" | "!undo" | "!sos" | "!cant" => true,
@@ -414,7 +414,7 @@ pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
 
 fn help_text() -> String {
     "🧹 **A little cleaning, a happier house** ✨\n\n\
-📅 !next · your turns — swap one or 🆘 from there\n\
+📅 !next · your turns, swap one or 🆘 from there\n\
 📋 !plan · see the plan\n\
 👥 !mygroups · join or leave groups\n\
 ✅ !done · done! (or ✅ on the plan)\n\
@@ -427,25 +427,25 @@ fn help_text() -> String {
 
 fn more_help_text() -> String {
     "🫧 **A little more help**\n\
-!status · this week's progress\n\
-!undo [group] · take your done mark back\n\
-!done <group> · mark a group you cleaned\n\
-!sos [group] [slot] [week N] [on <day>] · ask who steps in for a later turn\n\
-!takeover [group] · take a turn over yourself\n\
-!swap @user [group] · ask someone to cover; they accept or reject\n\
-!join <group> · !leave <group> · without the number buttons\n\
-!groups [group] · groups, members, rooms\n\
-!stats · cleaning history\n\
-!plan pdf next 20 · a PDF from next week on · history = past weeks\n\
-!plan pdf view · the plan only to look at (to hang up), nothing to tick\n\
-!ical reset · a new calendar link (the old one stops working)\n\n\
-👥 In !mygroups, tap a number to join that group — tap it again to leave. \
+📊 !status · this week's progress\n\
+↩️ !undo [group] · take your done mark back\n\
+✅ !done <group> · mark a group you cleaned\n\
+🆘 !sos [group] [slot] [week N] [on <day>] · ask who steps in for a later turn\n\
+🙋 !takeover [group] · take a turn over yourself\n\
+🔄 !swap @user [group] · ask someone to cover, they accept or reject\n\
+➕ !join <group> · ➖ !leave <group> · without the number buttons\n\
+👥 !groups [group] · groups, members, rooms\n\
+📈 !stats · cleaning history\n\
+📄 !plan pdf next 20 · a PDF from next week on (history = past weeks)\n\
+🖼️ !plan pdf view · the plan only to look at (to hang up), nothing to tick\n\
+🔑 !ical reset · a new calendar link (the old one stops working)\n\n\
+👥 In !mygroups, tap a number to join that group. Tap it again to leave. \
 ✅ marks the groups you're in.\n\
-🆘 on the plan: someone can take your turn (🙋) or swap theirs for it (🔄). \
+🆘 on the plan: someone can take your turn (🙋) or swap theirs for it (🔄).\n\
 ✅ while your shift is still to come and the running one is open: \
-you swap — and ↩️ swaps back.\n\
-🔒 !next, !plan, !mygroups, !done, !sos and !ical also work in a private chat with me \
-— tap 💬 on the help board and I'll invite you."
+you swap, and ↩️ swaps back.\n\
+🔒 !next, !plan, !mygroups, !done, !sos and !ical also work in a private chat with me. \
+Tap 💬 on the help board and I'll invite you."
         .into()
 }
 
@@ -470,7 +470,7 @@ fn admin_help_text() -> String {
 !plan reset <group> · redistribute future weeks from the rotation
 !plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
 !plan pdf [view] [next | history] [N] [group] · printable plan (next = from next week; view = only to look at)
-!plan pdf style [group] days | tick | default · a box per day, or one tick per duty with the slots side by side — for everyone or one group
+!plan pdf style [group] days | tick | default · a box per day, or one tick per duty with the slots side by side, for everyone or one group
 
 **Groups**
 !groups <group> · details: rhythm, turn order, slots, rooms, weights
@@ -527,6 +527,6 @@ fn renamed_command_hint(cmd: &str) -> Option<String> {
         _ => return None,
     };
     Some(format!(
-        "{cmd} was renamed — use {new}. (!help lists all commands)"
+        "🔀 {cmd} was renamed. Use {new}.\n❔ !help lists all commands."
     ))
 }

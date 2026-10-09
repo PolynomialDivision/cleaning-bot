@@ -1,4 +1,4 @@
-//! The turn menu: someone's next turns as a list to tap — `!next`, or 📅 on
+//! The turn menu: someone's next turns as a list to tap, `!next`, or 📅 on
 //! the help board. Tap a number to pick a turn, then 🔄 to ask who swaps
 //! with you, or 🆘 if you can't make it; either posts a request in the
 //! cleaning room (`trades`). Like a group selector, only its owner's taps
@@ -11,7 +11,8 @@
 //! 2️⃣ 👉 Kitchen · 13 – 19 Oct · next week
 //! 3️⃣ 2nd Floor · Mon–Wed (20 – 22 Oct) · in 2 weeks · 🆘 asked
 //!
-//! 👉 Kitchen · 13 – 19 Oct — 🔄 swap it · 🆘 I can't make it
+//! 👉 Kitchen · 13 – 19 Oct
+//! 🔄 swap it · 🆘 I can't make it
 //! ```
 
 use anyhow::Result;
@@ -35,7 +36,7 @@ use crate::{
     trades, view, BotContext,
 };
 
-/// Turns a menu shows unless asked for fewer — at most one per number.
+/// Turns a menu shows unless asked for fewer, at most one per number.
 pub const DEFAULT: usize = 5;
 pub const MAX: usize = NUMBERS.len();
 
@@ -184,18 +185,18 @@ pub fn menu_text(
         .and_then(|(_, t)| duty(state, t))
     {
         Some(d) => lines.push(format!(
-            "👉 **{}** — 🔄 swap it · 🆘 I can't make it",
+            "👉 **{}**\n🔄 swap it · 🆘 I can't make it",
             label(&d)
         )),
         None => {
-            lines.push("Tap a number, then 🔄 to swap it or 🆘 if you can't make it.".to_owned())
+            lines.push("👆 Tap a number, then 🔄 to swap it or 🆘 if you can't make it.".to_owned())
         }
     }
     if let Some(feedback) = &menu.feedback {
         lines.push(feedback.clone());
     }
     if any_tentative {
-        lines.push("Tentative = not fixed yet; may shift if members change.".to_owned());
+        lines.push("⏳ Tentative = not fixed yet, may shift if members change.".to_owned());
     }
     lines.join("\n")
 }
@@ -207,7 +208,7 @@ pub enum Tapped {
     Nothing,
     /// The menu changed (a turn picked, or why not).
     Changed,
-    /// Ask the room — the request to post.
+    /// Ask the room. The request to post.
     Ask(HelpRequest),
 }
 
@@ -220,8 +221,8 @@ pub fn tap(state: &State, menu: &mut TurnMenu, key: &str, today: NaiveDate) -> T
         let (selected, feedback) = match row(state, menu, t, today) {
             Row::Open | Row::Asked { .. } => (Some(i), None),
             Row::Done => (None, Some("✅ That one is done already.")),
-            Row::Moved => (None, Some("That one isn't yours any more.")),
-            Row::Over | Row::Gone => (None, Some("That one is over.")),
+            Row::Moved => (None, Some("🔀 That one isn't yours any more.")),
+            Row::Over | Row::Gone => (None, Some("⌛ That one is over.")),
         };
         menu.selected = selected;
         menu.feedback = feedback.map(str::to_owned);
@@ -232,7 +233,7 @@ pub fn tap(state: &State, menu: &mut TurnMenu, key: &str, today: NaiveDate) -> T
         return Tapped::Nothing;
     }
     let Some(t) = menu.selected.and_then(|i| menu.turns.get(i)) else {
-        menu.feedback = Some("👆 Pick a turn first — tap its number.".to_owned());
+        menu.feedback = Some("👆 Pick a turn first: tap its number.".to_owned());
         return Tapped::Changed;
     };
     let outcome = match (row(state, menu, t, today), duty(state, t)) {
@@ -243,11 +244,11 @@ pub fn tap(state: &State, menu: &mut TurnMenu, key: &str, today: NaiveDate) -> T
         }
         (Row::Asked { .. }, _) => {
             menu.feedback =
-                Some("You already asked for that one — see the cleaning room.".to_owned());
+                Some("☝️ You already asked for that one. See the cleaning room.".to_owned());
             Tapped::Changed
         }
         _ => {
-            menu.feedback = Some("That one isn't open any more.".to_owned());
+            menu.feedback = Some("⌛ That one isn't open any more.".to_owned());
             Tapped::Changed
         }
     };
@@ -258,7 +259,7 @@ pub fn tap(state: &State, menu: &mut TurnMenu, key: &str, today: NaiveDate) -> T
 // ── Matrix ────────────────────────────────────────────────────────────────────
 
 /// Post a menu of `user`'s next `count` turns in `room` (as `relation`, if
-/// given) and seed its buttons. `false` when they have no turns — nothing
+/// given) and seed its buttons. `false` when they have no turns. Nothing
 /// is posted then.
 pub async fn post(
     ctx: &BotContext,
@@ -368,7 +369,7 @@ pub async fn on_reaction(
             (true, true) => format!("🔄 Asked in the cleaning room who swaps **{what}** with you."),
             (true, false) => format!("🆘 Asked in the cleaning room who steps in for **{what}**."),
             (false, _) => {
-                "😕 I couldn't ask in the cleaning room — try again in a moment.".to_owned()
+                "😕 I couldn't ask in the cleaning room. Try again in a moment.".to_owned()
             }
         };
         let mut state = ctx.state.lock().await;
@@ -494,7 +495,7 @@ mod tests {
         );
         assert!(text.contains("\n2️⃣ **2nd Floor · Mon–Wed ("), "{text}");
         assert!(
-            text.ends_with("Tap a number, then 🔄 to swap it or 🆘 if you can't make it."),
+            text.ends_with("👆 Tap a number, then 🔄 to swap it or 🆘 if you can't make it."),
             "{text}"
         );
 
@@ -502,7 +503,7 @@ mod tests {
         assert_eq!(tap(&state, &mut menu, "🆘", today), Tapped::Changed);
         assert_eq!(
             menu.feedback.as_deref(),
-            Some("👆 Pick a turn first — tap its number.")
+            Some("👆 Pick a turn first: tap its number.")
         );
         // A number past the list is no button.
         assert_eq!(tap(&state, &mut menu, "3️⃣", today), Tapped::Nothing);
@@ -513,7 +514,7 @@ mod tests {
         assert!(text.contains("\n2️⃣ 👉 **2nd Floor · Mon–Wed ("), "{text}");
         assert!(
             text.contains("\n👉 **2nd Floor · Mon–Wed (")
-                && text.contains("— 🔄 swap it · 🆘 I can't make it"),
+                && text.contains("\n🔄 swap it · 🆘 I can't make it"),
             "{text}"
         );
 
@@ -549,7 +550,7 @@ mod tests {
         assert_eq!(tap(&state, &mut menu, "🔄", today), Tapped::Changed);
         assert_eq!(
             menu.feedback.as_deref(),
-            Some("You already asked for that one — see the cleaning room.")
+            Some("☝️ You already asked for that one. See the cleaning room.")
         );
 
         let carol = state
@@ -577,7 +578,7 @@ mod tests {
         assert_eq!(menu.selected, None);
         assert_eq!(
             menu.feedback.as_deref(),
-            Some("That one isn't yours any more.")
+            Some("🔀 That one isn't yours any more.")
         );
     }
 

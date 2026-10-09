@@ -3,7 +3,7 @@
 //! Route: `GET /ical/<64-hex-token>.ics`
 //!
 //! Request flow:
-//!   1. Validate token (hash comparison — no name lookups)
+//!   1. Validate token (hash comparison, no name lookups)
 //!   2. Build ScheduleSnapshot (pure, from locked state)
 //!   3. Render ICS (pure, from snapshot)
 //!   4. Set ETag (SHA-256 of ICS body) and Last-Modified (state.last_modified)
@@ -56,7 +56,7 @@ async fn serve_ical(
 
     let state = app.state.lock().await;
 
-    // Token validation: strict hash comparison — no name-based fallbacks.
+    // Token validation: strict hash comparison. No name-based fallbacks.
     let person_id = state
         .calendar_tokens
         .iter()

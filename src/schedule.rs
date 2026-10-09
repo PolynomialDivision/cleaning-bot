@@ -1,4 +1,4 @@
-//! Schedule build pipeline — single source of truth for all exports.
+//! Schedule build pipeline: single source of truth for all exports.
 //!
 //! `build_schedule()` is a pure function over immutable state.
 //! All exports (PDF, ICS, Matrix messages) must derive from a `ScheduleSnapshot`.
@@ -29,7 +29,7 @@ pub struct PersonDetails {
 /// A single resolved assignment: one person responsible for one group (or slot) in one week.
 #[derive(Clone, Debug)]
 pub struct AssignmentInstance {
-    /// Stable UUID v5 — identical for (group_id × [slot_id ×] year × week × assignee_id).
+    /// Stable UUID v5: identical for (group_id × [slot_id ×] year × week × assignee_id).
     pub uid: String,
     pub group_id: GroupId,
     pub group_name: String,
@@ -146,7 +146,7 @@ impl AssignmentInstance {
 #[derive(Clone, Debug)]
 pub struct ScheduleSnapshot {
     /// Timestamp from state.last_modified (or state.created_at).
-    /// Deterministic for unchanged state — used as DTSTAMP in ICS.
+    /// Deterministic for unchanged state: used as DTSTAMP in ICS.
     pub state_timestamp: chrono::DateTime<Utc>,
     pub assignments: Vec<AssignmentInstance>,
 }
@@ -184,7 +184,7 @@ impl ScheduleSnapshot {
 
 /// A scratch copy of the scheduling data with the next `cycles` due weeks
 /// of every group planned. Leaves out the event log and the bot's message
-/// bookkeeping, which planning never reads — copying those for every
+/// bookkeeping, which planning never reads: copying those for every
 /// preview would cost more than the planning itself.
 fn project(state: &State, cycles: usize) -> State {
     let mut projection = State {
@@ -210,7 +210,7 @@ fn project(state: &State, cycles: usize) -> State {
 
 /// Build a deterministic schedule snapshot of the next `weeks` calendar
 /// weeks (from the current one): every turn of every active group in that
-/// range — each group in its own rhythm, one entry per slot of each turn —
+/// range (each group in its own rhythm, one entry per slot of each turn)
 /// ordered by turn start, then group.
 ///
 /// Does NOT mutate state. Reads completions for status, then returns a fully
@@ -219,7 +219,7 @@ pub fn build_schedule(state: &State, weeks: usize) -> ScheduleSnapshot {
     build_schedule_from(state, current_iso_week(), weeks)
 }
 
-/// `build_schedule` for `weeks` weeks from `first` — earlier weeks too
+/// `build_schedule` for `weeks` weeks from `first`: earlier weeks too
 /// (`!plan pdf history`), read from what was recorded.
 ///
 /// Weeks not yet planned are filled in on a scratch copy, exactly as

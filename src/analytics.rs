@@ -1,6 +1,6 @@
 //! Statistics and analytics layer.
 //!
-//! All metrics are pure functions over immutable state — no side effects,
+//! All metrics are pure functions over immutable state. No side effects,
 //! no scheduling logic, no mutations.
 //!
 //! # Architecture
@@ -13,7 +13,7 @@
 //!
 //! ## Metric structs
 //! `PersonStats`, `GroupStats`, `FairnessReport` are derived views built by
-//! querying `State` directly.  They are recomputed on demand — no caching,
+//! querying `State` directly.  They are recomputed on demand. No caching,
 //! no staleness.
 //!
 //! ## Extensibility
@@ -33,7 +33,7 @@ use crate::{
 // ── Domain event model ────────────────────────────────────────────────────────
 
 /// Every domain state change is recorded as a `DomainEvent`.
-/// Events are immutable once written — never update or delete.
+/// Events are immutable once written, never update or delete.
 ///
 /// `State::apply_event` is the **only** function that may mutate domain state;
 /// it always appends the event to the log atomically with the mutation.
@@ -64,9 +64,9 @@ pub enum DomainEvent {
         slot_id: SlotId,
     },
     /// Frozen assignment: one person (or nobody) for one slot in one week.
-    /// Upserts — re-applying for the same key replaces the previous assignment.
+    /// Upserts: re-applying for the same key replaces the previous assignment.
     ///
-    /// `actor_id` and `previous_person_id` are audit-only history — who
+    /// `actor_id` and `previous_person_id` are audit-only history: who
     /// triggered this change and who it replaced, when known. Never read by
     /// scheduling or eligibility logic (only `person_id`/`source` end up in
     /// the live `SlotAssignment`); they exist purely so the event log can
@@ -353,7 +353,7 @@ pub struct PersonStats {
     pub completed: u32,
     /// Own turns that were marked skipped.
     pub skipped: u32,
-    /// Own turns nobody cleaned — genuinely missed.
+    /// Own turns nobody cleaned: genuinely missed.
     pub missed: u32,
     /// Cleanings they did for someone else's turn.
     pub helped: u32,
@@ -444,7 +444,7 @@ pub struct GroupLoadModel {
     pub rooms_per_assignment: f64,
     /// Manual group-level multiplier (1.0 = no adjustment).
     pub group_weight: f64,
-    /// rooms_per_assignment × group_weight — the atomic load unit.
+    /// rooms_per_assignment × group_weight. The atomic load unit.
     pub load_per_assignment: f64,
     /// Expected duties per person per year = turns/year × slots / members.
     #[allow(dead_code)]
@@ -936,7 +936,7 @@ pub fn global_leaderboard(state: &State) -> Vec<PersonStats> {
         .iter()
         .filter_map(|p| person_stats(state, &p.id))
         .collect();
-    // People without a finished turn yet have nothing to rank — list them last.
+    // People without a finished turn yet have nothing to rank: list them last.
     all.sort_by(|a, b| {
         (b.due_weeks > 0)
             .cmp(&(a.due_weeks > 0))
@@ -1087,8 +1087,8 @@ mod tests {
     }
 
     /// A `SlotAssigned` event exactly as an older bot version would have
-    /// written it — no `actor_id`/`previous_person_id`, and the old
-    /// `"manual"` source tag that predates `Assign`/`Takeover`/`Swap` — must
+    /// written it. No `actor_id`/`previous_person_id`, and the old
+    /// `"manual"` source tag that predates `Assign`/`Takeover`/`Swap`: must
     /// still deserialize, so an existing event log keeps replaying without
     /// forcing a migration.
     #[test]

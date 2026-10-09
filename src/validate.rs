@@ -28,7 +28,7 @@ impl ValidationReport {
     /// Human-readable summary suitable for a Matrix message or log line.
     pub fn summary(&self) -> String {
         if self.errors.is_empty() && self.warnings.is_empty() {
-            return "✅ State is consistent — no issues found.".into();
+            return "✅ State is consistent. No issues found.".into();
         }
         let mut lines = Vec::new();
         if !self.errors.is_empty() {
@@ -142,7 +142,7 @@ pub fn validate_state(state: &State) -> ValidationReport {
         if !g.slots.is_empty() && !g.member_ids.is_empty() {
             let min_recommended = g.slots.len() * 2;
             if g.member_ids.len() < g.slots.len() {
-                warnings.push(format!("Group «{}» has {} slot(s) but only {} member(s) — some people will clean every cycle", g.name, g.slots.len(), g.member_ids.len()));
+                warnings.push(format!("Group «{}» has {} slot(s) but only {} member(s), so some people will clean every cycle", g.name, g.slots.len(), g.member_ids.len()));
             } else if g.member_ids.len() < min_recommended {
                 // informational only
                 let _ = min_recommended;

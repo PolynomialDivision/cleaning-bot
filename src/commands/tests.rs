@@ -230,8 +230,8 @@ fn three_person_state() -> (State, GroupId, PersonId, PersonId, PersonId) {
     (state, gid, aid, bid, cid)
 }
 
-/// Materialize and apply `weeks_ahead` weeks directly against `state` —
-/// a test-only shortcut around `resolver::materialize` for pre-seeding
+/// Materialize and apply `weeks_ahead` weeks directly against `state`.
+/// A test-only shortcut around `resolver::materialize` for pre-seeding
 /// "already planned" weeks before exercising a join/leave command.
 fn seed_materialized_weeks(state: &mut State, weeks_ahead: usize) {
     for ev in resolver::materialize(state, weeks_ahead) {
@@ -248,7 +248,7 @@ fn assignee_for(state: &State, group_id: &GroupId, year: i32, week: u32) -> Opti
 }
 
 /// Like `assignee_for`, but also answers for weeks beyond the frozen
-/// horizon via the preview fallback — used to check that the *eventual*
+/// horizon via the preview fallback: used to check that the *eventual*
 /// rotation still cycles correctly even where join/leave deliberately
 /// didn't extend the frozen horizon that far.
 fn preview_assignee_for(
@@ -711,7 +711,7 @@ async fn import_rejects_conflicting_entries_within_the_same_batch() {
     .unwrap()
     .unwrap();
     assert!(reply.contains("aborted"), "{reply}");
-    assert!(reply.contains("conflicting entries"), "{reply}");
+    assert!(reply.contains("Conflicting entries"), "{reply}");
 
     let state = ctx.state.lock().await;
     assert!(
@@ -863,7 +863,7 @@ async fn import_multiple_entries_in_one_command() {
 
 #[tokio::test]
 async fn import_does_not_disturb_the_rotation_queue_and_round_robin_continues_after_it() {
-    // An already-running group has a real, non-empty `rotation_queue` —
+    // An already-running group has a real, non-empty `rotation_queue`:
     // unlike a brand-new group, `reconcile_queue` leaves an existing
     // queue untouched rather than reseeding/shifting it, so this is the
     // realistic case the "don't disturb rotation_queue" requirement is
@@ -881,7 +881,7 @@ async fn import_does_not_disturb_the_rotation_queue_and_round_robin_continues_af
 
     let (fy, fw) = current_iso_week();
 
-    // Paper plan says Carla covers the very next due week — out of the
+    // Paper plan says Carla covers the very next due week: out of the
     // natural Anna → Bob → Carla order the queue would produce.
     let reply = cmd_importplan(&ctx, &admin, &[&iso_week_token(fy, fw), "Floor", "Carla"])
         .await
@@ -938,7 +938,7 @@ async fn import_does_not_disturb_the_rotation_queue_and_round_robin_continues_af
     let next2 = at(y2, w2).expect("the week after that must be auto-filled too");
 
     // The queue never advanced during import, so round-robin resumes
-    // exactly where it would have started — Anna first, then Bob —
+    // exactly where it would have started (Anna first, then Bob)
     // deterministically, not from wherever Carla's import "left off".
     assert_eq!(
         next.person_id.as_deref(),
@@ -1048,7 +1048,7 @@ async fn import_for_the_current_week_changes_the_render_and_is_idempotent_after(
     // Re-running the identical import is a no-op against state (already
     // covered by `import_is_idempotent_across_repeated_identical_runs`);
     // this checks the consequence `refresh_pinned_plan` actually cares
-    // about — the re-render must come out byte-identical, which is
+    // about: the re-render must come out byte-identical, which is
     // exactly what makes its `weekly_plan_rendered` cache check skip
     // sending a redundant edit instead of duplicating it.
     let second = cmd_importplan(&ctx, &admin, &arg_refs)
@@ -1149,7 +1149,7 @@ async fn a_completion_recorded_after_import_still_mentions_the_imported_assignee
     .unwrap()
     .unwrap();
 
-    // Bob then marks his imported task done — a second, independent state
+    // Bob then marks his imported task done. A second, independent state
     // change that also triggers a pinned-plan refresh (`!done` is in
     // `command_may_change_current_plan` too). The re-render for that edit
     // must still carry a real mention for Bob, not silently regress to
@@ -1312,7 +1312,7 @@ async fn import_replace_does_not_touch_the_rotation_queue() {
         state.group_by_id(&group_id).unwrap().rotation_queue.clone()
     };
 
-    // Paper plan actually says Carla covers that week — replace Anna's pick.
+    // Paper plan actually says Carla covers that week: replace Anna's pick.
     let reply = cmd_importplan(
         &ctx,
         &admin,
@@ -1357,8 +1357,8 @@ async fn import_replace_is_atomic_one_bad_entry_blocks_the_whole_batch() {
         }
     }
 
-    // One valid replacement plus one entry naming an unregistered person —
-    // the whole batch (including the otherwise-valid replacement) must be
+    // One valid replacement plus one entry naming an unregistered person.
+    // The whole batch (including the otherwise-valid replacement) must be
     // rejected, and nothing may be written.
     let reply = cmd_importplan(
         &ctx,
@@ -1447,7 +1447,7 @@ async fn import_replace_is_idempotent_and_refuses_to_touch_a_completed_week() {
     .unwrap()
     .unwrap();
     assert!(blocked.contains("aborted"), "{blocked}");
-    assert!(blocked.contains("already completed"), "{blocked}");
+    assert!(blocked.contains("already done"), "{blocked}");
 
     // Re-importing the identical (already-completed) assignment is still
     // a harmless no-op, in either mode.
@@ -1501,7 +1501,7 @@ async fn unassign_requires_admin() {
 //
 // These exercise the core promise of the queue-based rotation: a leave
 // never changes an already-frozen future week that isn't the leaver's, and
-// a join never changes the running cycle — it only re-plans from the next
+// a join never changes the running cycle. It only re-plans from the next
 // cycle on, to seat the newcomer there.
 
 #[tokio::test]
@@ -1545,7 +1545,7 @@ async fn join_mid_cycle_keeps_the_running_cycle_and_seats_the_newcomer_in_the_ne
         );
     }
     // The next cycle still starts with Anna, and David is in it right
-    // away — not at the end of the frozen horizon.
+    // away: not at the end of the frozen horizon.
     let at = |i: i64| assignee_for(&state, &group_id, week(i).0, week(i).1);
     assert_eq!(at(3), Some(aid.clone()), "the cycle start stays put");
     assert_eq!(at(4), Some(david_id.clone()), "David's first turn");
@@ -1619,7 +1619,7 @@ async fn multiple_joins_in_sequence_respect_arrival_order() {
 #[tokio::test]
 async fn join_never_skips_an_existing_member_who_has_not_had_a_turn_yet() {
     // Only the current week has ever been materialized (Anna). Bob and
-    // Carla are already queued but have zero turns — they still belong to
+    // Carla are already queued but have zero turns. They still belong to
     // the running cycle, so David must come after both of them.
     let (mut state, group_id, aid, bid, cid) = three_person_state();
     seed_materialized_weeks(&mut state, 1);
@@ -1687,7 +1687,7 @@ fn mid_cycle_state(weeks_ahead: usize) -> (State, GroupId, Vec<PersonId>) {
 }
 
 /// Assignee per week from `from` to `to` (inclusive, offsets from the
-/// current week), as display names — readable in assertion messages and
+/// current week), as display names: readable in assertion messages and
 /// comparable across states whose newcomers got different random ids.
 fn plan_names(state: &State, group_id: &GroupId, from: i64, to: i64) -> Vec<String> {
     let (y, w) = current_iso_week();
@@ -1733,7 +1733,7 @@ async fn several_joins_in_one_cycle_are_spread_through_the_next_cycle() {
             "Anna", "Finn", // and on
         ],
     );
-    // Every member — old and new — has exactly one turn in the next cycle.
+    // Every member (old and new) has exactly one turn in the next cycle.
     let next_cycle: HashSet<&String> = plan[5..12].iter().collect();
     assert_eq!(next_cycle.len(), 7, "{plan:?}");
     // The two newcomers are not seated side by side.
@@ -1756,7 +1756,7 @@ async fn several_joins_in_one_cycle_are_spread_through_the_next_cycle() {
 
 #[tokio::test]
 async fn joining_one_by_one_plans_the_same_as_spreading_both_at_once() {
-    // Finn joins, and Gina only later in the same cycle — the second join
+    // Finn joins, and Gina only later in the same cycle. The second join
     // re-seats Finn too, so the outcome doesn't depend on that timing.
     let (state, group_id, ids) = mid_cycle_state(12);
     let (ctx, path, admin) = test_context_with_horizon(state, 12);
@@ -1901,7 +1901,7 @@ async fn full_lifecycle_survives_a_complete_event_replay() {
     // Build the group and its members through real events (not the
     // struct-literal test helpers) so the event log is actually
     // complete, then plan several weeks, join, leave, and replay the
-    // whole log from an empty State — exactly what a restart-from-log
+    // whole log from an empty State: exactly what a restart-from-log
     // would do.
     let mut state = State::default();
     state.created_at = Some(Utc::now());
@@ -1990,7 +1990,7 @@ async fn removeperson_without_any_future_assignment_just_leaves() {
     assert_eq!(
         assignee_for(&state, &group_id, y, w),
         Some(aid),
-        "untouched — not Carla's week"
+        "untouched: not Carla's week"
     );
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
@@ -2053,7 +2053,7 @@ async fn removeperson_with_future_assignments_moves_everyone_after_them_up() {
     );
     assert!(
         reply.contains(&format!(
-            "from week {}, everyone after moves up one turn",
+            "From week {}, everyone after moves up one turn",
             add_weeks(current_iso_week().0, current_iso_week().1, 2).1
         )),
         "{reply}"
@@ -2127,7 +2127,7 @@ async fn leaving_before_their_turn_moves_the_rest_up_without_back_to_back_turns(
         assert_ne!(pair[0], pair[1], "back-to-back turns: {plan:?}");
     }
     assert!(
-        reply.contains("2 upcoming turns handed on — from week"),
+        reply.contains("2 upcoming turns handed on. From week"),
         "{reply}"
     );
     assert_plan_invariants(&state);
@@ -2389,7 +2389,7 @@ async fn next_lists_the_senders_turns_with_when_what_and_kind() {
     );
     assert_eq!(lines[6], format!("{}Floor · imported", crate::view::INDENT));
     // Her imported week counts as her turn, so Bob (last on in week 1)
-    // comes before her again: her next is week 5, not 4 — and tentative.
+    // comes before her again: her next is week 5, not 4, and tentative.
     assert!(
         lines[7].starts_with(&format!("• Week {} · ", week(5))),
         "{reply}"
@@ -2400,7 +2400,7 @@ async fn next_lists_the_senders_turns_with_when_what_and_kind() {
     );
     assert_eq!(
         lines.last(),
-        Some(&"Tentative = not fixed yet; may shift if members change."),
+        Some(&"⏳ Tentative = not fixed yet, may shift if members change."),
         "{reply}"
     );
 
@@ -2422,7 +2422,7 @@ async fn next_lists_the_senders_turns_with_when_what_and_kind() {
     let none = cmd_next(&ctx, &stranger, &[]).await.unwrap().unwrap();
     assert_eq!(
         none,
-        "You're not on the cleaning plan yet — !mygroups to join a group."
+        "🤷 You're not on the cleaning plan yet.\n👉 !mygroups to join a group."
     );
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -2482,7 +2482,7 @@ async fn join_then_leave_leaves_no_trace_and_preserves_original_weeks() {
 // ── !linkmatrix ───────────────────────────────────────────────────────────
 //
 // `apply_linkmatrix` is the Room-independent core of `cmd_linkmatrix` (see
-// its doc comment) — exercised directly here since this codebase has no
+// its doc comment): exercised directly here since this codebase has no
 // Matrix `Room` test double to drive `cmd_linkmatrix` itself through.
 
 #[tokio::test]
@@ -2490,7 +2490,7 @@ async fn linkmatrix_repairs_a_corrupted_matrix_id_and_merges_the_unused_stub() {
     // Reproduces the real "papageientaucher" incident *exactly*, storage
     // order included: the unused, valid-mxid stub is stored BEFORE the
     // real 3+4 Floor participant (whose matrix_id is malformed) in
-    // `state.persons` — this is what let `find_person`'s
+    // `state.persons`: this is what let `find_person`'s
     // first-match-by-name lookup return the stub and refuse with
     // "already has a Matrix account linked" before ever reaching the
     // real participant's invalid matrix_id.
@@ -2546,7 +2546,7 @@ async fn linkmatrix_repairs_a_corrupted_matrix_id_and_merges_the_unused_stub() {
     let state = ctx.state.lock().await;
 
     // The real participant's identity, membership, history and queue
-    // position are all untouched — only matrix_id (and, since we passed
+    // position are all untouched, only matrix_id (and, since we passed
     // one, display_name) changed.
     let real_now = state
         .person_by_id(&real_id)
@@ -2584,7 +2584,7 @@ async fn linkmatrix_repairs_a_corrupted_matrix_id_and_merges_the_unused_stub() {
         "completion history must still reference the same PersonId"
     );
 
-    // The unused stub was merged away — no duplicate participant remains.
+    // The unused stub was merged away. No duplicate participant remains.
     assert!(
         state.person_by_id(&stub_id).is_none(),
         "the unused stub must be removed, not kept alongside"
@@ -2632,7 +2632,7 @@ async fn linkmatrix_refuses_to_guess_between_two_real_people_with_the_same_name(
     // Two distinct, unrelated participants happen to share a display
     // name; both currently have no Matrix ID and both have real
     // activity. Auto-picking either would silently attach the wrong
-    // person's history to this mxid — must refuse instead.
+    // person's history to this mxid: must refuse instead.
     let dup_a = Person::new_named("Dup");
     let dup_a_id = dup_a.id.clone();
     let dup_b = Person::new_named("Dup");
@@ -2803,7 +2803,7 @@ async fn restart_replay_reproduces_identical_rotation() {
     );
 
     // Re-running materialize against the reloaded state, up to exactly
-    // how far it's already frozen, must be a no-op — no logic may depend
+    // how far it's already frozen, must be a no-op. No logic may depend
     // on events only ever having existed in RAM.
     let horizon = group_horizon_weeks_ahead(&after, &group_id);
     assert!(horizon > 0, "the join must have frozen at least one week");
@@ -2953,7 +2953,7 @@ async fn new_assignee_can_mark_done_and_it_persists_across_restart() {
 #[tokio::test]
 async fn a_member_can_still_mark_done_but_credit_goes_to_the_takeover_assignee() {
     // Alice is still a group member after Bob's takeover, so she can
-    // still press done as a convenience — but the recorded responsible
+    // still press done as a convenience, but the recorded responsible
     // person must be Bob, the current assignee, not Alice.
     let (mut state, group_id, first_id, second_id) = rotation_state();
     let (year, week) = current_iso_week();
@@ -3013,7 +3013,7 @@ async fn double_takeover_leaves_only_the_last_person_responsible() {
     );
     assert_ne!(assignee_for(&state, &group_id, y, w), Some(bob_id));
     assert_ne!(assignee_for(&state, &group_id, y, w), Some(aid));
-    // Exactly one SlotAssignment record exists for this (group, week) —
+    // Exactly one SlotAssignment record exists for this (group, week),
     // never two "responsible" people at once.
     assert_eq!(
         state
@@ -3049,7 +3049,7 @@ async fn takeover_of_an_already_completed_week_is_rejected() {
         .await
         .unwrap()
         .unwrap();
-    assert!(reply.contains("already completed"), "{reply}");
+    assert!(reply.contains("already done"), "{reply}");
 
     let state = ctx.state.lock().await;
     assert_eq!(
@@ -3082,7 +3082,7 @@ async fn takeover_of_a_skipped_week_is_rejected() {
         .await
         .unwrap()
         .unwrap();
-    assert!(reply.contains("already completed"), "{reply}");
+    assert!(reply.contains("already done"), "{reply}");
 
     let state = ctx.state.lock().await;
     assert!(
@@ -3173,7 +3173,7 @@ async fn takeover_then_done_survives_a_full_event_replay() {
         serde_json::to_string(&replayed.slot_assignments).unwrap(),
         "current assignee must be identical after full replay"
     );
-    // Compare status/ownership, not `completed_at` — that one field is
+    // Compare status/ownership, not `completed_at`. That one field is
     // intentionally re-stamped to the apply-time `Utc::now()` (a
     // pre-existing, unrelated property of `CleaningCompleted`'s handler,
     // not something a full replay-from-log ever does in production: the
@@ -3208,7 +3208,7 @@ async fn accepted_swap_actually_reassigns_an_already_materialized_current_week()
     // Regression test for the bug this feature request was built around:
     // !acceptswap only recorded swap_requests status before, which
     // `responsible_person` ignores whenever the week is already frozen
-    // (materialized in advance, which the current week always is) — so
+    // (materialized in advance, which the current week always is): so
     // an accepted swap silently had no visible effect.
     let (mut state, group_id, first_id, second_id) = rotation_state();
     let (year, week) = current_iso_week();
@@ -3363,7 +3363,7 @@ async fn takeover_slot_only_uses_the_senders_own_group() {
 
 #[tokio::test]
 async fn multiple_open_slots_are_listed_instead_of_guessed() {
-    // Neither slot is done, skipped, or already Bob's — both are valid
+    // Neither slot is done, skipped, or already Bob's. Both are valid
     // candidates, so the bot must not silently pick one.
     let (mut state, group_id, aid, _bid, ..) = multi_slot_group_matrix();
     let (year, week) = current_iso_week();
@@ -3415,7 +3415,7 @@ async fn member_of_several_groups_must_specify_which_one() {
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
     let reply = cmd_takeover(&ctx, &bob, &[]).await.unwrap().unwrap();
-    assert!(reply.contains("multiple groups"), "{reply}");
+    assert!(reply.contains("several groups"), "{reply}");
     assert!(reply.contains("Floor"), "{reply}");
     assert!(reply.contains("Kitchen Crew"), "{reply}");
 
@@ -3431,7 +3431,7 @@ async fn member_of_several_groups_must_specify_which_one() {
 
 #[tokio::test]
 async fn nothing_to_take_over_is_reported_clearly() {
-    // Both slots are already Bob's — no candidate left to take over.
+    // Both slots are already Bob's. No candidate left to take over.
     let (mut state, group_id, aid, bid, ..) = multi_slot_group_matrix();
     let (year, week) = current_iso_week();
     for slot_index in [0, 1] {
@@ -3455,7 +3455,7 @@ async fn nothing_to_take_over_is_reported_clearly() {
     let state = ctx.state.lock().await;
     assert_eq!(
         state.slot_assignments, before,
-        "both slots were already Bob's — nothing should change"
+        "both slots were already Bob's. Nothing should change"
     );
     let _ = aid;
     drop(state);
@@ -3503,7 +3503,7 @@ async fn explicit_group_and_slot_syntax_still_works_for_multi_slot_groups() {
 #[tokio::test]
 async fn swap_in_a_group_with_slots_moves_only_the_requesters_slot() {
     // Alice holds Kitchen, Bob holds Bath this week. Alice swaps with Carla:
-    // Carla must get Kitchen — never Bath, and Bob's slot stays his.
+    // Carla must get Kitchen, never Bath, and Bob's slot stays his.
     let (mut state, group_id, _aid, bid, ..) = multi_slot_group_matrix();
     let carla = Person::new_matrix("@carla:example.org");
     let carla_id = carla.id.clone();
@@ -3639,7 +3639,7 @@ async fn removing_a_slot_repoints_future_assignments_at_the_same_physical_slot()
     // SlotAssignment.slot_index is a raw position into group.slots, not
     // a stable id. Removing a middle slot used to leave already-frozen
     // assignments for later slots pointing at the wrong (shifted-down)
-    // slot index — silently reattributing someone's future assignment
+    // slot index: silently reattributing someone's future assignment
     // to a different room.
     let mut group = CleaningGroup::new("Floor");
     let gid = group.id.clone();
@@ -3738,7 +3738,7 @@ async fn removing_a_slot_repoints_future_assignments_at_the_same_physical_slot()
 #[tokio::test]
 async fn absence_declared_after_the_week_is_frozen_does_not_retroactively_change_it() {
     // Anna is already frozen for the running week. Marking her absent
-    // afterward must not touch that assignment — the "automatic
+    // afterward must not touch that assignment. The "automatic
     // rotation never rewrites an already-frozen week" rule applies to
     // absence exactly like it does to joins and leaves. Standing in for
     // her is a manual act (!takeover/!swap/!assign), not automatic.
@@ -3776,7 +3776,7 @@ async fn absence_declared_after_the_week_is_frozen_does_not_retroactively_change
 #[tokio::test]
 async fn assign_takeover_and_swap_produce_distinguishable_audit_metadata() {
     // All three manual-override paths used to write the same
-    // indistinguishable `AssignmentSource::Manual` — the event log
+    // indistinguishable `AssignmentSource::Manual`. The event log
     // couldn't tell an admin !assign, a self-service !takeover, and an
     // accepted swap apart. Each must now carry its own source, plus who
     // triggered it and who they replaced.
@@ -3811,7 +3811,7 @@ async fn assign_takeover_and_swap_produce_distinguishable_audit_metadata() {
     let (ctx, path, admin) = test_context(state);
     let bob = OwnedUserId::try_from("@bob:example.org").unwrap();
 
-    // 1. Admin !assign — actor is the admin, previous is Alice.
+    // 1. Admin !assign: actor is the admin, previous is Alice.
     cmd_assign(&ctx, &admin, &["2nd Floor", "@carla:example.org"])
         .await
         .unwrap();
@@ -3829,7 +3829,7 @@ async fn assign_takeover_and_swap_produce_distinguishable_audit_metadata() {
     assert_eq!(assign_event.1.as_deref(), Some("@admin:example.org"));
     assert_eq!(assign_event.2.as_deref(), Some(first_id.as_str()));
 
-    // 2. Self-service !takeover — actor is the claimant, previous is Carla.
+    // 2. Self-service !takeover: actor is the claimant, previous is Carla.
     let takeover_reply = cmd_takeover(&ctx, &bob, &["2nd Floor"])
         .await
         .unwrap()
@@ -3850,7 +3850,7 @@ async fn assign_takeover_and_swap_produce_distinguishable_audit_metadata() {
     assert_eq!(takeover_event.2.as_deref(), Some(carla_id.as_str()));
 
     // 3. Accepted swap (next week, so it doesn't collide with the
-    // already-completed-this-week checks above) — actor is the
+    // already-completed-this-week checks above): actor is the
     // accepter, previous is the original requester.
     let swap_reply = cmd_swap(
         &ctx,
@@ -3887,7 +3887,7 @@ async fn assign_takeover_and_swap_produce_distinguishable_audit_metadata() {
 }
 
 /// The `(source, actor_id, previous_person_id)` of the most recent
-/// `SlotAssigned` in the event log — lets a test check the audit trail
+/// `SlotAssigned` in the event log: lets a test check the audit trail
 /// a command actually left behind, not just the resulting live state.
 async fn last_slot_assigned_event(
     ctx: &BotContext,
@@ -4076,7 +4076,7 @@ async fn bare_done_only_marks_what_is_open_for_the_sender() {
 
     let reply = cmd_done_text(&ctx, &stranger, &[]).await.unwrap().unwrap();
     assert!(
-        reply.starts_with("❌ You're not on the plan yet — !mygroups"),
+        reply.starts_with("❌ You're not on the plan yet.\n👉 !mygroups"),
         "{reply}"
     );
 
@@ -4538,7 +4538,7 @@ fn reminders_follow_each_turn() {
     let initial = crate::state::ReminderKind::Initial;
     let final_ = crate::state::ReminderKind::Final;
 
-    // Monday: the weekly plan covers everything starting then — no extra notice.
+    // Monday: the weekly plan covers everything starting then. No extra notice.
     assert!(scheduler::turns_to_remind(&state, day(0), &initial, 6).is_empty());
     // Wednesday: Bathroom's first shift ends.
     assert_eq!(
@@ -4613,7 +4613,7 @@ async fn changing_the_rhythm_replans_later_weeks_without_costing_anyone_a_turn()
     assert_eq!(
         &order[..4],
         &ids[..],
-        "Anna, Ben, Cleo, Dan — nobody skipped"
+        "Anna, Ben, Cleo, Dan. Nobody skipped"
     );
     drop(state);
 
@@ -4819,7 +4819,7 @@ async fn cleaning_person_reports_an_ambiguous_name_instead_of_guessing() {
     );
     assert_eq!(
         reply,
-        "«Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix) — use the Matrix ID instead."
+        "🤔 «Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix)\n💡 Use the Matrix ID instead."
     );
     // The Matrix ID settles it.
     let alex = names_only(
@@ -4857,7 +4857,7 @@ async fn cleaning_person_without_upcoming_turns_or_name_says_so() {
         .await
         .unwrap()
         .unwrap();
-    assert!(usage.starts_with("Usage: !cleaning person"), "{usage}");
+    assert!(usage.starts_with("💡 Usage: !cleaning person"), "{usage}");
     let _ = tokio::fs::remove_file(path).await;
 }
 
@@ -4933,7 +4933,7 @@ async fn next_reports_an_ambiguous_display_name() {
     let reply = cmd_next(&ctx, &viewer, &["Alex"]).await.unwrap().unwrap();
     assert_eq!(
         names_only(&reply),
-        "«Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix) — use the Matrix ID instead."
+        "🤔 «Alex» matches 2 people: alex (@alex:example.org), Alex (no Matrix)\n💡 Use the Matrix ID instead."
     );
     // The ID to use is a pill, but the candidates aren't pinged.
     let content = crate::format::intentional(crate::format::mentionify(&reply));
@@ -4953,7 +4953,7 @@ async fn admin_commands_refuse_an_ambiguous_person_instead_of_picking_one() {
         cmd_stats(&ctx, &["Alex"]).await,
     ] {
         let reply = reply.unwrap().unwrap();
-        assert!(reply.starts_with("«Alex» matches 2 people"), "{reply}");
+        assert!(reply.starts_with("🤔 «Alex» matches 2 people"), "{reply}");
     }
     assert_eq!(
         serde_json::to_string(&*ctx.state.lock().await).unwrap(),
@@ -5082,8 +5082,8 @@ async fn the_plan_shows_user_pills_but_pings_nobody() {
     use matrix_sdk::ruma::events::room::message::MessageType;
     let (ctx, path, _, _) = cleaning_person_ctx();
     let content = plan_message(&*ctx.state.lock().await, 4);
-    // Matrix users are pills — links to their Matrix ID, labelled with
-    // their name — …
+    // Matrix users are pills (links to their Matrix ID, labelled with
+    // their name) …
     let MessageType::Text(text) = &content.msgtype else {
         panic!("not a text message")
     };
@@ -5140,8 +5140,8 @@ async fn every_read_only_view_shows_pills_without_mentioning_anyone() {
     let _ = tokio::fs::remove_file(path).await;
 }
 
-/// `text` with every user link (`view::user_link`) reduced to its label —
-/// the names as they read in the message.
+/// `text` with every user link (`view::user_link`) reduced to its label.
+/// The names as they read in the message.
 fn names_only(text: &str) -> String {
     const LINK: &str = "](https://matrix.to/#/";
     let mut out = String::new();
@@ -5285,7 +5285,7 @@ async fn a_new_user_is_welcomed_once_with_every_active_group_to_tap() {
     // The disabled Attic isn't offered; looking creates nobody.
     assert_eq!(selector.group_ids.len(), 2);
     assert_eq!(state.persons.len(), people);
-    // The welcome is addressed to them — a real mention.
+    // The welcome is addressed to them. A real mention.
     let content = crate::format::intentional(crate::format::mentionify(&selector.rendered));
     let mentioned: Vec<String> = content
         .mentions
@@ -5351,7 +5351,7 @@ async fn tapping_a_number_joins_and_taking_it_back_leaves() {
     assert_eq!(selector, id);
     assert!(left.starts_with("👋 Left **2nd Floor**"), "{left}");
     assert!(!is_in(&state, MIA, "2nd Floor"));
-    // Their person stays (history may point at it) — and is reused.
+    // Their person stays (history may point at it), and is reused.
     assert_eq!(state.persons.len(), people + 1);
     onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "1️⃣")
         .unwrap()
@@ -5375,7 +5375,7 @@ async fn tapping_a_group_youre_in_leaves_it_and_taking_it_back_rejoins() {
     assert!(
         state.group_selectors[&id]
             .rendered
-            .starts_with("🏠 Groups for [mia](https://matrix.to/#/@mia:example.org) — tap"),
+            .starts_with("🏠 Groups for [mia](https://matrix.to/#/@mia:example.org)\n👆 Tap"),
         "{}",
         state.group_selectors[&id].rendered
     );
@@ -5601,7 +5601,7 @@ async fn people_who_used_the_bot_before_count_as_welcomed() {
 async fn an_admin_can_send_someone_the_welcome_again() {
     let (ctx, path, _, _) = cleaning_person_ctx();
     let mut state = ctx.state.lock().await;
-    // By name or Matrix ID — also someone who had it already.
+    // By name or Matrix ID: also someone who had it already.
     state.greeted_users.insert("@mia:example.org".into());
     assert_eq!(
         welcome_target(&state, "Mia").as_deref(),
@@ -5629,7 +5629,9 @@ async fn an_admin_can_send_someone_the_welcome_again() {
     assert!(welcome_target(&state, "Alex")
         .unwrap_err()
         .contains("matches 2 people"));
-    assert!(welcome_target(&state, "").unwrap_err().starts_with("Usage"));
+    assert!(welcome_target(&state, "")
+        .unwrap_err()
+        .starts_with("💡 Usage"));
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -6173,7 +6175,7 @@ async fn a_tap_only_its_owner_takes_back_and_one_taken_back_early_never_counts()
         Redaction::Refused
     );
     assert!(is_in(&state, MIA, "2nd Floor"));
-    // Mia's own: undone — once.
+    // Mia's own: undone, once.
     assert_eq!(
         redaction(&ctx, &mut state, &room, MIA, "$r1"),
         Redaction::TapUndone
@@ -6382,7 +6384,7 @@ async fn the_welcome_links_the_calendar_feed_when_feeds_are_set_up() {
     let text = selector_text(&state, &selector);
     assert!(
         text.contains(
-            "🗓 Your calendar: [subscribe](https://cal.example.org/ical/abc.ics) — add it in your calendar app"
+            "🗓 Your calendar: [subscribe](https://cal.example.org/ical/abc.ics)\n📲 Add it in your calendar app."
         ),
         "{text}"
     );

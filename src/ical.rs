@@ -42,7 +42,7 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
             desc_parts.push(format!("Task: {slot}"));
         }
         if a.is_skipped {
-            desc_parts.push("Skipped — no cleaning required".into());
+            desc_parts.push("Skipped: no cleaning required".into());
         }
         if let Some(date) = a.completed_at {
             desc_parts.push(format!("Completed: {date}"));

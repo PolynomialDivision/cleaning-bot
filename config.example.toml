@@ -61,13 +61,13 @@ materialize_weeks = 26
 # public_url = "https://cal.example.org"
 
 # ── Groups and members ─────────────────────────────────────────────────────────
-# Groups and members are managed at runtime via bot commands — not in this file.
+# Groups and members are managed at runtime via bot commands, not in this file.
 #
 # To set up groups after starting the bot, use:
-#   !groups add <name>                           — create a cleaning group
-#   !member add <@user:server | name> <group>    — add a Matrix user (or a person without Matrix)
-#   !member remove <@user:server | name> <group> — remove them again
-#   !groups                                      — all groups and their members
+#   !groups add <name>: create a cleaning group
+#   !member add <@user:server | name> <group>: add a Matrix user (or a person without Matrix)
+#   !member remove <@user:server | name> <group>: remove them again
+#   !groups: all groups and their members
 #
 # Run !help (everyone) and !help admin in the bot room for all commands.
 

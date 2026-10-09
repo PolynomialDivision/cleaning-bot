@@ -36,7 +36,7 @@ def document():
                 fields.append(dict(id=f'{rowid}:{day}',kind=str(day),x=111.5+day.weekday()*13,y=y,size=4.8,label=day.strftime('%a')))
             rows.append(dict(id=rowid,week=start.isocalendar().week,year=start.isocalendar().year,
                              # Real-world names: one long word, long and accented
-                             # names, an emoji — none may cross a column line.
+                             # names, an emoji: none may cross a column line.
                              name=['Alice','Wolkenschieberin','Zoë Maximiliane Schwarzenberger-Lüdenscheidt','Kim 🌸 Straße'][i%4],
                              label='Bathroom imported' if i==3 else '',task=['Stairs','Hallway'][i%2] if mode=='slots' else '',
                              start=str(start),end=str(end),y=y,status='',fields=fields))
@@ -78,7 +78,7 @@ def tick_document():
 
 
 def colours(pdf):
-    """Every colour a PDF's pages set: (operator, values) — only DeviceGray
+    """Every colour a PDF's pages set: (operator, values), only DeviceGray
     0 and 1 (solid black, white) for a printer-friendly sheet."""
     import re,zlib
     found=set()

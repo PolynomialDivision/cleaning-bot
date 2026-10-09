@@ -28,8 +28,8 @@ side by side as columns (for a group with two slots cleaned twice a week:
 the name and one box. A page holds 21 weeks; without a number of weeks
 `!plan pdf` prints 21. A tick has no day, but a completion is recorded with
 one (statistics, history, "done on time"). The bot dates it in the middle of
-the duty's days — `start + (end − start) / 2`, rounded down: Thursday for
-Mon–Sun, Monday for Mon–Tue, Thursday for Thu–Fri — or the day the photo is
+the duty's days: `start + (end − start) / 2`, rounded down: Thursday for
+Mon–Sun, Monday for Mon–Tue, Thursday for Thu–Fri, or the day the photo is
 processed if that is earlier, never before the first day. A tick photographed
 before the duty's days start is refused like a day in the future. The
 preview says it: `Done (counted as Thu 8 Oct)`. A duty already recorded as
@@ -82,7 +82,7 @@ Example:
 Done 2026-10-06
 
 Not read:
-❓ Week 43 · Bob · Kitchen Mon–Tue — box not clearly visible (fold, blur)
+❓ Week 43 · Bob · Kitchen Mon–Tue: box not clearly visible (fold, blur)
 Record these with !done, or send a clearer photo.
 
 Filled in, so taken back (not counted):
@@ -116,7 +116,7 @@ The sheet is a table in the style of the history PDF: week badges (one per
 week, centred across its rows), strong rules between weeks and dashed ones
 between a week's rows, columns *Week · When (· task) · Who · Mon … Sun*, and
 Helvetica. It is printer-friendly: everything is solid black on white
-(DeviceGray 0 — no colour, no grey, no shading; a test checks the PDF), so a
+(DeviceGray 0, no colour, no grey, no shading; a test checks the PDF), so a
 cheap or low-toner printer prints it crisply instead of as a pale dot screen.
 Lines and text are told apart by weight and size. Each page belongs to one group and holds up
 to **21 duties**. Without a number of weeks, `!plan pdf` takes as many whole
@@ -124,7 +124,7 @@ weeks per group as fill one page. Longer plans are split evenly across pages
 and only between weeks (22 rows make 12 + 10, not 21 + 1). Rows are 11 mm high
 on a full page and grow up to 14 mm when a group's pages hold fewer, so the
 table fills the page. The header is one line: title, then dates and rooms
-beside it — the rooms per slot, with a symbol for toilets, showers and
+beside it. The rooms per slot, with a symbol for toilets, showers and
 kitchens instead of the word (`Colbe Toilet 3rd` in slot Colbe reads
 "Colbe: [toilet] 3rd"); rooms of no known kind keep their name. Each slot and each shift of a week is its own row: a
 twice-weekly group shows two rows per week (`Mon–Tue · 28–29 Sep`,
@@ -146,10 +146,10 @@ Layout version 2, in A4 millimetres from the top left (`src/paper.rs` and
 
 | | |
 |---|---|
-| corner targets | `(10,10)`, `(200,10)`, `(200,287)`, `(10,287)` — 5 mm black square, white disc, black dot; no data |
+| corner targets | `(10,10)`, `(200,10)`, `(200,287)`, `(10,287)`: 5 mm black square, white disc, black dot; no data |
 | identity QR | one, centred at `(185,276)`, 20 mm including its quiet zone, drawn as vector squares (no image); upper-case payload, so QR's compact alphanumeric mode gives 29×29 modules of 0.54 mm |
 | rows | from 31 mm, 11–14 mm each (per group, see above); centres in the manifest |
-| boxes | 6 mm squares with a 0.4 mm outline on the row centre (sheets printed before: 4.8 mm, 0.22 mm — each field's size is in the manifest, and the scanner reads either): Monday at x = 111.5, then every 13 mm (the days share the width right of *Who*) |
+| boxes | 6 mm squares with a 0.4 mm outline on the row centre (sheets printed before: 4.8 mm, 0.22 mm, each field's size is in the manifest, and the scanner reads either): Monday at x = 111.5, then every 13 mm (the days share the width right of *Who*) |
 | tick sheets | a line per week, same rows and heights; *Week* 14–27, *When* 27–52, the columns share 52–196 evenly; one 4.8 mm box per duty, 4.5 mm left of its column's right edge (field kind `done`, ID `<row>:done`) |
 
 The QR contains only:
@@ -177,8 +177,8 @@ new fields load as layout version 1. The form does not change group frequency.
    accepts at most 24 megapixels, normalizes EXIF orientation and limits working
    image size. No photo is sent to an external service.
 4. Resolve the opaque identity against persisted manifests (version-1 sheets
-   go to the unchanged version-1 reader). If the QR can't be read directly —
-   small, tilted, compressed — straighten the page on its four corner targets
+   go to the unchanged version-1 reader). If the QR can't be read directly
+   (small, tilted, compressed), straighten the page on its four corner targets
    (which don't depend on rotation), try the four orientations and read the
    QR from the straightened corner.
    If the code or a corner target can't be found, the same is tried once
@@ -211,12 +211,12 @@ new fields load as layout version 1. The form does not change group frequency.
    of older sheets is only a pixel or two of grey. Then it is registered
    precisely (up to ±2 px, sub-pixel centre) and must be continuous on all
    four sides, with clean paper around it (a stroke running out of the box
-   is fine; a fifth of the paper around it dark is not) — otherwise that
+   is fine; a fifth of the paper around it dark is not), otherwise that
    duty is unclear (shadow, fold, missing outline). Inside, away from the outline, the share
    of ink decides: under 0.8 % is blank; ink through the box's middle,
    spanning at least 40 % of it, is a mark (an X, a tick, a stroke); more
    than 55 %, or ink all across the box (three quarters of its 4×4 patches,
-   where an X leaves the triangles between its arms free) is filled in —
+   where an X leaves the triangles between its arms free) is filled in:
    taken back; a speck is unclear. One marked day per duty; several make it
    unclear. Blank boxes never clear existing state.
 7. Build a persisted proposal. Recheck assignment identities, edit history,
@@ -293,7 +293,7 @@ They render real PDFs, rasterize them, draw marks with separate pen strokes
 and scan them back:
 
 - X marks with pens 0.17–0.5 mm, grey to black, off-centre, small to large,
-  uneven — all read as done, and on 6 mm boxes up to a 0.67 mm marker,
+  uneven: all read as done, and on 6 mm boxes up to a 0.67 mm marker,
   photographed tilted and compressed; ticks, slashes, circles and plus signs
   read as done too; a filled-in or densely scribbled box as taken back (and
   named), a correction (one day filled in, another marked) as the marked
@@ -332,8 +332,8 @@ manifests, `paper-phone-simulation.jpg`.
 - The mark reader is a set of simple checks, not a calibrated model. It was
   checked on sixteen real phone photos of four printed sheets, sent
   compressed by a chat app (1200×1600). On the new sheets (6 mm boxes, black
-  only): flat sheets, also photographed at a slant, read completely —
-  every mark (small, big, over the edge, with a tail), every empty box, every
+  only): flat sheets, also photographed at a slant, read completely.
+  Every mark (small, big, over the edge, with a tail), every empty box, every
   correction (box filled in); a crumpled sheet read completely but for one
   box named as unclear. Refused, with a request to retake: a crumpled sheet
   photographed at a slant, a sheet bent over a keyboard's edge, a sheet too

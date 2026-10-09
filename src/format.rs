@@ -2,10 +2,10 @@
 //! `mxbot_common::format`.
 //!
 //! Two ways to show a Matrix user, both rendered as a user pill:
-//!   * `@user:server` (`view::mention`) — a pill *and* an `m.mentions`
+//!   * `@user:server` (`view::mention`). A pill *and* an `m.mentions`
 //!     entry: notifies them. For messages addressed to someone (the weekly
 //!     plan, reminders, swap requests).
-//!   * `[name](https://matrix.to/#/@user:server)` (`view::user_link`) — the
+//!   * `[name](https://matrix.to/#/@user:server)` (`view::user_link`). The
 //!     same pill, no `m.mentions` entry: notifies nobody. For read-only views.
 
 use mxbot_common::matrix_sdk::ruma::events::{room::message::RoomMessageEventContent, Mentions};
@@ -13,16 +13,16 @@ use mxbot_common::matrix_sdk::ruma::events::{room::message::RoomMessageEventCont
 // Display names: `crate::names` (room member, global profile, stored name).
 pub use mxbot_common::format::{extract_mxids, mentionify, mentionify_with_names};
 
-/// Notify exactly who `content` mentions — nobody when it has no `@mxid`
+/// Notify exactly who `content` mentions. Nobody when it has no `@mxid`
 /// pills. `m.mentions` is always set, even empty: an event without it falls
 /// back to the legacy push rules, which highlight anyone whose display name
-/// or username merely appears in the body — the names in a plan, say.
+/// or username merely appears in the body. The names in a plan, say.
 pub fn intentional(mut content: RoomMessageEventContent) -> RoomMessageEventContent {
     content.mentions.get_or_insert_with(Mentions::new);
     content
 }
 
-/// Notify nobody, whoever `content` mentions — for edits that only bring a
+/// Notify nobody, whoever `content` mentions, for edits that only bring a
 /// message up to date (a group selector after a tap).
 pub fn quiet(mut content: RoomMessageEventContent) -> RoomMessageEventContent {
     content.mentions = Some(Mentions::new());

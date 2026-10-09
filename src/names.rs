@@ -3,7 +3,7 @@
 //! What a person with a Matrix ID is called, in this order:
 //!   1. their display name as a member of the room at hand;
 //!   2. the `displayname` of their global Matrix profile
-//!      (`GET /_matrix/client/v3/profile/{userId}`) — also when the bot
+//!      (`GET /_matrix/client/v3/profile/{userId}`): also when the bot
 //!      shares no room with them;
 //!   3. the name stored on their `Person` (what 1 or 2 found last time, or
 //!      the name an admin gave them);
@@ -12,7 +12,7 @@
 //! 1 and 2 are asked by `refresh` and `refresh_one`, which store what they
 //! find on the existing `Person` (never creating one), so plans and PDFs
 //! render 3 without asking again. A profile lookup is never required: it is
-//! bounded in time, its answer is cached — failures too — and a 403, 404,
+//! bounded in time, its answer is cached (failures too) and a 403, 404,
 //! network or federation error simply leaves 3 in place.
 //! Message pills (`mentionify`) use 1, 3 and 4 and never ask a server.
 
@@ -158,7 +158,7 @@ pub async fn live(
 }
 
 /// Store `live` names on the people with those Matrix IDs. Only existing
-/// people are updated — nobody is created. True if a name changed.
+/// people are updated. Nobody is created. True if a name changed.
 pub fn store(state: &mut State, live: &HashMap<String, String>) -> bool {
     let mut changed = false;
     for person in &mut state.persons {
@@ -211,7 +211,7 @@ async fn update(
     }
 }
 
-/// Refresh everyone with a Matrix ID — at startup and before a PDF. `room`
+/// Refresh everyone with a Matrix ID, at startup and before a PDF. `room`
 /// is where to look for member names first (the cleaning room).
 pub async fn refresh(ctx: &BotContext, client: &Client, room: Option<&Room>) {
     let mxids: Vec<String> = {

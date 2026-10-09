@@ -11,7 +11,11 @@ pub(crate) async fn cmd_swap(
 ) -> Result<Option<String>> {
     let target_mxid = match args.first() {
         Some(t) => *t,
-        None => return Ok(Some("Usage: !swap @user [group] [slot] [week <N>]".into())),
+        None => {
+            return Ok(Some(
+                "💡 Usage: !swap @user [group] [slot] [week <N>]".into(),
+            ))
+        }
     };
     if !target_mxid.starts_with('@') {
         return Ok(Some(
@@ -23,7 +27,7 @@ pub(crate) async fn cmd_swap(
 
     let Some(parsed) = extract_turn_args(&args[1..]) else {
         return Ok(Some(
-            "Usage: !swap @user [group] [slot] [week <1-53>] [on <day>]".into(),
+            "💡 Usage: !swap @user [group] [slot] [week <1-53>] [on <day>]".into(),
         ));
     };
     let group_args = parsed.rest.as_slice();
@@ -36,17 +40,17 @@ pub(crate) async fn cmd_swap(
         )));
     }
     if sender_mxid == target_mxid {
-        return Ok(Some("You cannot swap with yourself.".into()));
+        return Ok(Some("🙃 You cannot swap with yourself.".into()));
     }
 
     let mut state = ctx.state.lock().await;
 
     let sender_person_id = match state.person_by_matrix_id(sender_mxid).map(|p| p.id.clone()) {
         Some(id) => id,
-        None => return Ok(Some(format!("You ({sender_mxid}) are not registered."))),
+        None => return Ok(Some(format!("🤷 You ({sender_mxid}) are not registered."))),
     };
 
-    // Group: named, or else the sender's own group — not guessed among several.
+    // Group: named, or else the sender's own group, not guessed among several.
     let (group, slot_token) = match group_args.first() {
         Some(&first) if state.group_by_name(first).is_some() => (
             state.group_by_name(first).unwrap().clone(),
@@ -67,7 +71,7 @@ pub(crate) async fn cmd_swap(
                 [g] => (g.clone(), first.copied()),
                 many => {
                     return Ok(Some(format!(
-                        "You are in several groups — name one: {}\nUsage: !swap @user <group> [<slot>] [week <N>]",
+                        "🤔 You are in several groups. Name one: {}\n💡 Usage: !swap @user <group> [<slot>] [week <N>]",
                         many.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
                     )))
                 }
@@ -82,7 +86,7 @@ pub(crate) async fn cmd_swap(
         Err(e) => return Ok(Some(e)),
     };
     if slot_token.is_some() && !group.is_multi_slot() {
-        return Ok(Some(format!("«{}» does not have slots.", group.name)));
+        return Ok(Some(format!("🤷 «{}» does not have slots.", group.name)));
     }
     let held: Vec<Duty> = turns
         .iter()
@@ -112,7 +116,7 @@ pub(crate) async fn cmd_swap(
         .collect();
     if chosen.is_empty() && !held.is_empty() {
         return Ok(Some(format!(
-            "«{}» isn't yours in week {week} — yours: {}",
+            "🤔 «{}» isn't yours in week {week}. Yours: {}",
             slot_token.unwrap_or_default(),
             held.iter().map(Duty::label).collect::<Vec<_>>().join(", ")
         )));
@@ -121,7 +125,7 @@ pub(crate) async fn cmd_swap(
         [one] => one.clone(),
         [] => {
             return Ok(Some(format!(
-                "You have no open turn in «{}» in week {week} — nothing to swap.",
+                "🤷 You have no open turn in «{}» in week {week}. Nothing to swap.",
                 group.name
             )))
         }
@@ -178,7 +182,7 @@ pub(crate) async fn cmd_acceptswap(
 ) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None => return Ok(Some("Usage: !swap accept <id>".into())),
+        None => return Ok(Some("💡 Usage: !swap accept <id>".into())),
     };
     let sender_mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
@@ -188,10 +192,13 @@ pub(crate) async fn cmd_acceptswap(
         None => return Ok(Some(format!("❌ Swap request #{id} not found."))),
     };
     if req.target != sender_mxid {
-        return Ok(Some("This swap is not addressed to you.".into()));
+        return Ok(Some("🚫 This swap is not addressed to you.".into()));
     }
     if req.status != SwapStatus::Pending {
-        return Ok(Some(format!("Request #{id} is already {:?}.", req.status)));
+        return Ok(Some(format!(
+            "ℹ️ Request #{id} is already {:?}.",
+            req.status
+        )));
     }
     let requester = req.requester.clone();
     let group_id = req.group_id.clone();
@@ -209,7 +216,7 @@ pub(crate) async fn cmd_acceptswap(
             .map(|g| g.name.clone())
             .unwrap_or_default();
         return Ok(Some(format!(
-            "«{group_name}» week {iso_week} is already completed or skipped — swap #{id} can no longer be accepted."
+            "⌛ «{group_name}» week {iso_week} is already done or skipped.\nSwap #{id} can no longer be accepted."
         )));
     }
 
@@ -217,7 +224,7 @@ pub(crate) async fn cmd_acceptswap(
         .person_by_matrix_id(&requester)
         .map(|p| p.id.clone())
         .unwrap_or_else(|| requester.clone());
-    // PersonCreated is idempotent — the accepter must exist as a person to
+    // PersonCreated is idempotent. The accepter must exist as a person to
     // be assigned (same self-registration as !takeover).
     state.apply_event(DomainEvent::PersonCreated {
         person_id: Uuid::new_v4().to_string(),
@@ -229,8 +236,8 @@ pub(crate) async fn cmd_acceptswap(
         .map(|p| p.id.clone())
         .expect("accepter was just registered");
 
-    // The requester may no longer actually hold this week's assignment —
-    // they could have left the group, or an admin/!takeover could have
+    // The requester may no longer actually hold this week's assignment.
+    // They could have left the group, or an admin/!takeover could have
     // reassigned it since the swap was requested. Accepting anyway would
     // silently hand the week to `sender` at the expense of whoever holds it
     // now, without their consent, so refuse and cancel the stale request
@@ -249,7 +256,7 @@ pub(crate) async fn cmd_acceptswap(
             .map(person_label)
             .unwrap_or_else(|| "nobody".into());
         return Ok(Some(format!(
-            "Swap #{id} is no longer valid — {requester} is no longer responsible for «{group_name}» \
+            "⌛ Swap #{id} is no longer valid: {requester} is no longer responsible for «{group_name}» \
              week {iso_week} (now: {holder_label}). It has been cancelled."
         )));
     }
@@ -264,7 +271,7 @@ pub(crate) async fn cmd_acceptswap(
         shift: turn.shift,
     })?;
     // The swap-request bookkeeping above records *that* a swap happened; this
-    // is what actually makes the target the responsible person — the same
+    // is what actually makes the target the responsible person. The same
     // frozen `SlotAssignment` !plan assign and !takeover use, so !done, !status,
     // the pinned plan's ✅ reaction, PDF/iCal etc. all agree immediately,
     // even though the week was already materialized before the swap.
@@ -305,7 +312,7 @@ pub(crate) async fn cmd_rejectswap(
 ) -> Result<Option<String>> {
     let id: u64 = match args.first().and_then(|s| s.parse().ok()) {
         Some(v) => v,
-        None => return Ok(Some("Usage: !swap reject <id>".into())),
+        None => return Ok(Some("💡 Usage: !swap reject <id>".into())),
     };
     let sender_mxid = sender.as_str();
     let mut state = ctx.state.lock().await;
@@ -315,10 +322,13 @@ pub(crate) async fn cmd_rejectswap(
         None => return Ok(Some(format!("❌ Swap #{id} not found."))),
     };
     if req.target != sender_mxid {
-        return Ok(Some("This swap is not addressed to you.".into()));
+        return Ok(Some("🚫 This swap is not addressed to you.".into()));
     }
     if req.status != SwapStatus::Pending {
-        return Ok(Some(format!("Request #{id} is already {:?}.", req.status)));
+        return Ok(Some(format!(
+            "ℹ️ Request #{id} is already {:?}.",
+            req.status
+        )));
     }
     let _ = req;
 
@@ -330,7 +340,7 @@ pub(crate) async fn cmd_rejectswap(
 // ── !sos [group] [slot] [week N] [on <day>] ──────────────────────────────────
 //
 // "I can't make it": asks the cleaning room who steps in for one of the
-// sender's turns — their next one, or the one named — like 🆘 on the plan
+// sender's turns (their next one, or the one named) like 🆘 on the plan
 // does for this week (see `trades`).
 
 pub(crate) async fn cmd_sos(
@@ -339,7 +349,7 @@ pub(crate) async fn cmd_sos(
     room: &Room,
     args: &[&str],
 ) -> Result<Option<String>> {
-    let usage = "Usage: !sos [<group>] [<slot>] [week <1-53>] [on <day>]";
+    let usage = "💡 Usage: !sos [<group>] [<slot>] [week <1-53>] [on <day>]";
     let Some(parsed) = extract_turn_args(args) else {
         return Ok(Some(usage.into()));
     };
@@ -350,7 +360,7 @@ pub(crate) async fn cmd_sos(
         .map(|p| p.id.clone())
     else {
         return Ok(Some(
-            "❌ You're not on the plan yet — !mygroups to join a group.".into(),
+            "❌ You're not on the plan yet.\n👉 !mygroups to join a group.".into(),
         ));
     };
     let (group, slot) = match parsed.rest.as_slice() {
@@ -381,7 +391,7 @@ pub(crate) async fn cmd_sos(
         })
         .collect();
     if !week_named {
-        // The next one — several only when they start the same day.
+        // The next one: several only when they start the same day.
         let first = duties.iter().map(|d| d.turn.dates(&d.group.rhythm).0).min();
         duties.retain(|d| Some(d.turn.dates(&d.group.rhythm).0) == first);
     }
@@ -404,7 +414,7 @@ pub(crate) async fn cmd_sos(
     };
     if crate::trades::open_request(&state, &duty).is_some() {
         return Ok(Some(format!(
-            "You already asked for {} — see your 🆘 in the cleaning room.",
+            "☝️ You already asked for {}. See your 🆘 in the cleaning room.",
             duty.label()
         )));
     }
@@ -419,14 +429,14 @@ pub(crate) async fn cmd_sos(
         .is_none()
     {
         return Ok(Some(
-            "😕 I couldn't post that — try again in a moment.".into(),
+            "😕 I couldn't post that. Try again in a moment.".into(),
         ));
     }
     // In the cleaning room the request speaks for itself.
     Ok((room.room_id() != ctx.room_id).then(|| {
         format!(
-            "🆘 Asked in the cleaning room who steps in for {} (week {}) — \
-             you'll be pinged there when someone does.",
+            "🆘 Asked in the cleaning room who steps in for {} (week {}).\n\
+             🔔 You'll be pinged there when someone does.",
             duty.label(),
             duty.turn.week
         )

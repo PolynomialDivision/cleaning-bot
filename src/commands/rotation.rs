@@ -12,7 +12,11 @@ pub(crate) async fn add_matrix_participant(
     require_admin(ctx, sender)?;
     let (mxid, group_name) = match (args.first(), args.get(1)) {
         (Some(mxid), Some(group)) => (*mxid, *group),
-        _ => return Ok(Some("Usage: !member add @user:server <group>".to_owned())),
+        _ => {
+            return Ok(Some(
+                "💡 Usage: !member add @user:server <group>".to_owned(),
+            ))
+        }
     };
     if let Err(message) = validate_matrix_user_id(mxid) {
         return Ok(Some(message));
@@ -67,7 +71,7 @@ pub(crate) async fn remove_matrix_participant(
         (Some(mxid), Some(group)) => (*mxid, *group),
         _ => {
             return Ok(Some(
-                "Usage: !member remove @user:server <group>".to_owned(),
+                "💡 Usage: !member remove @user:server <group>".to_owned(),
             ))
         }
     };

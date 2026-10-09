@@ -30,7 +30,7 @@ const MAX_ROW_PITCH: f64 = 14.;
 /// Box side, Monday's box centre and the distance between days: the seven
 /// day columns share the table's width right of "Who" (105–196mm). There is
 /// no Skip box on paper; skipping is recorded in Matrix. Boxes are 6mm with
-/// a 0.4mm outline (sheets printed before: 4.8mm, 0.22mm — each manifest
+/// a 0.4mm outline (sheets printed before: 4.8mm, 0.22mm, each manifest
 /// says its size): in a phone photo a chat app shrank to 1200x1600, a
 /// thinner line is barely a grey pixel.
 const BOX: f64 = 6.;
@@ -100,7 +100,7 @@ pub struct Page {
     pub title: String,
     pub rooms: String,
     /// The rooms per slot (one group without a slot name for a group without
-    /// slots), each as a kind and what is left of its name — for the header.
+    /// slots), each as a kind and what is left of its name, for the header.
     #[serde(default)]
     pub room_groups: Vec<RoomGroup>,
     /// Each group has its own style, so each page does.
@@ -129,7 +129,7 @@ pub struct RoomGroup {
     pub slot: Option<String>,
     pub rooms: Vec<RoomLabel>,
 }
-/// "Colbe Toilet 3rd" in slot Colbe: kind `toilet`, label "3rd" — the
+/// "Colbe Toilet 3rd" in slot Colbe: kind `toilet`, label "3rd". The
 /// sheet shows a toilet symbol and "3rd".
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RoomLabel {
@@ -204,7 +204,7 @@ struct Scan {
     /// days marked): named in the preview, to be recorded in Matrix.
     #[serde(default)]
     unclear: Vec<Unclear>,
-    /// Boxes filled in: a mark taken back, not counted — said in the
+    /// Boxes filled in: a mark taken back, not counted, said in the
     /// preview, in case it was meant as a (thick) mark.
     #[serde(default)]
     taken_back: Vec<TakenBack>,
@@ -231,7 +231,7 @@ fn unclear_note(page: &Page, unclear: &[Unclear], taken_back: &[TakenBack]) -> S
         .filter_map(|u| {
             let r = duty(&u.row)?;
             Some(format!(
-                "❓ Week {} · {} · {} — {}",
+                "❓ Week {} · {} · {}: {}",
                 r.week, r.name, r.label, u.reason
             ))
         })
@@ -558,8 +558,8 @@ fn tick_pages(state: &State, assignments: &[&AssignmentInstance], pages: &mut Ve
     }
 }
 
-/// A tick has no day. It counts as done in the middle of its window —
-/// Thursday for a whole week, Monday for Mon–Tue — but never later than
+/// A tick has no day. It counts as done in the middle of its window
+/// (Thursday for a whole week, Monday for Mon–Tue) but never later than
 /// `today`. (Before the window starts there is nothing to count: that day
 /// lies in the future and the import refuses it.)
 pub fn tick_day(start: NaiveDate, end: NaiveDate, today: NaiveDate) -> NaiveDate {
@@ -642,7 +642,7 @@ fn room(slot: Option<&str>, name: &str) -> RoomLabel {
     }
 }
 
-/// Keep, for each group, only as many whole weeks as fill one page — what
+/// Keep, for each group, only as many whole weeks as fill one page: what
 /// `!plan pdf` prints when no number of weeks is asked for (a group cleaned
 /// by two slots gets ten weeks, a weekly one-slot group 21). A tick sheet
 /// has one row per week, so a group printed that way always gets 21.
@@ -900,7 +900,7 @@ async fn authorized(ctx: &BotContext, room: &Room, user: &OwnedUserId) -> bool {
 }
 const UNREADABLE: &str = "📷 That looks like a cleaning plan, but I can't read its code \
 (bottom right). Please take the photo again: the whole page, flat, without shadow, \
-from closer — and send it in full quality, not compressed.";
+from closer. And send it in full quality, not compressed.";
 const UNKNOWN_SHEET: &str = "📷 I don't know this cleaning plan: it was printed by another \
 bot or before its records were reset. Print a fresh one with !plan pdf.";
 
@@ -1344,7 +1344,7 @@ mod tests {
         let row = &page.rows[0];
         // One week on the page: rows as tall as allowed.
         assert_eq!(row.y, ROWS_TOP + MAX_ROW_PITCH / 2.);
-        // A whole week: a box for each day, Monday to Sunday — no
+        // A whole week: a box for each day, Monday to Sunday. No
         // separate "done" box and no Skip box.
         let kinds: Vec<&str> = row.fields.iter().map(|f| f.kind.as_str()).collect();
         assert_eq!(kinds.len(), 7);
@@ -1438,7 +1438,7 @@ mod tests {
         assert_eq!(snapshot.assignments.len(), 20);
         assert_eq!(weeks.len(), 5);
         let doc = document(&s, &snapshot);
-        // What `!plan pdf` prints by default — the Python tests scan it.
+        // What `!plan pdf` prints by default. The Python tests scan it.
         if let Ok(path) = std::env::var("PAPER_LAYOUT_FIXTURE") {
             std::fs::write(path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
         }
@@ -1458,7 +1458,7 @@ mod tests {
         // One line a week: 21 weeks of four duties on one page.
         assert_eq!(snapshot.assignments.len(), 4 * ROWS_PER_PAGE);
         let doc = document(&s, &snapshot);
-        // What `!plan pdf` prints in this style — the Python tests scan it.
+        // What `!plan pdf` prints in this style. The Python tests scan it.
         if let Ok(path) = std::env::var("PAPER_TICK_FIXTURE") {
             std::fs::write(path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
         }
@@ -1549,7 +1549,7 @@ mod tests {
         one_page_per_group(&mut snapshot, &s);
         let sheet = document(&s, &snapshot);
         let view = view(&s, &snapshot);
-        // What `!plan pdf view` prints — the Python tests render it.
+        // What `!plan pdf view` prints. The Python tests render it.
         if let Ok(path) = std::env::var("PAPER_VIEW_FIXTURE") {
             std::fs::write(path, serde_json::to_vec_pretty(&view).unwrap()).unwrap();
         }
@@ -1609,7 +1609,7 @@ mod tests {
         assert_eq!(
             note,
             format!(
-                "\n\nNot read:\n❓ Week {} · {} · {} — only a dot\n\
+                "\n\nNot read:\n❓ Week {} · {} · {}: only a dot\n\
                  Record these with !done, or send a clearer photo.",
                 row.week, row.name, row.label
             )

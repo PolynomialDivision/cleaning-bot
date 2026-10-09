@@ -63,8 +63,8 @@ pub async fn run(ctx: BotContext, client: Client) {
     }
 }
 
-/// Keep every group's frozen plan `materialize_weeks` deep as time passes —
-/// the same additive fill startup does, so how far ahead the plan is fixed
+/// Keep every group's frozen plan `materialize_weeks` deep as time passes.
+/// The same additive fill startup does, so how far ahead the plan is fixed
 /// no longer depends on when the bot last restarted. Never changes a turn
 /// that is already frozen.
 pub(crate) async fn roll_planning_horizon(ctx: &BotContext) -> anyhow::Result<()> {
@@ -80,12 +80,12 @@ pub(crate) async fn roll_planning_horizon(ctx: &BotContext) -> anyhow::Result<()
     state.save(&ctx.state_path).await
 }
 
-/// Edit the pinned weekly plan message — and that week's reminders — to
+/// Edit the pinned weekly plan message (and that week's reminders) to
 /// reflect the current completion state.
 /// No-op if no plan has been sent for this week yet, or if the rendered
 /// content already matches what was last sent (avoids a pointless Matrix edit).
 pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32, week: u32) {
-    // The week's reminders show who's done, too — 🆘 requests close once
+    // The week's reminders show who's done, too: 🆘 requests close once
     // settled.
     refresh_reminders(ctx, room, year, week).await;
     crate::trades::tidy(ctx, room, false).await;
@@ -118,7 +118,7 @@ pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32
     };
 
     // Only people new on the plan (a takeover, say) are notified by the
-    // edit — not everyone again on every ✅.
+    // edit: not everyone again on every ✅.
     let content = mention_message(ctx, &msg, &mxids, room)
         .await
         .make_replacement(ReplacementMetadata::new(
@@ -150,8 +150,8 @@ fn previous_mentions(text: &str) -> Mentions {
 /// registers `event_id` in both id maps (so it's the single active plan/edit
 /// target and reactions on it are recognized), snapshots the text it now
 /// shows, marks the week's initial reminder as sent, and persists. Callers
-/// are responsible for actually sending/editing the message beforehand —
-/// this only updates bookkeeping. Shared by the first-ever post of a week's
+/// are responsible for actually sending/editing the message beforehand.
+/// This only updates bookkeeping. Shared by the first-ever post of a week's
 /// plan, `refresh_pinned_plan`, `!plan announce`, and startup reconciliation.
 async fn register_weekly_plan_message(
     ctx: &BotContext,
@@ -261,7 +261,7 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
             ReminderKind::Initial => ReminderNote::StartsToday,
             _ => ReminderNote::EndsToday,
         };
-        // The same reminder, retried after a crash, is sent only once —
+        // The same reminder, retried after a crash, is sent only once,
         // but a later one the same day (other turns) is a new message.
         let covered: Vec<String> = turns
             .iter()
@@ -289,8 +289,8 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
 }
 
 /// Whether the weekly plan of `year`/`week` is still to be posted on
-/// `weekday`: on the configured `plan_weekday` — or later that week, when
-/// the bot was down then — but only once (also across a restart).
+/// `weekday`: on the configured `plan_weekday` (or later that week, when
+/// the bot was down then) but only once (also across a restart).
 pub(crate) fn weekly_plan_due(
     state: &crate::state::State,
     year: i32,
@@ -315,7 +315,7 @@ pub(crate) fn weekly_plan_due(
 /// Turns that get a reminder of `kind` today and haven't had one:
 /// - `Initial`: a shift that starts today and isn't the first of its week
 ///   (the first is announced by the weekly plan);
-/// - `Final`: an open turn on its last day — for whole-week turns the
+/// - `Final`: an open turn on its last day, for whole-week turns the
 ///   configured `final_reminder_weekday` instead.
 pub(crate) fn turns_to_remind(
     state: &crate::state::State,
@@ -410,7 +410,7 @@ pub(crate) async fn announce_weekly_plan(
 // ── Room pin management ───────────────────────────────────────────────────────
 
 /// Make `plan` the bot's only pinned message: every other message the bot
-/// sent — old plans and reminders of any age or format — is unpinned.
+/// sent (old plans and reminders of any age or format) is unpinned.
 /// Messages people pinned stay.
 ///
 /// Sent as one `m.room.pinned_events` event, computed from the list as the
@@ -452,7 +452,7 @@ pub(crate) async fn pin_weekly_plan(ctx: &BotContext, room: &Room, plan: Option<
     }
 }
 
-/// Whether pinned `id` is the bot's own message — or no longer exists, so
+/// Whether pinned `id` is the bot's own message, or no longer exists, so
 /// the pin shows nothing anyway. When unsure (a network error), no.
 async fn is_own_or_gone(room: &Room, id: &OwnedEventId) -> bool {
     match room.event(id, None).await {
@@ -483,8 +483,8 @@ fn wanted_pins(
     wanted
 }
 
-/// On startup: only the newest plan — this week's, or the last one before
-/// it — stays pinned of the bot's messages.
+/// On startup: only the newest plan (this week's, or the last one before
+/// it) stays pinned of the bot's messages.
 pub async fn tidy_pins_on_startup(ctx: &BotContext, room: &Room) {
     let plan = newest_plan(&*ctx.state.lock().await, current_iso_week());
     pin_weekly_plan(ctx, room, plan.as_ref()).await;
@@ -503,8 +503,8 @@ fn newest_plan(state: &crate::state::State, (year, week): (i32, u32)) -> Option<
 
 // ── Reminders ─────────────────────────────────────────────────────────────────
 
-/// Send a reminder of `turns` (group, shift) in `week` — short, pinging only
-/// whoever is still open — and keep it to be updated as they finish
+/// Send a reminder of `turns` (group, shift) in `week` (short, pinging only
+/// whoever is still open) and keep it to be updated as they finish
 /// (`refresh_reminders`). `None` when no open turn has anyone assigned.
 pub(crate) async fn send_reminder(
     ctx: &BotContext,
@@ -555,7 +555,7 @@ pub(crate) async fn send_reminder(
     Ok(Some(event_id))
 }
 
-/// A link to the plan message of `week` — `None` before it is posted.
+/// A link to the plan message of `week`: `None` before it is posted.
 fn plan_permalink(
     ctx: &BotContext,
     state: &crate::state::State,
@@ -576,7 +576,7 @@ fn plan_permalink(
 
 /// `https://matrix.to/#/<room>/<event>?via=<server>`: clients open it at
 /// that message (Element, FluffyChat). IDs are percent-encoded as matrix.to
-/// expects — older event IDs may contain `/` or `+`.
+/// expects: older event IDs may contain `/` or `+`.
 fn permalink(room_id: &str, event_id: &str, via: Option<&str>) -> String {
     let encode = |id: &str| {
         id.chars()
@@ -603,7 +603,7 @@ fn permalink(room_id: &str, event_id: &str, via: Option<&str>) -> String {
     )
 }
 
-/// Bring the reminders of `week` up to date — who is done, who is still
+/// Bring the reminders of `week` up to date: who is done, who is still
 /// open. The edits notify nobody.
 async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) {
     let stale: Vec<(String, String)> = {
@@ -652,7 +652,7 @@ async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) 
 ///
 /// "the plan" links to that week's plan message (`plan_link`), if any.
 ///
-/// Once everyone is done: "✨ All done — thanks!" over the ✅ line. `None`
+/// Once everyone is done: "✨ All done. Thanks!" over the ✅ line. `None`
 /// when none of the turns has anyone assigned.
 pub(crate) fn reminder_text(
     state: &crate::state::State,
@@ -701,7 +701,7 @@ pub(crate) fn reminder_text(
     }
     let mut lines = Vec::new();
     if open.is_empty() {
-        lines.push("✨ All done — thanks!".to_owned());
+        lines.push("✨ All done. Thanks!".to_owned());
     } else {
         let title = match note {
             ReminderNote::StartsToday => "🔔 Your turn starts today:",
@@ -728,24 +728,24 @@ pub(crate) fn reminder_text(
 
 /// What startup reconciliation should do about the current week's plan
 /// message. Deciding this is kept pure/synchronous (no Matrix I/O, no
-/// `weekly_plan_rendered` cache) so it can be unit tested directly —
+/// `weekly_plan_rendered` cache) so it can be unit tested directly:
 /// `reconcile_on_startup` is the thin async wrapper that fetches the actual
 /// live Matrix content via `room.event()` and then carries out whichever
 /// action this returns.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PlanReconcileAction {
-    /// No plan is tracked for this week yet — nothing to check.
+    /// No plan is tracked for this week yet. Nothing to check.
     NoPlanTracked,
-    /// The tracked message is gone and nothing is due this week (any more)
-    /// — no need to bring it back.
+    /// The tracked message is gone and nothing is due this week (any more):
+    /// no need to bring it back.
     NothingDue,
     /// The tracked message exists and its live content already matches
     /// persisted state.
     AlreadyConsistent,
     /// The tracked message exists but its live content differs from what
-    /// state says it should be — edit it in place.
+    /// state says it should be: edit it in place.
     NeedsEdit { event_id: OwnedEventId },
-    /// The tracked message is missing, redacted, or otherwise inaccessible —
+    /// The tracked message is missing, redacted, or otherwise inaccessible:
     /// send a replacement and re-register its event id.
     NeedsRecreate,
 }
@@ -756,11 +756,11 @@ pub(crate) enum PlanReconcileAction {
 ///
 /// `expected_effective_body` and `actual_body` must both be the final,
 /// display-name-resolved message body (i.e. `RoomMessageEventContent::body()`
-/// after `mentionify_with_names`, and — for `actual_body` — after resolving
+/// after `mentionify_with_names`, and (for `actual_body`) after resolving
 /// any bundled Matrix edit) so the comparison isn't fooled by formatting.
 /// Deliberately does **not** consult `weekly_plan_rendered`: that field is
 /// only a same-process cache for `refresh_pinned_plan`'s fast path, and must
-/// never substitute for actually checking what Matrix currently shows here —
+/// never substitute for actually checking what Matrix currently shows here,
 /// otherwise a message edited/changed out from under the bot (or a state
 /// restore that leaves the cache correct but reality wrong) would go
 /// undetected.
@@ -785,7 +785,7 @@ pub(crate) fn decide_plan_reconcile_action(
         .any(|g| state.belongs_in_weekly_plan(g, year, week));
 
     // A plan whose groups were all disabled since is still edited, to say
-    // there's nothing to clean — it mustn't keep showing old duties.
+    // there's nothing to clean. It mustn't keep showing old duties.
     match actual_body {
         None if !any_due => PlanReconcileAction::NothingDue,
         None => PlanReconcileAction::NeedsRecreate,
@@ -796,7 +796,7 @@ pub(crate) fn decide_plan_reconcile_action(
 
 /// Extract the *effective* current body of a fetched plan message: the
 /// bundled `m.replace` edit's new content if the homeserver bundled one in
-/// `unsigned` (the standard aggregation format for event replacements —
+/// `unsigned` (the standard aggregation format for event replacements,
 /// see the Matrix spec's "Event replacements" section), otherwise the
 /// event's own body. `None` when there's no usable body at all, which also
 /// covers a redacted event (redaction empties `content`) without needing a
@@ -819,7 +819,7 @@ fn effective_plan_body(evt: &matrix_sdk::deserialized_responses::TimelineEvent) 
 /// (resolving any edit) and compare it against what persisted state says it
 /// should be, repairing on any mismatch (stale/edited-elsewhere → edit in
 /// place; missing/redacted → recreate and re-pin). Persisted `State` is
-/// authoritative throughout — Matrix is only ever read to check the live
+/// authoritative throughout: Matrix is only ever read to check the live
 /// message, never to reconstruct state.
 ///
 /// Intended to be called once, after the initial sync completes and before
@@ -831,7 +831,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
     let _operation = ctx.operations.lock().await;
     let Some(room) = client.get_room(&ctx.room_id) else {
         warn!(
-            "Reconcile: bot is not in room {} — skipping startup reconciliation",
+            "Reconcile: bot is not in room {}, skipping startup reconciliation",
             ctx.room_id
         );
         return;
@@ -840,14 +840,14 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
     let week_key = format!("{year}-W{week:02}");
     info!("Reconcile: checking weekly plan for {week_key} against persisted state");
 
-    // Cheap pure pre-check (dummy body args — only NoPlanTracked is
+    // Cheap pure pre-check (dummy body args, only NoPlanTracked is
     // inspected here) so a week without a plan never costs a Matrix
     // round-trip.
     let stored_eid: Option<OwnedEventId> = {
         let state = ctx.state.lock().await;
         match decide_plan_reconcile_action(&state, year, week, "", None) {
             PlanReconcileAction::NoPlanTracked => {
-                info!("Reconcile: no weekly plan tracked for {week_key} — nothing to check");
+                info!("Reconcile: no weekly plan tracked for {week_key}, nothing to check");
                 None
             }
             _ => state
@@ -861,7 +861,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
     };
 
     // What state says the message should show, with member names resolved
-    // exactly the way a real send/edit would resolve them — computed once
+    // exactly the way a real send/edit would resolve them: computed once
     // and reused both for the comparison below and (if a repair turns out
     // to be needed) as the content actually sent, so the two can never
     // disagree with each other.
@@ -878,7 +878,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
     let expected_content = mention_message(ctx, &raw_msg, &mxids, &room).await;
     let expected_effective_body = expected_content.body().to_owned();
 
-    // What Matrix is *actually, currently* showing — following any edit,
+    // What Matrix is *actually, currently* showing: following any edit,
     // not just the original send.
     let actual_body: Option<String> = match room.event(&stored_eid, None).await {
         Ok(evt) => effective_plan_body(&evt),
@@ -887,9 +887,9 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
             if matches!(e.client_api_error_kind(), Some(MatrixErrorKind::NotFound)) {
                 None
             } else {
-                // Couldn't confirm either way (network hiccup, permissions, ...) —
-                // don't risk creating a duplicate off an inconclusive check.
-                warn!("Reconcile: could not verify plan event {stored_eid} for {week_key} ({e}) — leaving it untouched this run");
+                // Couldn't confirm either way (network hiccup, permissions, ...).
+                // Don't risk creating a duplicate off an inconclusive check.
+                warn!("Reconcile: could not verify plan event {stored_eid} for {week_key} ({e}), leaving it untouched this run");
                 return;
             }
         }
@@ -909,7 +909,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
     match action {
         PlanReconcileAction::NoPlanTracked | PlanReconcileAction::NothingDue => {}
         PlanReconcileAction::AlreadyConsistent => {
-            info!("Reconcile: {week_key} plan message already matches persisted state (verified against live Matrix content) — no repair needed");
+            info!("Reconcile: {week_key} plan message already matches persisted state (verified against live Matrix content), no repair needed");
             // Keep the fast-path cache honest too, in case it was stale/missing
             // even though the live content happened to already be correct.
             if let Err(e) =
@@ -919,7 +919,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
             }
         }
         PlanReconcileAction::NeedsEdit { event_id } => {
-            info!("Reconcile: {week_key} plan message differs from persisted state (verified against live Matrix content) — editing in place");
+            info!("Reconcile: {week_key} plan message differs from persisted state (verified against live Matrix content), editing in place");
             let already_mentioned = {
                 let state = ctx.state.lock().await;
                 state
@@ -947,7 +947,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
         }
         PlanReconcileAction::NeedsRecreate => {
             warn!(
-                "Reconcile: stored plan event for {week_key} is missing/inaccessible — recreating"
+                "Reconcile: stored plan event for {week_key} is missing/inaccessible, recreating"
             );
             match room.send(expected_content).await {
                 Ok(resp) => {
@@ -989,7 +989,7 @@ pub(crate) fn build_weekly_plan(
         if due_groups.is_empty() {
             "No cleaning due this week.".to_owned()
         } else if all_done {
-            "✨ All done for this week — thank you!".to_owned()
+            "✨ All done for this week. Thank you!".to_owned()
         } else {
             "React ✅ when your part is done 🫧 · 🆘 if you can't make it".to_owned()
         },
@@ -1024,8 +1024,8 @@ pub(crate) fn group_heading(group: &CleaningGroup) -> Vec<String> {
     lines
 }
 
-/// One line per slot of a turn, with the assignee's MXID for mentions —
-/// "⬜ @bob", "✅ Scharni: @alice", "⬜ Thu–Sun: @carol 🌴 away" — each
+/// One line per slot of a turn, with the assignee's MXID for mentions
+/// ("⬜ @bob", "✅ Scharni: @alice", "⬜ Thu–Sun: @carol 🌴 away") each
 /// slot's rooms indented below it. `with_done` also lists finished slots.
 fn turn_lines(
     snapshot: &crate::schedule::ScheduleSnapshot,
@@ -1087,7 +1087,7 @@ mod tests {
         // People's pins stay where they were; the plan goes last (newest).
         let wanted = wanted_pins(&pinned, Some(&id("$plan40")), &bots);
         assert_eq!(wanted, [id("$house_rules"), id("$plan40")]);
-        // Applying it again changes nothing — no needless state event.
+        // Applying it again changes nothing. No needless state event.
         assert_eq!(wanted_pins(&wanted, Some(&id("$plan40")), &bots), wanted);
         // No plan yet: only the bot's pins go.
         assert_eq!(
@@ -1255,7 +1255,7 @@ mod tests {
         }
         let (text, mxids) =
             reminder_text(&state, ReminderNote::EndsToday, (year, week), &turns, None).unwrap();
-        assert!(text.starts_with("✨ All done — thanks!\n✅ "), "{text}");
+        assert!(text.starts_with("✨ All done. Thanks!\n✅ "), "{text}");
         assert!(!text.contains("React"), "{text}");
         assert!(mxids.is_empty());
 
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn plan_marks_an_already_frozen_but_now_absent_assignee_as_away() {
         // The frozen assignment itself is untouched by the absence (see
-        // resolver::materialize's tests) — this only checks that the
+        // resolver::materialize's tests). This only checks that the
         // dashboard additionally surfaces it, so someone knows a
         // takeover/swap/assign is expected instead of Alice showing up.
         let alice = Person::new_matrix("@alice:example.org");
@@ -1340,8 +1340,8 @@ mod tests {
         // Reproduces the group-disappears-on-refresh bug: `refresh_pinned_plan`
         // and `announce_weekly_plan` used to select which groups to render via
         // `is_due` alone. Once the sole responsible person marked their task
-        // done, `is_due` flipped to false and the whole group — including the
-        // person who just finished — dropped out of the re-rendered message
+        // done, `is_due` flipped to false and the whole group (including the
+        // person who just finished) dropped out of the re-rendered message
         // instead of showing "✅ ... cleaned". `belongs_in_weekly_plan` is what
         // both call sites now filter on; this checks it end-to-end through
         // `build_weekly_plan`.
@@ -1405,7 +1405,7 @@ mod tests {
     // `person_label(p)`. Since `person_label` is what puts the raw
     // `@mxid:server` token into the text for `extract_mxids`/`mentionify_*`
     // to find, the completed line silently stopped producing a real Matrix
-    // mention (no `m.mentions` entry, no clickable pill) — it just showed
+    // mention (no `m.mentions` entry, no clickable pill). It just showed
     // plain display-name text, even though the person was still a room
     // member with a valid Matrix ID.
 
@@ -1546,7 +1546,7 @@ mod tests {
     #[test]
     fn weekly_plan_falls_back_to_plain_text_for_an_unresolvable_or_matrix_less_person() {
         // No Matrix ID at all: `person_label` falls back to the plain
-        // display name, so the text never contains an `@mxid` token — the
+        // display name, so the text never contains an `@mxid` token. The
         // message must still render without panicking and without a bogus
         // mention.
         let mut carol = Person::new_matrix("@carol:example.org");
@@ -1577,7 +1577,7 @@ mod tests {
         );
 
         // Even if a stale/unresolvable mxid ended up in the text, `names::labels`
-        // falls back to its localpart — `mentionify_with_names` must
+        // falls back to its localpart: `mentionify_with_names` must
         // still degrade gracefully (no panic, message still sendable) rather
         // than dropping the line or failing.
         let content = crate::format::mentionify_with_names(&raw_msg, &HashMap::new());
@@ -1589,7 +1589,7 @@ mod tests {
     fn refreshing_the_plan_to_completed_preserves_the_mention_across_the_edit() {
         // The same `build_weekly_plan` + `mentionify_with_names` pipeline is
         // reused by the initial send, `refresh_pinned_plan`'s edit path, and
-        // startup reconciliation's edit/recreate path — so a mention present
+        // startup reconciliation's edit/recreate path, so a mention present
         // before completion must still be present in the re-rendered text
         // used for the edit after completion.
         let dave = Person::new_matrix("@dave:example.org");
@@ -1623,7 +1623,7 @@ mod tests {
             .expect("m.mentions must be set before completion");
         assert!(mentions_open.user_ids.contains(&uid("@dave:example.org")));
 
-        // Dave marks his task done — this is what triggers the edit/refresh.
+        // Dave marks his task done. This is what triggers the edit/refresh.
         state.completions.push(crate::state::Completion {
             completed_on: None,
             group_id: gid.clone(),
@@ -1691,7 +1691,7 @@ mod tests {
 
     #[test]
     fn weekly_plan_reads_well_on_a_phone() {
-        // Rooms are an indented subtitle — of the group, or of each slot —
+        // Rooms are an indented subtitle (of the group, or of each slot)
         // instead of a long tail on every line; done lines keep their slot.
         let alice = Person::new_matrix("@alice:example.org");
         let bob = Person::new_named("Bob");
@@ -1771,7 +1771,7 @@ mod tests {
         let (plan, _) = build_weekly_plan(&state, year, week, &state.cleaning_groups);
         assert_eq!(
             plan.lines().nth(1),
-            Some("✨ All done for this week — thank you!"),
+            Some("✨ All done for this week. Thank you!"),
             "{plan}"
         );
     }
@@ -1790,7 +1790,7 @@ mod tests {
     fn effective_plan_body_prefers_a_bundled_edit_over_the_original_content() {
         // Exercises the actual JSON shape the homeserver bundles under
         // `unsigned.m.relations.m.replace` for an edited event (per the
-        // Matrix spec's event-replacement aggregation format) — this is what
+        // Matrix spec's event-replacement aggregation format). This is what
         // makes `reconcile_on_startup` see the *effective* (post-edit) body
         // instead of accidentally comparing against the stale original body.
         let evt = timeline_event_from_json(serde_json::json!({
@@ -1839,7 +1839,7 @@ mod tests {
     #[test]
     fn effective_plan_body_is_none_for_a_redacted_event() {
         // Redaction empties `content`, so neither the bundled-edit pointer
-        // nor the plain-body pointer resolves — this is what makes a
+        // nor the plain-body pointer resolves. This is what makes a
         // redacted (but still fetchable, so not a 404) event correctly fall
         // into the NeedsRecreate path rather than being misread as an empty
         // but "matching" body.
@@ -1999,13 +1999,13 @@ mod tests {
     fn reconcile_detects_drift_even_when_the_rendered_cache_agrees_with_state() {
         // Regression test: state says the expected plan text is A,
         // `weekly_plan_rendered` (the same-process "what we last believe we
-        // sent" cache) *also* says A — but the actual Matrix message has
+        // sent" cache) *also* says A, but the actual Matrix message has
         // since been edited/changed to B by something other than this bot
         // (or the cache is simply stale/wrong, e.g. after a state restore).
         // Before this fix, reconciliation compared the expected text only
         // against `weekly_plan_rendered` and would have reported
         // AlreadyConsistent here, leaving Matrix at B. It must instead be
-        // driven by the live fetched content — `decide_plan_reconcile_action`
+        // driven by the live fetched content: `decide_plan_reconcile_action`
         // doesn't even accept `weekly_plan_rendered` as an input, by design.
         let (mut state, year, week, week_key) = plan_reconcile_fixture();
         let (raw_msg, _) = build_weekly_plan(&state, year, week, &state.cleaning_groups);
@@ -2030,7 +2030,7 @@ mod tests {
         let (state, year, week, _) = plan_reconcile_fixture();
         let (raw_msg, _) = build_weekly_plan(&state, year, week, &state.cleaning_groups);
 
-        // First pass: Matrix shows something stale — needs a repair.
+        // First pass: Matrix shows something stale, needs a repair.
         assert_eq!(
             decide_plan_reconcile_action(&state, year, week, &raw_msg, Some("stale")),
             PlanReconcileAction::NeedsEdit {
@@ -2038,7 +2038,7 @@ mod tests {
             }
         );
 
-        // Once the repair is applied, Matrix shows exactly `raw_msg` —
+        // Once the repair is applied, Matrix shows exactly `raw_msg`:
         // repeated runs against that same live content must be a no-op,
         // never a repeat edit and never a duplicate message.
         for _ in 0..3 {

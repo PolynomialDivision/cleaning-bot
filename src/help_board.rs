@@ -1,6 +1,6 @@
 //! The help board: `!help post` (admin) puts a friendly overview in the
-//! cleaning room, with reactions that do things for whoever taps them —
-//! their next turns, the plan, their groups, a PDF, or a private chat.
+//! cleaning room, with reactions that do things for whoever taps them.
+//! Their next turns, the plan, their groups, a PDF, or a private chat.
 //!
 //! A tap is answered privately when there's a verified private chat with
 //! that person (`private`), else as a reply to the board, addressed to them.
@@ -10,7 +10,7 @@
 //! 💬 makes the bot invite the person to a new encrypted chat: the bot
 //! invites rather than waits to be invited, so it needs no invite allowlist
 //! for it. Once they join, it greets them there with their group selector
-//! and — with calendar feeds set up — their calendar link.
+//! and (with calendar feeds set up) their calendar link.
 
 use anyhow::Result;
 use mxbot_common::matrix_sdk::{
@@ -46,7 +46,7 @@ pub const BUTTONS: [(&str, Action); 5] = [
     ("💬", Action::PrivateChat),
 ];
 
-/// The action of reaction `key` — with or without the emoji variation
+/// The action of reaction `key`, with or without the emoji variation
 /// selector some clients leave out.
 pub fn action_for(key: &str) -> Option<Action> {
     let bare = |s: &str| s.replace('\u{fe0f}', "");
@@ -62,12 +62,12 @@ pub fn board_text() -> String {
      I keep track of whose turn it is, give you a nudge when it's yours, \
      and do a tiny happy dance when it's done ✨\n\
      \n\
-     📋 Every Monday the plan gets pinned up top — react ✅ on it when your part is done.\n\
+     📋 Every Monday the plan gets pinned up top. React ✅ on it when your part is done.\n\
      ⏰ When your turn starts or is about to run out, I'll send a short reminder.\n\
-     🆘 Can't make it? React 🆘 on the plan — someone can take your turn or swap theirs for it.\n\
+     🆘 Can't make it? React 🆘 on the plan. Someone can take your turn or swap theirs for it.\n\
      \n\
      **Tap a button below and I'll do it for you:**\n\
-     📅 your next turns — swap one, or say you can't make it\n\
+     📅 your next turns: swap one, or say you can't make it\n\
      📋 the plan for the next weeks\n\
      👥 join or leave groups\n\
      📄 a printable plan (PDF)\n\
@@ -111,7 +111,7 @@ pub async fn run(
                 room,
                 board,
                 user,
-                "😕 I couldn't start a private chat with you — try again later, or invite me yourself.",
+                "😕 I couldn't start a private chat with you.\n🔁 Try again later, or invite me yourself.",
             )
             .await;
         }
@@ -121,7 +121,7 @@ pub async fn run(
     let target = private.as_ref().unwrap_or(room);
     let result: Result<Option<String>> = match action {
         Action::Next => {
-            // The menu of their turns — the plain list when they have none.
+            // The menu of their turns. The plain list when they have none.
             let relation = private
                 .is_none()
                 .then(|| Relation::Reply(Reply::with_event_id(board.clone())));
@@ -156,7 +156,7 @@ pub async fn run(
         Ok(None) => return,
         Err(e) => {
             tracing::warn!("Help board {action:?} for {user} failed: {e}");
-            "😕 That didn't work — try the command instead.".to_owned()
+            "😕 That didn't work. Try the command instead.".to_owned()
         }
     };
     match private {
@@ -176,7 +176,7 @@ async fn answer(room: &Room, board: &OwnedEventId, user: &UserId, text: &str) {
     }
 }
 
-/// `text` for `user`, as a reply to the board — addressed to them, so they
+/// `text` for `user`, as a reply to the board: addressed to them, so they
 /// see it's theirs.
 fn answer_content(board: &OwnedEventId, user: &UserId, text: &str) -> RoomMessageEventContent {
     let mut content = format::intentional(format::mentionify(&format!("{user}\n{text}")));
@@ -185,7 +185,7 @@ fn answer_content(board: &OwnedEventId, user: &UserId, text: &str) -> RoomMessag
 }
 
 /// The verified private chat with `user`, if there is one: one the bot
-/// opened for them, or another direct chat — either only if it passes the
+/// opened for them, or another direct chat: either only if it passes the
 /// `private` check right now.
 pub async fn private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId) -> Option<Room> {
     let known = ctx
@@ -204,12 +204,12 @@ pub async fn private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId)
     None
 }
 
-/// Say hello in the private chat with `user` — or, without one yet, invite
+/// Say hello in the private chat with `user`, or, without one yet, invite
 /// them to a new encrypted one (greeted once they join, `greet_on_join`).
 async fn open_private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId) -> Result<()> {
     if let Some(chat) = private_chat(ctx, client, user).await {
         let content = format::intentional(format::mentionify(
-            "👋 Here I am! Ask me anything you'd ask in the cleaning room — !next · !plan · !mygroups · !done · !ical",
+            "👋 Here I am! Ask me anything you'd ask in the cleaning room:\n!next · !plan · !mygroups · !done · !ical",
         ));
         chat.send(content).await?;
         return Ok(());
@@ -244,7 +244,7 @@ async fn open_private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId
 }
 
 /// `user` joined `room`: if it's the private chat the bot opened for them,
-/// greet them there — once.
+/// greet them there: once.
 pub async fn greet_on_join(ctx: &BotContext, room: &Room, user: &OwnedUserId) {
     let ours = ctx
         .state
@@ -277,7 +277,7 @@ pub async fn greet_on_join(ctx: &BotContext, room: &Room, user: &OwnedUserId) {
 }
 
 fn private_hello() -> String {
-    "👋 Psst — it's just us here!\n\
+    "👋 Psst, it's just us here!\n\
      Ask me what you'd ask in the cleaning room, nobody else sees it:\n\
      📅 !next · 📋 !plan · ✅ !done · 🗓 !ical · ❓ !help\n\
      Your groups (and your calendar link) come right below 👇"

@@ -39,7 +39,9 @@ pub(crate) async fn cmd_groups_slot(
     match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
         Some("add") => cmd_addslot(ctx, sender, &args[1..]).await,
         Some("remove") => cmd_removeslot(ctx, sender, &args[1..]).await,
-        _ => Ok(Some("Usage: !groups slot add|remove <group> <slot>".into())),
+        _ => Ok(Some(
+            "💡 Usage: !groups slot add|remove <group> <slot>".into(),
+        )),
     }
 }
 
@@ -52,7 +54,7 @@ pub(crate) async fn cmd_groups_room(
         Some("add") => cmd_addroom(ctx, sender, &args[1..]).await,
         Some("remove") => cmd_removeroom(ctx, sender, &args[1..]).await,
         _ => Ok(Some(
-            "Usage: !groups room add|remove <group> [<slot>] <room>".into(),
+            "💡 Usage: !groups room add|remove <group> [<slot>] <room>".into(),
         )),
     }
 }
@@ -67,7 +69,7 @@ pub(crate) async fn cmd_weight(
         2 => cmd_setgroupweight(ctx, sender, args).await,
         3 => cmd_setroomweight(ctx, sender, args).await,
         _ => Ok(Some(
-            "Usage: !groups weight <group> [<room>] <factor>  (e.g. 2.0 = twice the work; quote names with spaces)".into(),
+            "💡 Usage: !groups weight <group> [<room>] <factor>  (e.g. 2.0 = twice the work; quote names with spaces)".into(),
         )),
     }
 }
@@ -84,7 +86,7 @@ pub(crate) async fn cmd_addperson(
         (Some(n), Some(f)) => (n.to_string(), f.to_string()),
         _ => {
             return Ok(Some(
-                "Usage: !member add <@user:server | name> <group>".into(),
+                "💡 Usage: !member add <@user:server | name> <group>".into(),
             ))
         }
     };
@@ -148,7 +150,7 @@ pub(crate) async fn cmd_removeperson(
         (Some(n), Some(f)) => (n.to_string(), f.to_string()),
         _ => {
             return Ok(Some(
-                "Usage: !member remove <@user:server | name> <group>".into(),
+                "💡 Usage: !member remove <@user:server | name> <group>".into(),
             ))
         }
     };
@@ -196,11 +198,11 @@ pub(crate) async fn cmd_removeperson(
 
 // ── Admin: !member link <name> <@user:server> ─────────────────────────────────
 //
-// Normally refuses when `name` already has a Matrix ID linked — but if that
+// Normally refuses when `name` already has a Matrix ID linked, but if that
 // *existing* matrix_id doesn't even parse as a valid Matrix user ID (data
 // corruption: a manual edit, an old bug, ...), there is nothing legitimate to
 // protect, so this repairs it in place instead of refusing. A person whose
-// existing matrix_id already parses correctly is never touched this way —
+// existing matrix_id already parses correctly is never touched this way,
 // only an invalid one may be replaced, never a valid one overwritten by
 // another.
 
@@ -213,7 +215,7 @@ pub(crate) async fn cmd_linkmatrix(
     require_admin(ctx, sender)?;
     let (name, mxid) = match (args.first(), args.get(1)) {
         (Some(n), Some(m)) => (n.to_string(), m.to_string()),
-        _ => return Ok(Some("Usage: !member link <name> <@user:server>".into())),
+        _ => return Ok(Some("💡 Usage: !member link <name> <@user:server>".into())),
     };
     if !mxid.starts_with('@') || !mxid.contains(':') {
         return Ok(Some(format!(
@@ -222,9 +224,9 @@ pub(crate) async fn cmd_linkmatrix(
     }
 
     // Fetch the Matrix display name immediately so the record looks the same
-    // as one created via !member add from the start — from this room, else
+    // as one created via !member add from the start, from this room, else
     // their global profile (the bot need not share a room with them). This
-    // is the only step that needs a live `Room` — everything else is pure
+    // is the only step that needs a live `Room`. Everything else is pure
     // state mutation, split out into `apply_linkmatrix` so that logic
     // (including the repair path) is directly unit-testable without a `Room`.
     let display_name = crate::names::live(
@@ -239,8 +241,8 @@ pub(crate) async fn cmd_linkmatrix(
     apply_linkmatrix(ctx, &name, &mxid, display_name.as_deref()).await
 }
 
-/// True when `person_id` shows any sign of actually being used — group
-/// membership, a slot assignment, or a completion — as opposed to an empty
+/// True when `person_id` shows any sign of actually being used (group
+/// membership, a slot assignment, or a completion) as opposed to an empty
 /// placeholder (e.g. a stub someone created by joining a group themselves
 /// before an admin linked them). Used to disambiguate between several people
 /// sharing a display name; deliberately broader than the stub-merge check
@@ -264,8 +266,8 @@ pub(crate) fn person_has_activity(state: &crate::state::State, person_id: &str) 
 
 /// Room-independent core of `!member link`: resolves `name`, decides whether
 /// to link fresh, repair an invalid existing `matrix_id`, or refuse, then
-/// performs the stub auto-merge and the actual `PersonMatrixLinked` event —
-/// everything `cmd_linkmatrix` does except the live display-name fetch
+/// performs the stub auto-merge and the actual `PersonMatrixLinked` event.
+/// Everything `cmd_linkmatrix` does except the live display-name fetch
 /// (passed in as `fetched_display_name` so this stays testable without a
 /// `Room`).
 pub(crate) async fn apply_linkmatrix(
@@ -279,7 +281,7 @@ pub(crate) async fn apply_linkmatrix(
 
         // `name` can match more than one person (e.g. a real participant
         // with a corrupted matrix_id and an unrelated stub that happens to
-        // share their display name) — `find_person` alone would just return
+        // share their display name): `find_person` alone would just return
         // whichever comes first in storage order, which is exactly what let
         // an unrelated already-linked stub silently block repairing the real
         // participant. Consider every match instead.
@@ -289,11 +291,11 @@ pub(crate) async fn apply_linkmatrix(
             .filter(|p| p.id == name || p.matches(name))
             .collect();
         let Some(&first) = matches.first() else {
-            return Ok(Some(format!("No person named «{name}» found.")));
+            return Ok(Some(format!("🔍 No person named «{name}» found.")));
         };
 
         // Only records whose *current* matrix_id is missing or doesn't even
-        // parse are candidates for linking/repair — a match that already has
+        // parse are candidates for linking/repair. A match that already has
         // a valid, different matrix_id is never a target for this command.
         let repairable: Vec<&Person> = matches
             .iter()
@@ -315,7 +317,7 @@ pub(crate) async fn apply_linkmatrix(
             chosen
         } else {
             // More than one same-named record needs a link. Auto-pick only
-            // if exactly one of them shows real activity — an empty
+            // if exactly one of them shows real activity. An empty
             // placeholder among them is skipped, never preferred. Two (or
             // more) with real activity is genuine ambiguity: refuse rather
             // than silently guess which one the admin meant.
@@ -326,7 +328,7 @@ pub(crate) async fn apply_linkmatrix(
                 .collect();
             match real.as_slice() {
                 [only] => *only,
-                [] => chosen, // none has activity — equally arbitrary, pick deterministically (first by storage order)
+                [] => chosen, // none has activity: equally arbitrary, pick deterministically (first by storage order)
                 _ => {
                     let ids = real
                         .iter()
@@ -335,7 +337,7 @@ pub(crate) async fn apply_linkmatrix(
                         .join(", ");
                     return Ok(Some(format!(
                         "Multiple people named «{name}» need a Matrix link and more than one has real \
-                         activity (group membership, an assignment, or a completion) — refusing to guess. \
+                         activity (group membership, an assignment, or a completion): refusing to guess. \
                          Re-run with the exact PersonId instead of the name: {ids}"
                     )));
                 }
@@ -413,11 +415,11 @@ pub(crate) async fn cmd_addfloor(
     require_admin(ctx, sender)?;
     let name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !groups add <name>".into())),
+        None => return Ok(Some("💡 Usage: !groups add <name>".into())),
     };
     let mut state = ctx.state.lock().await;
     if state.group_by_name(&name).is_some() {
-        return Ok(Some(format!("Group «{name}» already exists.")));
+        return Ok(Some(format!("ℹ️ Group «{name}» already exists.")));
     }
     let group_id = uuid::Uuid::new_v4().to_string();
     state.apply_event(DomainEvent::GroupCreated {
@@ -453,7 +455,7 @@ pub(crate) async fn cmd_removefloor(
     let (name, confirmed) = match args {
         [name] => (name.to_string(), false),
         [name, confirm] if confirm.eq_ignore_ascii_case("confirm") => (name.to_string(), true),
-        _ => return Ok(Some("Usage: !groups remove <name> [confirm]".into())),
+        _ => return Ok(Some("💡 Usage: !groups remove <name> [confirm]".into())),
     };
     let mut state = ctx.state.lock().await;
     let group = match state.group_by_name(&name) {
@@ -494,7 +496,7 @@ pub(crate) async fn cmd_removefloor(
 // ── Admin: !plan reset <group> ─────────────────────────────────────────────────
 // Clears all future (>= today) slot assignments for a group and rematerializes.
 // Use this after the initial setup when you've added all members and want the
-// rotation to distribute fairly from now on.  Safe to run at any time — past
+// rotation to distribute fairly from now on.  Safe to run at any time: past
 // completed weeks are never touched.
 
 pub(crate) async fn cmd_resetplan(
@@ -505,7 +507,7 @@ pub(crate) async fn cmd_resetplan(
     require_admin(ctx, sender)?;
     let group_name = match args.first() {
         Some(n) => n.to_string(),
-        None => return Ok(Some("Usage: !plan reset <group>".into())),
+        None => return Ok(Some("💡 Usage: !plan reset <group>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
@@ -531,7 +533,7 @@ pub(crate) async fn cmd_addslot(
     require_admin(ctx, sender)?;
     let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
         (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
-        _ => return Ok(Some("Usage: !groups slot add <group> <slot>".into())),
+        _ => return Ok(Some("💡 Usage: !groups slot add <group> <slot>".into())),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
@@ -569,7 +571,7 @@ pub(crate) async fn cmd_removeslot(
     require_admin(ctx, sender)?;
     let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
         (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
-        _ => return Ok(Some("Usage: !groups slot remove <group> <slot>".into())),
+        _ => return Ok(Some("💡 Usage: !groups slot remove <group> <slot>".into())),
     };
     let mut state = ctx.state.lock().await;
     let (group_id, slot_id) = match state.group_by_name(&group_name) {
@@ -604,7 +606,7 @@ pub(crate) async fn cmd_addroom(
     require_admin(ctx, sender)?;
     if args.len() < 2 {
         return Ok(Some(
-            "Usage: !groups room add <group> [<slot>] <room>".into(),
+            "💡 Usage: !groups room add <group> [<slot>] <room>".into(),
         ));
     }
     let group_name = args[0].to_string();
@@ -652,7 +654,7 @@ pub(crate) async fn cmd_removeroom(
     require_admin(ctx, sender)?;
     if args.len() < 2 {
         return Ok(Some(
-            "Usage: !groups room remove <group> [<slot>] <room>".into(),
+            "💡 Usage: !groups room remove <group> [<slot>] <room>".into(),
         ));
     }
     let group_name = args[0].to_string();
@@ -694,15 +696,14 @@ pub(crate) async fn cmd_setroomweight(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
-    let (group_name, room_name, weight_str) = match (args.first(), args.get(1), args.get(2)) {
-        (Some(g), Some(r), Some(w)) => (*g, *r, *w),
-        _ => {
-            return Ok(Some(
-                "Usage: !groups weight <group> <room> <factor>  (e.g. 2.0 for twice the load)"
+    let (group_name, room_name, weight_str) =
+        match (args.first(), args.get(1), args.get(2)) {
+            (Some(g), Some(r), Some(w)) => (*g, *r, *w),
+            _ => return Ok(Some(
+                "💡 Usage: !groups weight <group> <room> <factor>  (e.g. 2.0 for twice the load)"
                     .into(),
-            ))
-        }
-    };
+            )),
+        };
     let weight: f64 = match weight_str.parse() {
         Ok(w) if w > 0.0 => w,
         _ => {
@@ -780,7 +781,7 @@ pub(crate) async fn cmd_setgroupweight(
         (Some(g), Some(w)) => (*g, *w),
         _ => {
             return Ok(Some(
-                "Usage: !groups weight <group> <factor>  (e.g. 2.0 for twice the load)".into(),
+                "💡 Usage: !groups weight <group> <factor>  (e.g. 2.0 for twice the load)".into(),
             ))
         }
     };
@@ -808,12 +809,12 @@ pub(crate) async fn cmd_setgroupweight(
 //
 // Records an `Absence`, which `resolver::materialize` reads: for any
 // not-yet-frozen due week that falls in the absence range, the person is
-// skipped when picking who's next — passed over in place, not removed from
+// skipped when picking who's next: passed over in place, not removed from
 // or requeued in `rotation_queue`, so they keep their turn and are simply
 // due again once the absence ends (see `resolver::materialize`'s tests).
 //
 // Deliberately does NOT touch weeks that are already frozen (existing
-// `SlotAssignment`s) — same "automatic rotation never rewrites an
+// `SlotAssignment`s): same "automatic rotation never rewrites an
 // already-frozen week" rule as everywhere else. If the person is already
 // assigned for the current week when this is called, that assignment
 // stands; get someone else onto it with !takeover, !swap, or !plan assign.
@@ -828,7 +829,7 @@ pub(crate) async fn cmd_absent(
         Some(u) => u.to_string(),
         None => {
             return Ok(Some(
-                "Usage: !member away <person> [weeks]  (default 4)".into(),
+                "💡 Usage: !member away <person> [weeks]  (default 4)".into(),
             ))
         }
     };
@@ -869,7 +870,7 @@ pub(crate) async fn cmd_absent(
 
     let end = add_weeks(from_y, from_w, weeks as i64);
 
-    // Weeks already planned stay as they are — point out the ones still on
+    // Weeks already planned stay as they are: point out the ones still on
     // this person so someone can take them over.
     let mut still_planned: Vec<((i32, u32), String)> = state
         .slot_assignments
@@ -924,7 +925,7 @@ pub(crate) async fn cmd_back(
     require_admin(ctx, sender)?;
     let query = match args.first() {
         Some(u) => u.to_string(),
-        None => return Ok(Some("Usage: !member back <person>".into())),
+        None => return Ok(Some("💡 Usage: !member back <person>".into())),
     };
     let mut state = ctx.state.lock().await;
     let person_id = match lookup_person(&state, &query) {
@@ -958,7 +959,7 @@ pub(crate) async fn cmd_groups_rhythm(
     args: &[&str],
 ) -> Result<Option<String>> {
     let usage =
-        "Usage: !groups rhythm <group> weekly | <N>x | every <N> | <day-day…> | <weekdays…>  \
+        "💡 Usage: !groups rhythm <group> weekly | <N>x | every <N> | <day-day…> | <weekdays…>  \
                  (e.g. `2x` = Mon–Tue + Thu–Fri, `every 2`, `mon-tue thu-fri`, `mon thu`)";
     let Some((&group_name, spec)) = args.split_first() else {
         return Ok(Some(usage.into()));

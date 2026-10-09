@@ -36,7 +36,7 @@ pub async fn tex_to_pdf(tex: &str) -> Result<Vec<u8>> {
     )
     .await
     .context("PDF rendering timed out")?
-    .context("Failed to spawn tectonic — is it installed?")?;
+    .context("Failed to spawn tectonic, is it installed?")?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

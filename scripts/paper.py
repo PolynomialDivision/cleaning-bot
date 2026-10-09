@@ -18,7 +18,7 @@ homography = legacy.homography
 
 #: Characters TeX must not see raw. The sheet is compiled by Tectonic
 #: (XeTeX) in production and pdflatex in tests; with T1-encoded fonts, XeTeX
-#: prints a raw "·" as "ů" and drops a raw "–". So the source stays ASCII —
+#: prints a raw "·" as "ů" and drops a raw "–". So the source stays ASCII:
 #: the same table as `tex_esc` in src/pdf.rs. Other characters beyond
 #: Latin-1 have no glyph in these fonts and are left out.
 TEX = {'\\': r'\textbackslash{}', '&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#',
@@ -64,7 +64,7 @@ ROOM_ICONS = {'toilet': r'\faToilet', 'shower': r'\faShower', 'kitchen': r'\faUt
 
 def rooms_tex(page):
     """The header's rooms: per slot, "Colbe: [toilet] 3rd · [toilet] 4th",
-    "Scharni: [toilet] [shower]" — a symbol instead of the word for the
+    "Scharni: [toilet] [shower]". A symbol instead of the word for the
     room's kind. A slot is never broken across lines. Manifests from before
     room groups show their plain list."""
     groups = page.get('room_groups') or []
@@ -92,7 +92,7 @@ def rooms_tex(page):
 
 
 def fit(width, text):
-    """`text` (TeX) scaled down to `width` mm if it is wider — a long name
+    """`text` (TeX) scaled down to `width` mm if it is wider. A long name
     or word must never run over a column line."""
     return fr'\fit{{{width}mm}}{{{text}}}'
 
@@ -121,7 +121,7 @@ def short_name(name, limit=60):
 
 def name_size(name):
     """Font size for a name in the Who column (24mm): one line up to ~18
-    characters, two up to ~34, else three smaller ones — a row has room."""
+    characters, two up to ~34, else three smaller ones. A row has room."""
     return 9.5 if len(name) <= 18 else 8 if len(name) <= 34 else 7
 
 
@@ -284,9 +284,9 @@ def targets(im, dark, light, white_share, ring_share):
 def page_corners(im, qr):
     """The page's four corner targets in the photo, in V2_FIDUCIALS' order,
     found with the QR code's centre `qr` (which lies at a known place near
-    the bottom-right one): of more than four targets — a neighbouring sheet
-    in the photo — the four that make a page with it; of three — one in a
-    shadow — the fourth where the three and the QR code put it."""
+    the bottom-right one): of more than four targets (a neighbouring sheet
+    in the photo), the four that make a page with it; of three (one in a
+    shadow), the fourth where the three and the QR code put it."""
     found = sorted(fiducial_candidates(im), key=lambda p: math.dist(p, qr))[:8]
     qr_mm = tuple(V2_QR_CENTER)
     best = None
@@ -352,7 +352,7 @@ def plausible(quad):
 
 
 def flatten(im):
-    """Even out uneven light — a phone's shadow over a corner, a lamp on one
+    """Even out uneven light. A phone's shadow over a corner, a lamp on one
     side: divide each pixel by the paper's brightness around it. Without it,
     paper in a shadow is darker than the fixed thresholds' "dark" and the QR
     code and a corner target vanish. The neighbourhood (3% of the photo's
@@ -417,7 +417,7 @@ MARK_SPAN = .4
 def outline(size):
     """A box's printed outline (mm), and what is read as its inside (this
     far within the outline) and as the clean paper around it (this band
-    outside) — clear of the outline even where a small, compressed photo
+    outside): clear of the outline even where a small, compressed photo
     blurs it. Boxes of 6mm and more (new sheets) have a bold 0.4mm outline,
     smaller ones (sheets printed before) a 0.22mm one."""
     if size >= 6:
@@ -445,7 +445,7 @@ def box_state(arr, field):
 
     The printed outline is registered locally first (within REGISTRATION
     pixels of where `locate` found it, at sub-pixel precision) and must be
-    continuous on all four sides, with clean paper around it — a missing
+    continuous on all four sides, with clean paper around it. A missing
     outline is never read as an empty box. Then, ignoring the outline, the
     share of ink inside decides; a speck too small to be a stroke is
     unclear."""
@@ -695,7 +695,7 @@ def span(start, end, years=False):
 
 def window(start, end):
     """When a duty is due: the dates for a whole week (Mon–Sun), else the
-    weekdays first — 'Mon–Tue · 28–29 Sep', 'Thu · 1 Oct'."""
+    weekdays first: 'Mon–Tue · 28–29 Sep', 'Thu · 1 Oct'."""
     if start.weekday() == 0 and (end-start).days == 6:
         return span(start, end)
     days = f"{start:%a}" if start == end else f"{start:%a}–{end:%a}"

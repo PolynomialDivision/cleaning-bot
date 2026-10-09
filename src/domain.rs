@@ -1,7 +1,7 @@
 //! Stable domain types.
 //!
 //! All scheduling references use opaque UUIDs (PersonId, GroupId).
-//! Display names and Matrix IDs are metadata only — never used as identity keys.
+//! Display names and Matrix IDs are metadata only, never used as identity keys.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,7 @@ pub struct CleaningGroup {
     pub id: GroupId,
     pub name: String,
     /// Current members of this group. Order is cosmetic (used only to seed
-    /// `rotation_queue` for a brand-new group) — the *turn* order lives in
+    /// `rotation_queue` for a brand-new group). The *turn* order lives in
     /// `rotation_queue`, not here.
     pub member_ids: Vec<PersonId>,
     /// Persisted round-robin turn queue: front = who gets the next
@@ -109,7 +109,7 @@ pub struct CleaningGroup {
     /// through that cycle (see `commands::apply_group_join`); leaving simply
     /// drops them. Either way the running cycle stays as it was instead of
     /// reshuffling everyone via a stateless `index % member_count` formula.
-    /// `#[serde(default)]` so existing `state.json` files upgrade seamlessly —
+    /// `#[serde(default)]` so existing `state.json` files upgrade seamlessly:
     /// `resolver::reconcile_queue` self-heals/seeds it on first use.
     #[serde(default)]
     pub rotation_queue: Vec<PersonId>,
@@ -141,7 +141,7 @@ fn default_active() -> bool {
     true
 }
 
-/// Default workload multiplier — no adjustment.
+/// Default workload multiplier. No adjustment.
 pub fn default_weight() -> f64 {
     1.0
 }
@@ -218,8 +218,8 @@ pub fn verify_calendar_token(token_hex: &str, stored_hash: &str) -> bool {
 
 // ── Slot assignment resolver types ───────────────────────────────────────────
 
-/// How a `SlotAssignment` was created. Purely descriptive/audit metadata —
-/// nothing in the scheduling or eligibility logic branches on it; it only
+/// How a `SlotAssignment` was created. Purely descriptive/audit metadata.
+/// Nothing in the scheduling or eligibility logic branches on it; it only
 /// answers "why does this person clean this week" for humans reading
 /// `!status`, the pinned plan, or the event log.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -228,7 +228,7 @@ pub enum AssignmentSource {
     /// Produced by `resolver::materialize` filling a not-yet-frozen due week.
     #[default]
     RoundRobin,
-    /// Legacy tag from before sources were split out below — `!plan assign`,
+    /// Legacy tag from before sources were split out below: `!plan assign`,
     /// `!takeover` and accepted swaps all wrote this. Kept only so an
     /// existing `state.json` / event log with old `"manual"` entries still
     /// deserializes; nothing writes it anymore.
@@ -265,13 +265,13 @@ pub struct SlotAssignment {
 
 // ── Deterministic assignment UID ──────────────────────────────────────────────
 
-/// Fixed namespace UUID for this bot — never changes.
+/// Fixed namespace UUID for this bot, never changes.
 const ASSIGNMENT_NS: Uuid = Uuid::from_bytes([
     0xc1, 0xea, 0x3b, 0x07, 0xc1, 0xea, 0x3b, 0x07, 0xc1, 0xea, 0x3b, 0x07, 0xc1, 0xea, 0x3b, 0x07,
 ]);
 
 /// Stable UUID v5 for a (group, [slot,] year, week, assignee) tuple.
-/// Identical inputs always produce the same UID — no storage required.
+/// Identical inputs always produce the same UID. No storage required.
 pub fn assignment_uid(group_id: &str, year: i32, week: u32, person_id: &str) -> String {
     let name = format!("{group_id}:{year}:W{week:02}:{person_id}");
     Uuid::new_v5(&ASSIGNMENT_NS, name.as_bytes()).to_string()

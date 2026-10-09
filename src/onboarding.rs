@@ -1,14 +1,14 @@
 //! The welcome and the group selector.
 //!
-//! Every Matrix user gets one welcome, ever — the first time they show up
+//! Every Matrix user gets one welcome, ever. The first time they show up
 //! here: joining the room, or their first command or reaction in it. That
 //! holds whether or not an admin added or linked them before; the groups
 //! they're already in show as joined. The welcome *is* a group selector:
 //! the active groups, numbered 1️⃣ 2️⃣ 3️⃣ …, theirs marked ✅. `!mygroups`
 //! posts a fresh selector (without the intro) any time.
 //!
-//! Each tap on a number toggles that group — join if they're not in it,
-//! leave if they are — so it works the same however they got in. The
+//! Each tap on a number toggles that group: join if they're not in it,
+//! leave if they are, so it works the same however they got in. The
 //! selector is edited to show the new state, with a one-line confirmation
 //! (or why not) in it; no extra message. Once the tap is saved the bot
 //! redacts the reaction (`consume_tap`), so the same number can be tapped
@@ -46,7 +46,7 @@ use crate::{
 /// The numbers to tap, in order; groups beyond them aren't offered.
 pub const NUMBERS: [&str; 10] = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
 
-/// Whether `user_id` still gets their welcome — and from now on not
+/// Whether `user_id` still gets their welcome, and from now on not
 /// anymore. Persist the state before sending, so a restart can't send it
 /// twice.
 pub fn claim_welcome(state: &mut State, user_id: &str) -> bool {
@@ -91,7 +91,7 @@ pub fn selector_text(state: &State, selector: &GroupSelector) -> String {
     selector_text_with(state, selector, &crate::schedule::build_schedule(state, 52))
 }
 
-/// `selector_text` with the schedule already built — one for many selectors.
+/// `selector_text` with the schedule already built. One for many selectors.
 fn selector_text_with(
     state: &State,
     selector: &GroupSelector,
@@ -111,7 +111,7 @@ fn selector_text_with(
         "Tap a number to join or leave a group:".to_owned()
     } else {
         let who = person.map_or_else(|| view::user_id_link(&selector.user_id), view::user_link);
-        format!("🏠 Groups for {who} — tap a number to join or leave:")
+        format!("🏠 Groups for {who}\n👆 Tap a number to join or leave:")
     };
 
     let mut choices = Vec::new();
@@ -128,10 +128,10 @@ fn selector_text_with(
         });
     }
     if state.cleaning_groups.iter().filter(|g| g.is_active).count() > NUMBERS.len() {
-        choices.push("More groups: !groups · !join <group>".into());
+        choices.push("➕ More groups: !groups · !join <group>".into());
     }
     if choices.is_empty() {
-        lines.push("There are no cleaning groups yet — an admin will set them up.".into());
+        lines.push("🤷 There are no cleaning groups yet. An admin will set them up.".into());
     } else {
         lines.push(tap_line);
         lines.extend(choices);
@@ -160,7 +160,9 @@ fn selector_text_with(
         }
     }
     lines.push(match &selector.calendar_url {
-        Some(url) => format!("🗓 Your calendar: [subscribe]({url}) — add it in your calendar app"),
+        Some(url) => {
+            format!("🗓 Your calendar: [subscribe]({url})\n📲 Add it in your calendar app.")
+        }
         None => format!(
             "🗓 Your calendar: send !ical to {} in a private chat",
             selector
@@ -173,7 +175,7 @@ fn selector_text_with(
     lines.join("\n")
 }
 
-/// The last tap's confirmation (or why it did nothing) — until the
+/// The last tap's confirmation (or why it did nothing), until the
 /// selector owner's memberships change some other way (`!join`, an admin,
 /// another selector), when it would only confuse.
 fn current_feedback<'a>(state: &State, selector: &'a GroupSelector) -> Option<&'a str> {
@@ -240,7 +242,7 @@ pub fn tap(
     Ok(reply)
 }
 
-/// A redacted reaction: if it was a tap, undo what it did — as long as
+/// A redacted reaction: if it was a tap, undo what it did, as long as
 /// that still applies (they may have left by command since). Returns the
 /// selector's event ID and the confirmation to reply with.
 pub fn untap(
@@ -310,7 +312,7 @@ fn toggle(
     })
 }
 
-/// Which number a reaction key is — with or without the emoji variation
+/// Which number a reaction key is, with or without the emoji variation
 /// selector some clients leave out.
 pub fn number_index(key: &str) -> Option<usize> {
     let bare = |s: &str| s.replace('\u{fe0f}', "");
@@ -318,7 +320,7 @@ pub fn number_index(key: &str) -> Option<usize> {
 }
 
 /// Mark everyone as welcomed who has used the bot before welcomes were
-/// tracked per user — the old greeting's list, plus anyone who has done,
+/// tracked per user. The old greeting's list, plus anyone who has done,
 /// swapped or taken over a turn, reacted to a plan or made a calendar
 /// feed. Members who were only added or linked by an admin still get
 /// theirs. Runs once; returns whether anything changed.
@@ -516,7 +518,7 @@ pub fn in_room(selector: &GroupSelector, room_id: &RoomId, ctx: &BotContext) -> 
     }
 }
 
-/// `refresh_selectors` in every room that has one — after a change made
+/// `refresh_selectors` in every room that has one, after a change made
 /// in one room (a private chat, say) that selectors elsewhere show.
 pub async fn refresh_all_selectors(ctx: &BotContext, client: &mxbot_common::matrix_sdk::Client) {
     let rooms: std::collections::BTreeSet<String> = ctx
@@ -543,7 +545,7 @@ pub async fn refresh_all_selectors(ctx: &BotContext, client: &mxbot_common::matr
     }
 }
 
-/// Edit every selector whose text no longer matches the state — after a
+/// Edit every selector whose text no longer matches the state, after a
 /// tap, any membership command, and on startup. Unchanged ones are left
 /// alone; an edit never notifies anyone again.
 pub async fn refresh_selectors(ctx: &BotContext, room: &Room) {
