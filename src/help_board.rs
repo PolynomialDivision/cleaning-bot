@@ -230,7 +230,13 @@ async fn open_private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId
             return Ok(());
         }
     }
-    let room = client.create_dm(user).await?;
+    // The person gets the default power level: only the bot can invite.
+    let room = mxbot_common::private::create_private_dm(
+        client,
+        user,
+        &mxbot_common::private::PREFERRED_ROOM_VERSIONS,
+    )
+    .await?;
     let mut state = ctx.state.lock().await;
     state.private_chats.insert(
         user.to_string(),

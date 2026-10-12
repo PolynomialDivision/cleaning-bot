@@ -4,34 +4,10 @@ use crate::{
     state::State,
     BotContext,
 };
-use mxbot_common::matrix_sdk::{
-    ruma::{api::client::state::get_state_events, OwnedUserId},
-    Room, RoomState,
+use mxbot_common::{
+    matrix_sdk::{ruma::OwnedUserId, Room, RoomState},
+    private,
 };
-use serde_json::Value;
-
-pub(crate) fn private_members(events: &[Value], bot: &str, user: &str) -> bool {
-    let active: Vec<_> = events
-        .iter()
-        .filter(|e| e["type"] == "m.room.member")
-        .filter(|e| {
-            matches!(
-                e["content"]["membership"].as_str(),
-                Some("join" | "invite" | "knock")
-            )
-        })
-        .collect();
-    bot != user
-        && active.len() == 2
-        && [bot, user].iter().all(|id| {
-            active
-                .iter()
-                .any(|e| e["state_key"] == *id && e["content"]["membership"] == "join")
-        })
-        && events.iter().any(|e| {
-            e["type"] == "m.room.encryption" && e["content"]["algorithm"] == "m.megolm.v1.aes-sha2"
-        })
-}
 
 /// Fetch current state on every request. Fail closed on errors, third parties,
 /// pending invitations, loss of trusted-room membership, or missing encryption.
@@ -43,45 +19,14 @@ pub async fn authorized(ctx: &BotContext, room: &Room, sender: &OwnedUserId) -> 
     let Some(bot) = client.user_id() else {
         return false;
     };
-    let Some(main) = client.get_room(&ctx.room_id) else {
-        return false;
-    };
-    if main.state() != RoomState::Joined {
-        return false;
-    }
-    let Ok(trusted) = client
-        .send(get_state_events::v3::Request::new(ctx.room_id.clone()))
-        .await
-    else {
-        return false;
-    };
-    let joined = |id: &str| {
-        trusted.room_state.iter().any(|e| {
-            let Ok(v) = e.deserialize_as::<Value>() else {
-                return false;
-            };
-            v["type"] == "m.room.member"
-                && v["state_key"] == id
-                && v["content"]["membership"] == "join"
-        })
-    };
-    if !joined(sender.as_str()) || !joined(bot.as_str()) {
+    // The bot itself must still be in the cleaning room, asked of the server.
+    if !matches!(
+        private::is_joined_now(&client, &ctx.room_id, bot).await,
+        Ok(true)
+    ) {
         return false;
     }
-    let Ok(private) = client
-        .send(get_state_events::v3::Request::new(
-            room.room_id().to_owned(),
-        ))
-        .await
-    else {
-        return false;
-    };
-    let events = private
-        .room_state
-        .iter()
-        .filter_map(|e| e.deserialize_as::<Value>().ok())
-        .collect::<Vec<_>>();
-    private_members(&events, bot.as_str(), sender.as_str())
+    private::is_private_chat_of_member(&client, room.room_id(), &ctx.room_id, sender).await
 }
 
 /// The public feed URL for a raw token.
@@ -116,27 +61,6 @@ pub fn calendar_token(state: &mut State, person_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    fn member(id: &str, membership: &str) -> Value {
-        json!({"type":"m.room.member", "state_key":id, "content":{"membership":membership}})
-    }
-    #[test]
-    fn only_two_joined_members_and_encryption_are_private() {
-        let mut events = vec![
-            member("@bot:x", "join"),
-            member("@a:x", "join"),
-            json!({"type":"m.room.encryption","content":{"algorithm":"m.megolm.v1.aes-sha2"}}),
-        ];
-        assert!(private_members(&events, "@bot:x", "@a:x"));
-        assert!(!private_members(&events, "@bot:x", "@other:x"));
-        for membership in ["invite", "join", "knock"] {
-            events.push(member("@third:x", membership));
-            assert!(!private_members(&events, "@bot:x", "@a:x"));
-            events.pop();
-        }
-        events.pop();
-        assert!(!private_members(&events, "@bot:x", "@a:x"));
-    }
     #[test]
     fn token_is_stable_through_restart_and_rotates_after_revocation() {
         let mut state = State::default();
