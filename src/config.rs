@@ -59,8 +59,25 @@ pub struct ICalServerConfig {
     pub bind_addr: String,
     /// Public base URL shown to users, e.g. "https://cal.example.org" (a
     /// trailing slash is ignored). Should be HTTPS: feed URLs carry the
-    /// token that grants access.
+    /// token that grants access. Overridden by the environment variable
+    /// [`ICAL_PUBLIC_URL_ENV`] if it is set.
     pub public_url: String,
+}
+
+/// Environment variable that overrides `[ical_server] public_url`, so the
+/// deployment can set the public address (e.g. after a domain change) without
+/// editing the config.
+pub const ICAL_PUBLIC_URL_ENV: &str = "CLEANING_ICAL_PUBLIC_URL";
+
+impl ICalServerConfig {
+    /// Uses `value` as `public_url` if it is set and not blank.
+    pub fn apply_public_url_override(&mut self, value: Option<String>) {
+        if let Some(url) = value.map(|v| v.trim().to_owned()) {
+            if !url.is_empty() {
+                self.public_url = url;
+            }
+        }
+    }
 }
 
 fn default_interval_weeks() -> u32 {
@@ -106,5 +123,19 @@ mod tests {
             .unwrap()
             .public_url
             .starts_with("https://"));
+    }
+
+    #[test]
+    fn ical_public_url_override() {
+        let mut ical = ICalServerConfig {
+            bind_addr: "0.0.0.0:8080".to_owned(),
+            public_url: "https://old.example.net".to_owned(),
+        };
+        ical.apply_public_url_override(None);
+        assert_eq!(ical.public_url, "https://old.example.net");
+        ical.apply_public_url_override(Some(" ".to_owned()));
+        assert_eq!(ical.public_url, "https://old.example.net");
+        ical.apply_public_url_override(Some("https://cal.example.org".to_owned()));
+        assert_eq!(ical.public_url, "https://cal.example.org");
     }
 }

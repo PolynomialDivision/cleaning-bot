@@ -250,6 +250,9 @@ anyway, but anyone with the link can follow those turns.
 - The tokens are stored in `state.json` (with their hash) so `!ical` can
   show the same link again. Serve the feed over HTTPS (the bot warns at
   startup otherwise).
+- The environment variable `CLEANING_ICAL_PUBLIC_URL` overrides
+  `[ical_server] public_url`, so a deployment can change the public address
+  without editing the config. Links already handed out keep the old host.
 - `!ical reset` replaces your link (the old one stops working); `!ical
   revoke` switches it off; admins can `!ical revoke <person>` without ever
   seeing the link.

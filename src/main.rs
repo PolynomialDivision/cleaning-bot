@@ -98,8 +98,12 @@ pub struct BotContext {
 async fn main() -> Result<()> {
     mxbot_common::logging::init("cleaning_bot");
 
-    let config: Config =
+    let mut config: Config =
         mxbot_common::config::load_toml(&mxbot_common::config::config_path_from_args())?;
+    if let Some(ical) = config.ical_server.as_mut() {
+        ical.apply_public_url_override(std::env::var(config::ICAL_PUBLIC_URL_ENV).ok());
+        info!("iCal public URL: {}", ical.public_url);
+    }
     anyhow::ensure!(
         config.schedule.timezone.parse::<chrono_tz::Tz>().is_ok(),
         "Invalid schedule timezone"
