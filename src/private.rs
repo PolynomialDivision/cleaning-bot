@@ -26,7 +26,20 @@ pub async fn authorized(ctx: &BotContext, room: &Room, sender: &OwnedUserId) -> 
     ) {
         return false;
     }
-    private::is_private_chat_of_member(&client, room.room_id(), &ctx.room_id, sender).await
+    // `sender`, or another account of their resident (`directory`): the one in this chat.
+    let linked = ctx.linked_accounts();
+    let accounts = linked.linked(sender);
+    if accounts.is_empty() {
+        return private::is_private_chat_of_member(&client, room.room_id(), &ctx.room_id, sender)
+            .await;
+    }
+    for account in accounts {
+        if private::is_private_chat_of_member(&client, room.room_id(), &ctx.room_id, account).await
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// The public feed URL for a raw token.

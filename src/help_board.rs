@@ -95,29 +95,32 @@ pub async fn post(ctx: &BotContext, room: &Room) -> Result<OwnedEventId> {
     Ok(event_id)
 }
 
-/// `user` tapped `action` on `board` (in the cleaning room `room`).
+/// `account` tapped `action` on `board` (in the cleaning room `room`), as
+/// `user`, the person the plan knows (`directory`): the private chat is
+/// `account`'s, the turns are `user`'s.
 pub async fn run(
     ctx: &BotContext,
     client: &Client,
     room: &Room,
     board: &OwnedEventId,
+    account: &OwnedUserId,
     user: &OwnedUserId,
     action: Action,
 ) {
     if action == Action::PrivateChat {
-        if let Err(e) = open_private_chat(ctx, client, user).await {
-            tracing::warn!("Could not open a private chat with {user}: {e}");
+        if let Err(e) = open_private_chat(ctx, client, account).await {
+            tracing::warn!("Could not open a private chat with {account}: {e}");
             answer(
                 room,
                 board,
-                user,
+                account,
                 "😕 I couldn't start a private chat with you.\n🔁 Try again later, or invite me yourself.",
             )
             .await;
         }
         return;
     }
-    let private = private_chat(ctx, client, user).await;
+    let private = private_chat(ctx, client, account).await;
     let target = private.as_ref().unwrap_or(room);
     let result: Result<Option<String>> = match action {
         Action::Next => {
@@ -166,7 +169,7 @@ pub async fn run(
                 tracing::warn!("Failed to answer {user} privately: {e}");
             }
         }
-        None => answer(room, board, user, &text).await,
+        None => answer(room, board, account, &text).await,
     }
 }
 

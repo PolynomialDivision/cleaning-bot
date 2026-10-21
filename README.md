@@ -223,6 +223,32 @@ the inviter is allowed by `security.allowed_inviters`, so residents who
 should use it privately need to be listed there (or `"all"`). Changes made
 from a private chat update the plan in the cleaning room.
 
+### Several Matrix accounts
+
+A resident with more than one Matrix account (the house's and one on
+matrix.org, say) is one person in the plan when `[directory]` is set: the bot
+reads the house's directory (Authentik, a read-only token) at startup and
+every 15 minutes. A resident's accounts are their house account
+(`@<login>:<server_name>`) and the full Matrix IDs an admin entered in their
+user attribute `matrix_ids`. Commands, reactions and undos from any of them
+count as that person's, the one the plan met first: no second person, no
+second place in a rotation. Mentions and reminders go to that account.
+
+- Private chats stay per account: each account in one must itself be in the
+  cleaning room (see Private chats).
+- An admin's other accounts are admins too (the directory's admins decide
+  who is who; only they can set the attribute).
+- Nothing is merged. When two accounts of one resident already are two
+  people in the plan (a welcome makes one for every newcomer), the one in a
+  group, with a turn or a completion is the person. When both are, both stay
+  so and the log says `one resident, several people in the plan`: an admin
+  takes the extra one out of its groups (`!member remove`) and its turns.
+  An account listed for two residents counts for neither.
+- While the directory can't be read, the last answer stays; before the first
+  one (or without `[directory]`), every account is a person of its own.
+
+All of this lives in `src/directory.rs`.
+
 ### Names
 
 Plans, PDFs and messages call people with a Matrix account by their display

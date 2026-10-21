@@ -989,7 +989,7 @@ pub async fn image(
             return Ok(());
         }
     }
-    let admin = ctx.admin_users.contains(user);
+    let admin = ctx.is_admin(user);
     let text = {
         let state = ctx.state.lock().await;
         let outcome = (|| -> Result<String> {
@@ -1089,12 +1089,10 @@ pub async fn reaction(
         } else if key == "✅" {
             let mut state = ctx.state.lock().await;
             let mut staged = state.clone();
-            p.result = Some(
-                match apply(&mut staged, &p, ctx.admin_users.contains(user)) {
-                    Ok(n) => format!("✅ {n} changes applied"),
-                    Err(e) => format!("⚠️ {e} · nothing changed"),
-                },
-            );
+            p.result = Some(match apply(&mut staged, &p, ctx.is_admin(user)) {
+                Ok(n) => format!("✅ {n} changes applied"),
+                Err(e) => format!("⚠️ {e} · nothing changed"),
+            });
             staged.paper_scans.insert(target.into(), p.clone());
             staged.save(&ctx.state_path).await?;
             *state = staged;

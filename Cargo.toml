@@ -16,6 +16,8 @@ chrono-tz     = "0.9"
 hex           = "0.4"
 mime          = "0.3"
 rand          = "0.8"
+# The directory read (src/directory.rs); the TLS stack matrix-sdk already brings.
+reqwest       = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 sha2          = "0.10"
 uuid          = { version = "1", features = ["v4", "v5"] }
 mxbot-common  = { git = "https://github.com/PolynomialDivision/mxbot-common" }

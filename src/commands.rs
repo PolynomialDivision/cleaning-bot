@@ -49,6 +49,7 @@ use member::*;
 pub(crate) use member::{join_group, leave_group};
 use overview::*;
 use rotation::*;
+pub(crate) use setup::person_has_activity;
 use setup::*;
 use stats::*;
 use swaps::*;
@@ -101,7 +102,7 @@ pub async fn handle(
     let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
 
     if room.room_id() != ctx.room_id
-        && !ctx.admin_users.contains(sender)
+        && !ctx.is_admin(sender)
         && !private_command_allowed(cmd, &args)
     {
         return Ok(Some(format::intentional(format::mentionify(

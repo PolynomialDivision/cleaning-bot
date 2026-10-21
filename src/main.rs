@@ -21,7 +21,7 @@ use mxbot_common::{
                     redaction::OriginalSyncRoomRedactionEvent,
                 },
             },
-            OwnedRoomId, OwnedUserId,
+            OwnedRoomId, OwnedUserId, UserId,
         },
         Client, Room, RoomState,
     },
@@ -33,6 +33,7 @@ use tracing::{error, info};
 mod analytics;
 mod commands;
 mod config;
+mod directory;
 mod domain;
 mod format;
 mod help_board;
@@ -92,6 +93,36 @@ pub struct BotContext {
     pub config: Arc<Config>,
     pub admin_users: HashSet<OwnedUserId>,
     pub room_id: OwnedRoomId,
+    /// Residents with more than one Matrix account (`[directory]`).
+    pub accounts: Arc<std::sync::RwLock<directory::Accounts>>,
+}
+
+impl BotContext {
+    /// The account the plan knows `user`'s resident by (`directory`).
+    pub async fn person_account(&self, user: &OwnedUserId) -> OwnedUserId {
+        let state = self.state.lock().await;
+        directory::person_account(&self.linked_accounts(), &state, user)
+    }
+
+    /// The directory's answer as it is now.
+    pub fn linked_accounts(&self) -> directory::Accounts {
+        self.accounts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// An admin: one of `[security] admin_users`, or another account of theirs.
+    pub fn is_admin(&self, user: &UserId) -> bool {
+        self.admin_users.contains(user)
+            || self
+                .accounts
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .linked(user)
+                .iter()
+                .any(|a| self.admin_users.contains(a))
+    }
 }
 
 #[tokio::main]
@@ -229,7 +260,11 @@ async fn main() -> Result<()> {
         config: Arc::clone(&config),
         admin_users: bot.admins().clone(),
         room_id: room_id.clone(),
+        accounts: Arc::default(),
     };
+    if let Some(directory) = config.directory.clone() {
+        tokio::spawn(directory::run(ctx.clone(), directory));
+    }
 
     // ── Message / command handler ─────────────────────────────────────────────
     client.add_event_handler({
@@ -258,9 +293,11 @@ async fn main() -> Result<()> {
                 if matches!(ev.content.relates_to, Some(Relation::Replacement(_))) {
                     return;
                 }
+                // The resident, whichever of their accounts wrote (`directory`).
+                // `ev.sender` stays the account, for the private-chat checks.
+                let sender = ctx.person_account(&ev.sender).await;
                 if let MessageType::Image(ref image) = ev.content.msgtype {
-                    if let Err(e) = paper::image(&ctx, &room, &ev.sender, &ev.event_id, image).await
-                    {
+                    if let Err(e) = paper::image(&ctx, &room, &sender, &ev.event_id, image).await {
                         error!("Paper scan failed: {e}");
                     }
                     return;
@@ -300,7 +337,7 @@ async fn main() -> Result<()> {
                         }
                         state.active_command = Some(key.clone());
                     }
-                    match commands::handle(&ctx, &ev.sender, &room, line, answer_to.clone()).await {
+                    match commands::handle(&ctx, &sender, &room, line, answer_to.clone()).await {
                         Ok(Some(reply)) => replies.push(reply),
                         Err(e) if e.is::<mxbot_common::admin::NotAdmin>() => replies.push(
                             format::mentionify("❌ This command requires admin privileges."),
@@ -351,7 +388,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 if !private {
-                    onboarding::welcome_if_new(&ctx, &room, &ev.sender).await;
+                    onboarding::welcome_if_new(&ctx, &room, &sender).await;
                 }
                 onboarding::refresh_all_selectors(&ctx, &client).await;
             }
@@ -378,6 +415,7 @@ async fn main() -> Result<()> {
                     return;
                 }
                 let _operation = ctx.operations.lock().await;
+                let sender = ctx.person_account(&ev.sender).await;
 
                 if ctx
                     .state
@@ -390,9 +428,9 @@ async fn main() -> Result<()> {
                 }
                 let reacted_to = ev.content.relates_to.event_id.to_string();
                 let emoji_key = ev.content.relates_to.key.clone();
-                let sender_mxid = ev.sender.as_str().to_owned();
+                let sender_mxid = sender.as_str().to_owned();
 
-                match paper::reaction(&ctx, &room, &ev.sender, &reacted_to, &emoji_key).await {
+                match paper::reaction(&ctx, &room, &sender, &reacted_to, &emoji_key).await {
                     Ok(true) => {
                         onboarding::consume_tap(&room, &ev.event_id, &bot_user_id).await;
                         return;
@@ -406,7 +444,7 @@ async fn main() -> Result<()> {
 
                 // A first reaction here is a first visit too.
                 if room.room_id() == ctx.room_id {
-                    onboarding::welcome_if_new(&ctx, &room, &ev.sender).await;
+                    onboarding::welcome_if_new(&ctx, &room, &sender).await;
                 }
 
                 // ── Group selector tap ────────────────────────────────────────
@@ -463,7 +501,7 @@ async fn main() -> Result<()> {
                     &ctx,
                     &room,
                     &ev.event_id,
-                    &ev.sender,
+                    &sender,
                     &reacted_to,
                     &emoji_key,
                     &bot_user_id,
@@ -492,7 +530,8 @@ async fn main() -> Result<()> {
                         }
                     }
                     let board = ev.content.relates_to.event_id.clone();
-                    help_board::run(&ctx, &client, &room, &board, &ev.sender, action).await;
+                    help_board::run(&ctx, &client, &room, &board, &ev.sender, &sender, action)
+                        .await;
                     // Take the button press back, so it can be pressed again.
                     onboarding::consume_tap(&room, &ev.event_id, &bot_user_id).await;
                     return;
@@ -504,7 +543,7 @@ async fn main() -> Result<()> {
                         &ctx,
                         &room,
                         &ev.event_id,
-                        &ev.sender,
+                        &sender,
                         &reacted_to,
                         &emoji_key,
                     )
@@ -605,6 +644,7 @@ async fn main() -> Result<()> {
                     return;
                 }
                 let _operation = ctx.operations.lock().await;
+                let sender = ctx.person_account(&ev.sender).await;
 
                 let redacted_id = match ev.content.redacts.as_ref().or(ev.redacts.as_ref()) {
                     Some(id) => id.to_string(),
@@ -615,7 +655,7 @@ async fn main() -> Result<()> {
                     &ctx,
                     &mut state,
                     room.room_id(),
-                    ev.sender.as_str(),
+                    sender.as_str(),
                     &redacted_id,
                 );
                 if outcome == reactions::Redaction::Refused {
@@ -638,7 +678,7 @@ async fn main() -> Result<()> {
                 }
                 // A ✅ behind an early swap swaps back; a 🆘 withdraws.
                 if room.room_id() == ctx.room_id {
-                    trades::on_redaction(&ctx, &room, ev.sender.as_str(), &redacted_id).await;
+                    trades::on_redaction(&ctx, &room, sender.as_str(), &redacted_id).await;
                 }
             }
         }
@@ -668,7 +708,8 @@ async fn main() -> Result<()> {
                     return; // a profile change, not a join
                 }
                 let _operation = ctx.operations.lock().await;
-                onboarding::welcome_if_new(&ctx, &room, &ev.state_key).await;
+                let person = ctx.person_account(&ev.state_key).await;
+                onboarding::welcome_if_new(&ctx, &room, &person).await;
                 // Someone accepting the private chat the bot opened for them.
                 help_board::greet_on_join(&ctx, &room, &ev.state_key).await;
             }

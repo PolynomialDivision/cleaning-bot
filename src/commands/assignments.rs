@@ -581,7 +581,7 @@ pub(crate) async fn cmd_undo(
     args: &[&str],
 ) -> Result<Option<String>> {
     let (year, week) = current_iso_week();
-    let is_admin = ctx.admin_users.contains(sender);
+    let is_admin = ctx.is_admin(sender);
     let mut state = ctx.state.lock().await;
     let sender_pid = state
         .person_by_matrix_id(sender.as_str())

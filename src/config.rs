@@ -18,6 +18,8 @@ pub struct Config {
     pub schedule: ScheduleConfig,
     /// If set, enables the HTTP iCal feed server.
     pub ical_server: Option<ICalServerConfig>,
+    /// If set, one resident's Matrix accounts count as one person (src/directory.rs).
+    pub directory: Option<DirectoryConfig>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +82,45 @@ impl ICalServerConfig {
     }
 }
 
+/// The house's directory (its identity provider), read for who is who: each resident's
+/// house account and the other Matrix accounts an admin entered for them.
+#[derive(Deserialize, Clone, Debug)]
+pub struct DirectoryConfig {
+    pub provider: DirectoryProvider,
+    /// The REST API base, e.g. "https://login.example.org/api/v3".
+    pub api_url: String,
+    /// The house's homeserver: a resident's house account is @<login>:<server_name>.
+    pub server_name: String,
+    /// User attribute that overrides the login as the house account's localpart.
+    #[serde(default)]
+    pub localpart_attribute: Option<String>,
+    /// User attribute with the other accounts: a list of full Matrix IDs.
+    #[serde(default = "default_matrix_ids_attribute")]
+    pub matrix_ids_attribute: String,
+    /// Environment variable with the read-only API token (never in the config).
+    #[serde(default = "default_directory_token_env")]
+    pub token_env: String,
+    /// How often to read it again.
+    #[serde(default = "default_directory_refresh_minutes")]
+    pub refresh_minutes: u64,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryProvider {
+    Authentik,
+}
+
+fn default_matrix_ids_attribute() -> String {
+    "matrix_ids".to_owned()
+}
+fn default_directory_token_env() -> String {
+    "CLEANING_DIRECTORY_TOKEN".to_owned()
+}
+fn default_directory_refresh_minutes() -> u64 {
+    15
+}
+
 fn default_interval_weeks() -> u32 {
     1
 }
@@ -123,6 +164,19 @@ mod tests {
             .unwrap()
             .public_url
             .starts_with("https://"));
+        let directory = include_str!("../config.example.toml")
+            .replace("# [directory]", "[directory]")
+            .replace("# provider", "provider")
+            .replace("# api_url", "api_url")
+            .replace("# server_name", "server_name");
+        let d = toml::from_str::<Config>(&directory)
+            .unwrap()
+            .directory
+            .unwrap();
+        assert_eq!(d.provider, DirectoryProvider::Authentik);
+        assert_eq!(d.matrix_ids_attribute, "matrix_ids");
+        assert_eq!(d.token_env, "CLEANING_DIRECTORY_TOKEN");
+        assert_eq!(d.refresh_minutes, 15);
     }
 
     #[test]

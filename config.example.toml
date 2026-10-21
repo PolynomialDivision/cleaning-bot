@@ -69,6 +69,25 @@ materialize_weeks = 26
 # bind_addr  = "0.0.0.0:8080"
 # public_url = "https://cal.example.org"
 
+# ── Linked Matrix accounts (optional) ─────────────────────────────────────────
+# One resident, one person in the plan, whichever of their Matrix accounts writes:
+# the bot reads the house's directory (Authentik) every refresh_minutes with a
+# read-only token (view users), from the environment variable token_env. A
+# resident's accounts: their house account @<login>:<server_name> (or the
+# localpart in localpart_attribute) and the full Matrix IDs an admin put into
+# the user attribute matrix_ids_attribute, e.g. matrix_ids: ["@me:matrix.org"].
+# An account listed for two people counts for neither. Without this section,
+# or while the directory can't be read, every account is a person of its own.
+#
+# [directory]
+# provider    = "authentik"
+# api_url     = "https://login.example.org/api/v3"
+# server_name = "example.org"
+# localpart_attribute  = "matrix_localpart"
+# matrix_ids_attribute = "matrix_ids"
+# token_env       = "CLEANING_DIRECTORY_TOKEN"
+# refresh_minutes = 15
+
 # ── Groups and members ─────────────────────────────────────────────────────────
 # Groups and members are managed at runtime via bot commands, not in this file.
 #

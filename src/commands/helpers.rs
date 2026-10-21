@@ -30,10 +30,8 @@ pub(crate) fn command_may_change_current_plan(cmd: &str, sub: Option<&str>) -> b
 }
 
 pub(crate) fn require_admin(ctx: &BotContext, sender: &OwnedUserId) -> Result<()> {
-    Ok(mxbot_common::admin::require_admin(
-        &ctx.admin_users,
-        sender,
-    )?)
+    anyhow::ensure!(ctx.is_admin(sender), mxbot_common::admin::NotAdmin);
+    Ok(())
 }
 
 /// Format a CLI deviation as a percentage and a human-readable label.

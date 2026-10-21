@@ -172,6 +172,7 @@ fn test_context(state: State) -> (BotContext, PathBuf, OwnedUserId) {
         config: Arc::new(config),
         admin_users: HashSet::from([admin.clone()]),
         room_id: OwnedRoomId::try_from("!room:example.org").unwrap(),
+        accounts: Default::default(),
     };
     (ctx, path, admin)
 }
@@ -210,6 +211,7 @@ fn test_context_with_horizon(
         config: Arc::new(config),
         admin_users: HashSet::from([admin.clone()]),
         room_id: OwnedRoomId::try_from("!room:example.org").unwrap(),
+        accounts: Default::default(),
     };
     (ctx, path, admin)
 }
@@ -6465,4 +6467,31 @@ async fn each_group_can_have_its_own_printable_plan() {
     assert_eq!(saved.paper_style, Style::Days);
 
     let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn another_account_of_a_resident_acts_as_them_and_an_admins_is_an_admin() {
+    let id = |s: &str| OwnedUserId::try_from(s).unwrap();
+    let mut state = State::default();
+    state.persons.push(Person::new_matrix("@anna:example.org"));
+    let (ctx, _path, admin) = test_context(state);
+    let (accounts, _) = crate::directory::Accounts::new(vec![
+        vec![id("@anna:example.org"), id("@anna:matrix.org")],
+        vec![admin.clone(), id("@admin:matrix.org")],
+    ]);
+    *ctx.accounts.write().unwrap() = accounts;
+    assert_eq!(
+        ctx.person_account(&id("@anna:matrix.org")).await,
+        id("@anna:example.org")
+    );
+    // Not in the plan yet: the account is the person (it becomes one when it acts).
+    assert_eq!(
+        ctx.person_account(&id("@admin:matrix.org")).await,
+        id("@admin:matrix.org")
+    );
+    assert!(ctx.is_admin(&id("@admin:matrix.org")));
+    assert!(helpers::require_admin(&ctx, &id("@admin:matrix.org")).is_ok());
+    assert!(!ctx.is_admin(&id("@anna:matrix.org")));
+    let refused = helpers::require_admin(&ctx, &id("@anna:matrix.org")).unwrap_err();
+    assert!(refused.is::<mxbot_common::admin::NotAdmin>());
 }
