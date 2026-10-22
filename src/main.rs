@@ -753,8 +753,11 @@ async fn main() -> Result<()> {
     onboarding::refresh_all_selectors(&ctx, &client).await;
 
     // Every resident's turns in a calendar of their own in the cloud (`[nextcloud]`).
+    // Without it, nobody is told their turns are there any more.
     if let Some(nextcloud) = config.nextcloud.clone() {
         tokio::spawn(calendars::run(ctx.clone(), client.clone(), nextcloud));
+    } else {
+        calendars::not_managed(&ctx, &client).await;
     }
 
     tokio::spawn(scheduler::run(ctx, client.clone()));

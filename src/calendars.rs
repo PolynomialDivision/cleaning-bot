@@ -11,13 +11,18 @@
 //!
 //! Someone who no longer has a calendar to get (gone from the directory, or in no group and
 //! without turns) loses theirs: unshared, then deleted, but only after a complete comparison
-//! with a directory answer in hand, never while the directory is unknown, and never all at
-//! once because nobody is wanted at all.
+//! with a directory answer in hand, never while the directory is unknown, never all at once
+//! because nobody is wanted at all, and never more than [`max_removals`] in one round (a
+//! directory answer that is wrong but looks fine).
+//!
+//! Two logins with the same calendar (their slugs differ only in characters a slug cannot hold,
+//! or in case) get none: neither could tell whose turns and share it holds.
 //!
 //! Residents without a house account keep the feed link (`!ical`). Once a resident's calendar
 //! is shared with them, their selectors and `!ical` say where it is instead, and the bot tells
-//! them once in their private chat (if they have one). Feed links handed out before keep
-//! working.
+//! them once in their private chat (if they have one; a failed note is tried again next round).
+//! Feed links handed out before keep working. Without calendars managed (no `[nextcloud]`, no
+//! app password), everyone is pointed at the feed link again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,7 +34,7 @@ use mxbot_common::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     config::NextcloudConfig, directory::Logins, domain::PersonId, schedule::build_schedule,
@@ -141,7 +146,31 @@ pub fn wanted(
             entry.events.insert(a.uid.clone(), Event::new(ics));
         }
     }
+    for (slug, logins) in shared_slugs(&out) {
+        warn!(
+            calendar = %slug,
+            logins = ?logins,
+            "Calendars: these logins would share one calendar; none of them gets one"
+        );
+        for login in &logins {
+            out.remove(login);
+        }
+    }
     out
+}
+
+/// Calendars two or more logins would get (the same slug, also in another case: a server
+/// may not tell them apart): slug → those logins.
+fn shared_slugs(wanted: &BTreeMap<String, Wanted>) -> BTreeMap<String, Vec<String>> {
+    let mut by_slug: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (login, w) in wanted {
+        by_slug
+            .entry(w.slug.to_lowercase())
+            .or_default()
+            .push(login.clone());
+    }
+    by_slug.retain(|_, logins| logins.len() > 1);
+    by_slug
 }
 
 /// What the bot last wrote, by login (store/nextcloud.json): what a change needs written.
@@ -337,6 +366,13 @@ async fn quick_one(
     Ok(())
 }
 
+/// The most calendars one round removes, of `known` of the bot's: a third of them, at least 2.
+/// More at once is a directory or plan gone wrong (an answer that lost half the house), not
+/// people moving out: none is removed then.
+pub fn max_removals(known: usize) -> usize {
+    (known / 3).max(2)
+}
+
 /// The calendars of people who no longer get one: unshared, then deleted.
 async fn remove_unwanted(
     nc: &Nextcloud,
@@ -345,11 +381,30 @@ async fn remove_unwanted(
     outcome: &mut Outcome,
 ) -> Result<()> {
     let keep: BTreeSet<&str> = wanted.values().map(|w| w.slug.as_str()).collect();
-    for calendar in nc.calendars().await? {
-        let slug = calendar.slug;
-        if !slug.starts_with(PREFIX) || keep.contains(slug.as_str()) {
-            continue;
-        }
+    let known: Vec<String> = nc
+        .calendars()
+        .await?
+        .into_iter()
+        .map(|c| c.slug)
+        .filter(|slug| slug.starts_with(PREFIX))
+        .collect();
+    let unwanted: Vec<String> = known
+        .iter()
+        .filter(|slug| !keep.contains(slug.as_str()))
+        .cloned()
+        .collect();
+    if unwanted.len() > max_removals(known.len()) {
+        let error = format!(
+            "{} of {} calendars would go at once (at most {}): none removed",
+            unwanted.len(),
+            known.len(),
+            max_removals(known.len())
+        );
+        error!("Calendars: {error}");
+        outcome.errors.push(error);
+        return Ok(());
+    }
+    for slug in unwanted {
         let result: Result<()> = async {
             for share in nc.shares(&slug).await? {
                 nc.unshare(&slug, &share.principal).await?;
@@ -433,10 +488,42 @@ pub fn where_it_is(name: &str, web_url: Option<&str>) -> String {
     )
 }
 
+/// Nobody's turns are in a calendar the bot keeps (`state.nextcloud_calendars` emptied):
+/// whether that changed anything.
+pub fn forget_all(state: &mut State) -> bool {
+    if state.nextcloud_calendars.is_empty() {
+        return false;
+    }
+    state.nextcloud_calendars.clear();
+    true
+}
+
+/// The calendars are not kept (no `[nextcloud]`, no `[directory]`, no app password): who was
+/// told their turns are in the cloud would never hear of a change, so selectors and `!ical`
+/// point at the feed link again.
+pub async fn not_managed(ctx: &BotContext, client: &Client) {
+    let _operation = ctx.operations.lock().await;
+    let changed = {
+        let mut state = ctx.state.lock().await;
+        let changed = forget_all(&mut state);
+        if changed {
+            if let Err(e) = state.save(&ctx.state_path).await {
+                warn!("Calendars: saving the state: {e:#}");
+            }
+        }
+        changed
+    };
+    if changed {
+        info!("Calendars: not kept any more; everyone is pointed at the feed link again");
+        crate::onboarding::refresh_all_selectors(ctx, client).await;
+    }
+}
+
 /// Keep the calendars in line with the plan, until the bot stops.
 pub async fn run(ctx: BotContext, client: Client, cfg: NextcloudConfig) {
     if ctx.config.directory.is_none() {
         warn!("Calendars: [nextcloud] needs [directory] (who has a house account); no calendars");
+        not_managed(&ctx, &client).await;
         return;
     }
     let password = std::env::var(&cfg.password_env)
@@ -448,12 +535,14 @@ pub async fn run(ctx: BotContext, client: Client, cfg: NextcloudConfig) {
             "Calendars: no app password in {}; no calendars, feed links only",
             cfg.password_env
         );
+        not_managed(&ctx, &client).await;
         return;
     };
     let nc = match Nextcloud::new(&cfg.account_url, &cfg.username, &password) {
         Ok(nc) => nc,
         Err(e) => {
             warn!("Calendars: {e:#}; no calendars");
+            not_managed(&ctx, &client).await;
             return;
         }
     };
@@ -519,7 +608,8 @@ pub async fn run(ctx: BotContext, client: Client, cfg: NextcloudConfig) {
 }
 
 /// Who has a calendar now (selectors and `!ical` read it), and a note in the private chat of
-/// everyone whose calendar is new.
+/// everyone whose calendar is new. The notes are sent outside `ctx.operations` (a slow
+/// homeserver holds up no command), and a resident counts as told only once one arrived.
 async fn publish(
     ctx: &BotContext,
     client: &Client,
@@ -528,55 +618,87 @@ async fn publish(
     web_url: Option<&str>,
 ) {
     let ready = ready(cache, want);
-    let _operation = ctx.operations.lock().await;
-    let changed = {
-        let mut state = ctx.state.lock().await;
-        if state.nextcloud_calendars == ready {
-            false
-        } else {
-            state.nextcloud_calendars = ready;
-            if let Err(e) = state.save(&ctx.state_path).await {
-                warn!("Calendars: saving the state: {e:#}");
+    {
+        let _operation = ctx.operations.lock().await;
+        let changed = {
+            let mut state = ctx.state.lock().await;
+            if state.nextcloud_calendars == ready {
+                false
+            } else {
+                state.nextcloud_calendars = ready;
+                if let Err(e) = state.save(&ctx.state_path).await {
+                    warn!("Calendars: saving the state: {e:#}");
+                }
+                true
             }
-            true
+        };
+        if changed {
+            crate::onboarding::refresh_all_selectors(ctx, client).await;
         }
-    };
-    if changed {
-        crate::onboarding::refresh_all_selectors(ctx, client).await;
     }
+    announce(cache, want, |w| {
+        tell(ctx, client, w.persons.clone(), w.name.clone(), web_url)
+    })
+    .await;
+}
+
+/// Tell everyone whose calendar is shared with them and who was not told yet, with `tell`
+/// (true: a note arrived); only they count as told, the others are tried again next time.
+async fn announce<F, Fut>(cache: &mut Cache, want: &BTreeMap<String, Wanted>, mut tell: F)
+where
+    F: FnMut(&Wanted) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     for (login, w) in want {
-        let Some(cached) = cache.calendars.get_mut(login) else {
-            continue;
-        };
-        if !cached.shared || cached.announced {
+        if !cache
+            .calendars
+            .get(login)
+            .is_some_and(|c| c.shared && !c.announced)
+        {
             continue;
         }
-        cached.announced = true;
-        let accounts: Vec<OwnedUserId> = {
-            let state = ctx.state.lock().await;
-            w.persons
-                .iter()
-                .filter_map(|p| state.person_by_id(p))
-                .filter_map(|p| p.matrix_id.as_deref())
-                .filter_map(|m| OwnedUserId::try_from(m).ok())
-                .collect()
-        };
-        for account in accounts {
-            let Some(chat) = crate::help_board::private_chat(ctx, client, &account).await else {
-                continue;
-            };
-            let text = format!(
-                "{}\n🔗 A calendar link you subscribed to before keeps working; \
-                 !ical revoke switches it off.",
-                where_it_is(&w.name, web_url)
-            );
-            let content = crate::format::intentional(crate::format::mentionify(&text));
-            match mxbot_common::send::send_with_retry(&chat, content).await {
-                Ok(_) => break,
-                Err(e) => warn!("Calendars: telling {account}: {e}"),
+        if tell(w).await {
+            if let Some(cached) = cache.calendars.get_mut(login) {
+                cached.announced = true;
             }
         }
     }
+}
+
+/// The note about their calendar in the private chat of one of the resident's accounts: whether
+/// one arrived.
+async fn tell(
+    ctx: &BotContext,
+    client: &Client,
+    persons: Vec<PersonId>,
+    name: String,
+    web_url: Option<&str>,
+) -> bool {
+    let accounts: Vec<OwnedUserId> = {
+        let state = ctx.state.lock().await;
+        persons
+            .iter()
+            .filter_map(|p| state.person_by_id(p))
+            .filter_map(|p| p.matrix_id.as_deref())
+            .filter_map(|m| OwnedUserId::try_from(m).ok())
+            .collect()
+    };
+    let text = format!(
+        "{}\n🔗 A calendar link you subscribed to before keeps working; \
+         !ical revoke switches it off.",
+        where_it_is(&name, web_url)
+    );
+    for account in accounts {
+        let Some(chat) = crate::help_board::private_chat(ctx, client, &account).await else {
+            continue;
+        };
+        let content = crate::format::intentional(crate::format::mentionify(&text));
+        match mxbot_common::send::send_with_retry(&chat, content).await {
+            Ok(_) => return true,
+            Err(e) => warn!("Calendars: telling {account}: {e}"),
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1096,6 +1218,120 @@ mod tests {
             fake.world().calendars["cleaning-anna"].shares,
             BTreeMap::from([("principal:principals/users/anna".to_owned(), false)])
         );
+    }
+
+    #[tokio::test]
+    async fn a_round_that_would_remove_most_calendars_removes_none() {
+        let (state, logins) = house();
+        let (server, fake) = FakeCalDav::start(&["anna", "ben"]).await;
+        let nc = nc(&server);
+        let want = wanted(&state, &logins, 6, crate::state::today());
+        let mut cache = Cache::default();
+        reconcile(&nc, &mut cache, &want, true, NOW).await;
+        // three more residents' calendars from before, none of them wanted now: 3 of 5 at once
+        for old in ["cleaning-dora", "cleaning-emil", "cleaning-finn"] {
+            fake.world()
+                .calendars
+                .insert(old.into(), Default::default());
+        }
+        assert_eq!(max_removals(5), 2);
+        fake.take_writes();
+        let outcome = reconcile(&nc, &mut cache, &want, true, NOW).await;
+        assert!(outcome.removed.is_empty(), "{outcome:?}");
+        assert_eq!(
+            outcome.errors,
+            ["3 of 5 calendars would go at once (at most 2): none removed"]
+        );
+        assert!(fake.take_writes().is_empty(), "nothing unshared or deleted");
+        assert_eq!(fake.world().calendars.len(), 5);
+        assert_eq!(cache.calendars.len(), 2, "the cache keeps what it knew");
+        // two of four: people moving out, removed
+        fake.world().calendars.remove("cleaning-finn");
+        let outcome = reconcile(&nc, &mut cache, &want, true, NOW).await;
+        assert!(outcome.errors.is_empty(), "{outcome:?}");
+        assert_eq!(outcome.removed, ["cleaning-dora", "cleaning-emil"]);
+        // a big house: a third at once
+        assert_eq!(max_removals(0), 2);
+        assert_eq!(max_removals(9), 3);
+        assert_eq!(max_removals(30), 10);
+    }
+
+    #[test]
+    fn two_logins_with_one_calendar_get_none() {
+        let (state, _) = house();
+        let logins = |pairs: &[(&str, &str)]| -> Logins {
+            pairs
+                .iter()
+                .map(|(m, l)| (UserId::parse(*m).unwrap(), l.to_string()))
+                .collect()
+        };
+        let today = crate::state::today();
+        // "a b" and "a-b" both make cleaning-a-b
+        let clash = logins(&[("@anna:house.org", "a b"), ("@ben:house.org", "a-b")]);
+        assert_eq!(slug("a b"), slug("a-b"));
+        assert!(wanted(&state, &clash, 6, today).is_empty());
+        // so do Ben and ben, on a server that ignores case; carol keeps hers
+        let clash = logins(&[
+            ("@anna:house.org", "Ben"),
+            ("@ben:house.org", "ben"),
+            ("@carol:matrix.org", "carol"),
+        ]);
+        let want = wanted(&state, &clash, 6, today);
+        assert_eq!(want.keys().collect::<Vec<_>>(), ["carol"]);
+        // one resident's two accounts with the same login share theirs, as before
+        let (_, house_logins) = house();
+        assert_eq!(wanted(&state, &house_logins, 6, today).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_resident_counts_as_told_only_once_the_note_arrived() {
+        let (state, logins) = house();
+        let (server, _fake) = FakeCalDav::start(&["anna", "ben"]).await;
+        let nc = nc(&server);
+        let want = wanted(&state, &logins, 6, crate::state::today());
+        let mut cache = Cache::default();
+        reconcile(&nc, &mut cache, &want, true, NOW).await;
+        let told = |cache: &Cache| {
+            cache
+                .calendars
+                .iter()
+                .filter(|(_, c)| c.announced)
+                .map(|(l, _)| l.clone())
+                .collect::<Vec<_>>()
+        };
+        // ben's note fails (homeserver down, no private chat): he is tried again
+        let mut asked = Vec::new();
+        announce(&mut cache, &want, |w| {
+            asked.push(w.slug.clone());
+            std::future::ready(w.slug == "cleaning-anna")
+        })
+        .await;
+        assert_eq!(asked, ["cleaning-anna", "cleaning-ben"]);
+        assert_eq!(told(&cache), ["anna"]);
+        let mut asked = Vec::new();
+        announce(&mut cache, &want, |w| {
+            asked.push(w.slug.clone());
+            std::future::ready(true)
+        })
+        .await;
+        assert_eq!(asked, ["cleaning-ben"], "anna is not told twice");
+        assert_eq!(told(&cache), ["anna", "ben"]);
+        // not shared yet: nobody to tell
+        cache.calendars.get_mut("ben").unwrap().announced = false;
+        cache.calendars.get_mut("ben").unwrap().shared = false;
+        announce(&mut cache, &want, |_| async { panic!("nothing to tell") }).await;
+    }
+
+    #[test]
+    fn without_calendars_kept_everyone_gets_the_feed_link_again() {
+        let (mut state, _) = house();
+        assert!(!forget_all(&mut state));
+        let anna = person_id(&state, "@anna:house.org");
+        state
+            .nextcloud_calendars
+            .insert(anna, "Cleaning: Anna".into());
+        assert!(forget_all(&mut state));
+        assert!(state.nextcloud_calendars.is_empty());
     }
 
     #[test]

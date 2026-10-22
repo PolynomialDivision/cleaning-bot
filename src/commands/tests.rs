@@ -6620,6 +6620,37 @@ async fn someone_with_a_calendar_in_the_cloud_is_pointed_there_instead_of_a_link
 }
 
 #[tokio::test]
+async fn calendars_no_longer_kept_point_everyone_at_the_feed_link_again() {
+    let (ctx, path) = feed_world();
+    let private = OwnedRoomId::try_from("!private:example.org").unwrap();
+    {
+        let mut state = ctx.state.lock().await;
+        onboarding::prepare_selector(&ctx, &mut state, &private, MIA, false, true).unwrap();
+        let mia = state.person_by_matrix_id(MIA).unwrap().id.clone();
+        state
+            .nextcloud_calendars
+            .insert(mia, "Cleaning: Mia".into());
+    }
+    // [nextcloud] removed, or its app password gone: the old map would say "in the cloud"
+    let client = mxbot_common::matrix_sdk::Client::builder()
+        .homeserver_url("http://127.0.0.1:9")
+        .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_1])
+        .build()
+        .await
+        .unwrap();
+    crate::calendars::not_managed(&ctx, &client).await;
+    let mut state = ctx.state.lock().await;
+    assert!(state.nextcloud_calendars.is_empty());
+    let saved = State::load(&path).await.unwrap();
+    assert!(saved.nextcloud_calendars.is_empty(), "saved");
+    let selector =
+        onboarding::prepare_selector(&ctx, &mut state, &private, MIA, false, true).unwrap();
+    assert!(selector.calendar_url.is_some(), "the feed link again");
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
 async fn old_selectors_in_the_cleaning_room_lose_their_calendar_link() {
     let (ctx, path) = feed_world();
     let mut state = ctx.state.lock().await;

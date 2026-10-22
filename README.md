@@ -327,7 +327,8 @@ costs one full comparison, nothing else.
 - Once the calendar is shared with them, `!ical` and their group selectors
   say where it is (the cloud's Calendar app, DAVx⁵ on Android, a CalDAV
   account on iPhone) instead of a link, and the bot tells them once in their
-  private chat, if they have one. A feed link handed out before keeps
+  private chat, if they have one (a note that did not arrive is tried again
+  in the next round). A feed link handed out before keeps
   working; `!ical reset` still gives a new one (for another calendar app).
 - Nextcloud only has an account for someone after their first login there:
   until then, the calendar waits unshared and they keep the feed link.
@@ -335,10 +336,17 @@ costs one full comparison, nothing else.
 - Someone who is no longer in the directory, or in no group and without
   turns, loses the calendar: unshared, then deleted (Nextcloud's trash bin
   keeps it for a while). Only after a complete comparison, never while the
-  directory has not been read, and never when nobody at all would get one.
+  directory has not been read, never when nobody at all would get one, and
+  never more than a third of the calendars (at least 2) in one round: more
+  at once is a directory gone wrong, so none is removed and the log says so.
+- Two logins that would get the same calendar (they differ only in
+  characters a calendar name cannot hold, or in case) get none, and the log
+  names them; they keep the feed link.
 - The app password comes from the environment (`password_env`, default
   `CALDAV_PASSWORD`). Without it, or without `[directory]`, the bot runs
-  without calendars and says so in the log.
+  without calendars and says so in the log. Without calendars (also once
+  `[nextcloud]` is removed), `!ical` and the selectors give everyone the
+  feed link again.
 
 All of this lives in `src/calendars.rs`; the CalDAV side (calendars, shares,
 events by UID) is mxbot-common's `calendar::nextcloud`.
