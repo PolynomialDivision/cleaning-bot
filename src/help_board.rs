@@ -219,6 +219,18 @@ async fn open_private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId
         mxbot_common::send::send_with_retry(&chat, content).await?;
         return Ok(());
     }
+    invite_to_private_chat(ctx, client, user).await
+}
+
+/// Invite `user` to the encrypted private chat the bot opens for them (or
+/// again to the one they haven't accepted yet). Once they join,
+/// `greet_on_join` greets them there with their groups and calendar link.
+/// For someone without a verified private chat (`private_chat`).
+pub async fn invite_to_private_chat(
+    ctx: &BotContext,
+    client: &Client,
+    user: &OwnedUserId,
+) -> Result<()> {
     // Still waiting for them to accept an earlier invite: invite again
     // rather than open a second chat.
     let pending = ctx

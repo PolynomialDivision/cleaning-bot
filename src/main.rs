@@ -51,6 +51,7 @@ mod rhythm;
 mod schedule;
 mod scheduler;
 mod state;
+mod subscribe;
 mod trades;
 mod turn_menu;
 mod validate;
@@ -181,6 +182,14 @@ async fn main() -> Result<()> {
         st.save(&state_path).await?;
     }
 
+    let room_id =
+        mxbot_common::rooms::parse_room_id("[schedule] room_id", &config.schedule.room_id)?;
+    // Calendar links only in private chats: the selectors in the cleaning
+    // room lose theirs (edited out once the bot is in sync).
+    if onboarding::drop_room_feed_links(&mut st, &room_id) {
+        st.save(&state_path).await?;
+    }
+
     // Groups from before per-group rhythms keep the old global interval.
     if migrate_rhythms(&mut st, config.schedule.interval_weeks) {
         st.save(&state_path).await?;
@@ -227,15 +236,12 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(Mutex::new(st));
 
-    let room_id =
-        mxbot_common::rooms::parse_room_id("[schedule] room_id", &config.schedule.room_id)?;
-
     // ── Optional HTTP iCal server ─────────────────────────────────────────────
     if let Some(ref ical_cfg) = config.ical_server {
-        let bind_addr = ical_cfg.bind_addr.clone();
+        let ical_cfg = ical_cfg.clone();
         let state_clone = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = http::run(state_clone, &bind_addr).await {
+            if let Err(e) = http::run(state_clone, ical_cfg).await {
                 error!("iCal HTTP server error: {e}");
             }
         });

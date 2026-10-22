@@ -174,7 +174,7 @@ pub async fn handle(
         ("!help", Some("post")) => return cmd_help_post(ctx, sender, room).await,
         ("!member", Some("welcome")) => return cmd_member_welcome(ctx, sender, room, rest).await,
         ("!ical", Some("revoke")) => return cmd_icalrevoke(ctx, sender, rest).await,
-        ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, rest).await,
+        ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, room, rest).await,
         ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
         ("!member", Some("link")) => {
             let s = cmd_linkmatrix(ctx, sender, room, rest).await?;

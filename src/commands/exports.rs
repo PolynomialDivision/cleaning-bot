@@ -385,11 +385,16 @@ pub(crate) async fn cmd_ical(
         drop(state);
 
         let url = crate::private::feed_url(ical_cfg, &raw_token);
-        return Ok(Some(format::mentionify(&format!(
+        let text = format!(
             "📅 Your calendar feed URL:\n{url}\n\n\
              Add this URL to your calendar app for automatic updates.\n\
              !ical shows it again; !ical reset replaces it."
-        ))));
+        );
+        if room.room_id() == ctx.room_id {
+            let sent = send_privately(ctx, room, sender, &text).await;
+            return Ok(Some(format::mentionify(&private_link_notice(ctx, sent))));
+        }
+        return Ok(Some(format::mentionify(&text)));
     }
 
     // Fallback: generate and upload as a Matrix file attachment.
@@ -413,9 +418,69 @@ pub(crate) async fn cmd_ical(
 
 // ── !ical reset [person] ───────────────────────────────────────────────────────
 
+/// How a calendar link asked for in the cleaning room reached its owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateDelivery {
+    /// Sent in their private chat.
+    Sent,
+    /// No private chat yet: invited to one, where the link comes with
+    /// their groups once they join (`help_board::greet_on_join`).
+    Invited,
+    /// No chat could be opened.
+    Failed,
+}
+
+/// `text` (with a calendar link) for `sender` in their private chat, never
+/// in the cleaning room: everyone there could subscribe as them.
+async fn send_privately(
+    ctx: &BotContext,
+    room: &Room,
+    sender: &OwnedUserId,
+    text: &str,
+) -> PrivateDelivery {
+    let client = room.client();
+    match crate::help_board::private_chat(ctx, &client, sender).await {
+        Some(chat) => {
+            let content = format::intentional(format::mentionify(text));
+            match mxbot_common::send::send_with_retry(&chat, content).await {
+                Ok(_) => PrivateDelivery::Sent,
+                Err(e) => {
+                    tracing::warn!("Could not send a calendar link privately: {e}");
+                    PrivateDelivery::Failed
+                }
+            }
+        }
+        None => match crate::help_board::invite_to_private_chat(ctx, &client, sender).await {
+            Ok(()) => PrivateDelivery::Invited,
+            Err(e) => {
+                tracing::warn!("Could not invite {sender} to a private chat: {e}");
+                PrivateDelivery::Failed
+            }
+        },
+    }
+}
+
+/// The answer in the cleaning room to a calendar link sent privately: no link.
+pub(crate) fn private_link_notice(ctx: &BotContext, delivery: PrivateDelivery) -> String {
+    match delivery {
+        PrivateDelivery::Sent => {
+            "🔒 Your calendar link is private: I've sent it to our private chat 📩".into()
+        }
+        PrivateDelivery::Invited => "🔒 Your calendar link is private: I've invited you to a \
+                                     chat with me, accept it and the link is there 📩"
+            .into(),
+        PrivateDelivery::Failed => format!(
+            "🔒 Your calendar link is private: open a chat with [me](https://matrix.to/#/{}) \
+             and send !ical there.",
+            ctx.config.matrix.user_id
+        ),
+    }
+}
+
 pub(crate) async fn cmd_icalreset(
     ctx: &BotContext,
     sender: &OwnedUserId,
+    room: &Room,
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
     let sender_mxid = sender.as_str();
@@ -479,10 +544,18 @@ pub(crate) async fn cmd_icalreset(
     state.save(&ctx.state_path).await?;
     drop(state);
 
-    Ok(Some(format::mentionify(&format!(
+    let text = format!(
         "🔄 New calendar feed URL:\n{url}\n\n\
          ⚠️ Old URLs for this person are now invalid."
-    ))))
+    );
+    if room.room_id() == ctx.room_id {
+        let sent = send_privately(ctx, room, sender, &text).await;
+        return Ok(Some(format::mentionify(&format!(
+            "🔄 Your old calendar links no longer work.\n{}",
+            private_link_notice(ctx, sent)
+        ))));
+    }
+    Ok(Some(format::mentionify(&text)))
 }
 
 /// Revoke only: administrators may revoke someone else's feed, never retrieve it.

@@ -130,10 +130,14 @@ Tap a number to join or leave a group:
 ✅ Joined **2nd Floor**
 
 📅 Next: 2nd Floor · 5 – 11 Oct
-🗓 Your calendar: subscribe
-📲 Add it in your calendar app.
+🗓 Your calendar link is private: I've invited you to a chat with me, accept it and the link is there 📩
 !mygroups reopens this · !join / !leave · !help
 ```
+
+The calendar link never appears in the cleaning room (anyone there could
+subscribe as you): a welcome there comes with an invite to a private chat,
+where your selector shows `🗓 Your calendar: subscribe`. If no chat can be
+opened, the welcome says to send `!ical` to the bot in a private chat.
 
 Tapping a number toggles that group. The bot edits the selector (no extra
 message) and, once the tap is saved, removes your reaction so the same
@@ -264,10 +268,26 @@ lookup never creates a person. All of this lives in `src/names.rs`.
 ### Calendar feeds (`!ical`)
 
 With `[ical_server]` configured, `!ical` gives a personal subscription URL
-(`https://…/ical/<token>.ics`); without it, a .ics file. The welcome and
-every group selector show the link too. It isn't treated as a secret: a
-feed holds only that person's own turns, which the plan in the room shows
-anyway, but anyone with the link can follow those turns.
+(`https://…/ical/<token>.ics`); without it, a .ics file. Group selectors in
+a private chat show the link too. A feed holds only that person's own
+turns, which the plan in the room shows anyway, but anyone with the link
+can follow those turns as them: the link is only ever sent in the person's
+private chat. `!ical` or `!ical reset` in the cleaning room sends it there
+(or invites them to one) and says so in the room, without the link.
+Selectors in the cleaning room from before lose their link at startup.
+
+- Opened in a browser (Accept prefers `text/html` over `text/calendar`:
+  tapping the link in Element), the feed URL answers a page instead
+  (`src/subscribe.rs`), in German, English or Ukrainian (`?lang=`, the
+  house-wide `house_lang` cookie, Accept-Language, else German): "Add to
+  iPhone/Mac calendar" (`webcal://`), Google Calendar's add-by-URL link, a
+  hint for Android (ICSx⁵ / DAVx⁵) and the address in a read-only field
+  with a copy button. No name or other personal data. It links the house
+  UI kit `/_house/ui.css` (same origin) before its own `/assets/subscribe.css`
+  and `/assets/subscribe.js`, and works without either; its own CSP allows
+  only this origin, nothing inline. A dead link gets a translated page with
+  the same 404. Calendar apps (`*/*`, `text/calendar`, no Accept) keep
+  getting the `.ics`.
 
 - Tokens are 256 bits of randomness. The server checks the exact token
   format, that the token isn't revoked, and that its person is active and

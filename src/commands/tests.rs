@@ -6495,3 +6495,138 @@ async fn another_account_of_a_resident_acts_as_them_and_an_admins_is_an_admin() 
     let refused = helpers::require_admin(&ctx, &id("@anna:matrix.org")).unwrap_err();
     assert!(refused.is::<mxbot_common::admin::NotAdmin>());
 }
+
+// ── Calendar links only in private chats ─────────────────────────────────────
+
+/// `selector_world` with calendar feeds set up.
+fn feed_world() -> (BotContext, PathBuf) {
+    let (ctx, path, _) = selector_world();
+    let state = std::mem::take(&mut *ctx.state.try_lock().unwrap());
+    let config: Config = toml::from_str(
+        r#"
+        [matrix]
+        homeserver = "https://matrix.example.org"
+        user_id = "@cleaningbot:example.org"
+        access_token = "test"
+        device_id = "TEST"
+
+        [security]
+        admin_users = ["@admin:example.org"]
+
+        [schedule]
+        room_id = "!room:example.org"
+        interval_weeks = 1
+        materialize_weeks = 4
+
+        [ical_server]
+        bind_addr = "127.0.0.1:0"
+        public_url = "https://cal.example.org"
+    "#,
+    )
+    .unwrap();
+    let ctx = BotContext {
+        config: Arc::new(config),
+        state: Arc::new(Mutex::new(state)),
+        ..ctx
+    };
+    (ctx, path)
+}
+
+#[tokio::test]
+async fn a_selector_in_the_cleaning_room_never_carries_the_calendar_link() {
+    let (ctx, path) = feed_world();
+    let room = ctx.room_id.clone();
+    let mut state = ctx.state.lock().await;
+    for invited in [false, true] {
+        let selector =
+            onboarding::prepare_selector(&ctx, &mut state, &room, MIA, true, invited).unwrap();
+        assert_eq!(selector.calendar_url, None);
+        assert!(
+            !selector.rendered.contains("/ical/"),
+            "{}",
+            selector.rendered
+        );
+        assert_eq!(selector.private_invite, invited);
+        if invited {
+            assert!(selector
+                .rendered
+                .contains("I've invited you to a chat with me"));
+        } else {
+            // No chat could be opened: how to ask for the link privately.
+            assert!(selector.rendered.contains(
+                "🗓 Your calendar: send !ical to [me](https://matrix.to/#/@cleaningbot:example.org) in a private chat"
+            ));
+        }
+    }
+    // Not even a token was made for the room.
+    assert!(state.calendar_tokens.is_empty());
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn a_selector_in_a_private_chat_links_the_persons_own_feed() {
+    let (ctx, path) = feed_world();
+    let private = OwnedRoomId::try_from("!private:example.org").unwrap();
+    let mut state = ctx.state.lock().await;
+    let selector =
+        onboarding::prepare_selector(&ctx, &mut state, &private, MIA, false, true).unwrap();
+    let url = selector.calendar_url.clone().unwrap();
+    assert!(url.starts_with("https://cal.example.org/ical/") && url.ends_with(".ics"));
+    assert!(!selector.private_invite);
+    assert!(selector.rendered.contains(&format!("[subscribe]({url})")));
+    let mia = state.person_by_matrix_id(MIA).unwrap().id.clone();
+    let token = crate::private::calendar_token(&mut state, &mia);
+    assert_eq!(url, format!("https://cal.example.org/ical/{token}.ics"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn old_selectors_in_the_cleaning_room_lose_their_calendar_link() {
+    let (ctx, path) = feed_world();
+    let mut state = ctx.state.lock().await;
+    let link = Some("https://cal.example.org/ical/abc.ics".to_owned());
+    for (id, room) in [
+        ("$old", ""),
+        ("$room", "!room:example.org"),
+        ("$dm", "!private:example.org"),
+    ] {
+        let mut selector = new_selector(&state, MIA, false);
+        selector.room_id = room.into();
+        selector.calendar_url = link.clone();
+        state.group_selectors.insert(id.into(), selector);
+    }
+    assert!(onboarding::drop_room_feed_links(&mut state, &ctx.room_id));
+    assert_eq!(state.group_selectors["$old"].calendar_url, None);
+    assert_eq!(state.group_selectors["$room"].calendar_url, None);
+    assert_eq!(state.group_selectors["$dm"].calendar_url, link);
+    // Once: nothing left to change.
+    assert!(!onboarding::drop_room_feed_links(&mut state, &ctx.room_id));
+    // The refresh then edits the link out of the room's selectors.
+    let old = &state.group_selectors["$old"];
+    assert!(!selector_text(&state, old).contains("/ical/"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn the_cleaning_room_hears_where_the_link_went_but_never_sees_it() {
+    use super::exports::{private_link_notice, PrivateDelivery};
+    let (ctx, path) = feed_world();
+    for delivery in [
+        PrivateDelivery::Sent,
+        PrivateDelivery::Invited,
+        PrivateDelivery::Failed,
+    ] {
+        let text = private_link_notice(&ctx, delivery);
+        assert!(
+            text.starts_with("🔒 Your calendar link is private"),
+            "{text}"
+        );
+        assert!(!text.contains("/ical/"), "{text}");
+    }
+    assert!(private_link_notice(&ctx, PrivateDelivery::Failed)
+        .contains("[me](https://matrix.to/#/@cleaningbot:example.org)"));
+    let _ = tokio::fs::remove_file(path).await;
+}

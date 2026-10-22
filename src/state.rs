@@ -318,6 +318,10 @@ pub struct GroupSelector {
     pub calendar_url: Option<String>,
     #[serde(default)]
     pub contact_url: Option<String>,
+    /// A selector in the cleaning room for someone the bot has just invited
+    /// to a private chat: their calendar link waits there.
+    #[serde(default)]
+    pub private_invite: bool,
     /// The groups offered, in number order (1️⃣ first). Fixed once posted,
     /// so a number always means the same group.
     pub group_ids: Vec<GroupId>,
