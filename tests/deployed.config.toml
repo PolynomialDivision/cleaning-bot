@@ -1,0 +1,50 @@
+# A copy of the config house-infra renders (stacks/matrix-bots/secrets/cleaning-bot.config.toml.j2), placeholder secrets. Must keep loading.
+[matrix]
+homeserver = "http://tuwunel:8008"
+user_id = "@cleaning-bot:example.org"
+device_id = "HOUSEINFRACLEANINGBOT"
+# access_token: MATRIX_ACCESS_TOKEN from session/matrix.env (roles/matrix_accounts).
+
+[security]
+admin_users = ["@admin:example.org", "@admin2:matrix.org", "@admin3:matrix.org"]
+allowed_inviters = ["@admin:example.org", "@admin2:matrix.org"]
+allowed_rooms = ["!KqWZYqkKa3EH8HI6ws7qL8Kk9lUT3IZ0HgTJwoL7iRc"]
+dm_rooms = ["!KqWZYqkKa3EH8HI6ws7qL8Kk9lUT3IZ0HgTJwoL7iRc"]
+encryption_strategy = "identity_based"
+# verified: a person's identity as verified with the bot (!admin verify); a new identity stops
+# everything until they verify again. cross_signed: every device they signed with their
+# current identity; a new identity is accepted and logged (mxbot-common, 2026-10-19).
+trust = "cross_signed"
+
+[security.verification]
+allowed_users = []
+allow_users_from_joined_rooms = true
+
+[security.admin_dm]
+enabled = true
+require_encryption = true
+require_verified_device = false
+# Also the bot's broadcast posts (digests, reminders) into the admins' private chats.
+receive_broadcasts = false
+
+[schedule]
+room_id = "!KqWZYqkKa3EH8HI6ws7qL8Kk9lUT3IZ0HgTJwoL7iRc"   # its own room (make matrix-rooms)
+interval_weeks = 1
+final_reminder_weekday = 6    # Sunday
+reminder_time = "09:00"
+timezone = "Europe/Berlin"
+
+[ical_server]
+bind_addr = "0.0.0.0:80"      # service_registry.cleaning-ical.upstream
+public_url = "https://cleaning.example.org"   # also CLEANING_ICAL_PUBLIC_URL
+
+# One resident, one person in the plan, whichever of their Matrix accounts writes: the house
+# account and the other accounts an admin entered in the directory (docs/IDENTITY.md, "Other
+# Matrix accounts"). Read every 15 minutes with the read-only directory token.
+[directory]
+provider = "authentik"
+api_url = "https://login.example.org/api/v3"
+server_name = "example.org"
+localpart_attribute = "matrix_localpart"
+matrix_ids_attribute = "matrix_ids"
+token_env = "DIRECTORY_TOKEN"

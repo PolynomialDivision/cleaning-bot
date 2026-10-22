@@ -791,7 +791,7 @@ async fn edit(
     let edit = content(ctx, room, text, notify)
         .await
         .make_replacement(ReplacementMetadata::new(id, Some(mentions(before))));
-    match room.send(edit).await {
+    match mxbot_common::send::send_with_retry(room, edit).await {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!("Failed to update a swap message: {e}");
@@ -807,7 +807,7 @@ async fn reply(room: &Room, to: &str, user: &str, text: &str) {
     };
     let mut content = format::intentional(format::mentionify(&format!("{user} {text}")));
     content.relates_to = Some(Relation::Reply(Reply::with_event_id(id)));
-    if let Err(e) = room.send(content).await {
+    if let Err(e) = mxbot_common::send::send_with_retry(room, content).await {
         tracing::warn!("Failed to answer a swap reaction: {e}");
     }
 }
@@ -815,7 +815,7 @@ async fn reply(room: &Room, to: &str, user: &str, text: &str) {
 async fn seed(room: &Room, event_id: &OwnedEventId, keys: &[&str]) {
     for key in keys {
         let reaction = ReactionEventContent::new(Annotation::new(event_id.clone(), (*key).into()));
-        if let Err(e) = room.send(reaction).await {
+        if let Err(e) = mxbot_common::send::send_with_retry(room, reaction).await {
             tracing::warn!("Failed to seed {key}: {e}");
         }
     }
@@ -856,13 +856,16 @@ pub async fn post_early_swap(
         record.rendered = early_text(&state, &record);
         (record.rendered.clone(), record.moved.clone(), record)
     };
-    let event_id = match room.send(content(ctx, room, &text, &notify).await).await {
-        Ok(response) => response.response.event_id,
-        Err(e) => {
-            tracing::warn!("Failed to tell about an early swap: {e}");
-            return;
-        }
-    };
+    let event_id =
+        match mxbot_common::send::send_with_retry(room, content(ctx, room, &text, &notify).await)
+            .await
+        {
+            Ok(event_id) => event_id,
+            Err(e) => {
+                tracing::warn!("Failed to tell about an early swap: {e}");
+                return;
+            }
+        };
     {
         let mut state = ctx.state.lock().await;
         state.early_swaps.insert(event_id.to_string(), record);
@@ -878,13 +881,16 @@ pub async fn post_request(
     mut req: HelpRequest,
 ) -> Option<OwnedEventId> {
     let (text, notify) = request_text(&*ctx.state.lock().await, &req);
-    let event_id = match room.send(content(ctx, room, &text, &notify).await).await {
-        Ok(response) => response.response.event_id,
-        Err(e) => {
-            tracing::warn!("Failed to post a 🆘 request: {e}");
-            return None;
-        }
-    };
+    let event_id =
+        match mxbot_common::send::send_with_retry(room, content(ctx, room, &text, &notify).await)
+            .await
+        {
+            Ok(event_id) => event_id,
+            Err(e) => {
+                tracing::warn!("Failed to post a 🆘 request: {e}");
+                return None;
+            }
+        };
     let swap_only = req.swap_only;
     req.rendered = text;
     req.mentioned = notify;
@@ -1230,7 +1236,7 @@ pub async fn tidy(ctx: &BotContext, room: &Room, nudge: bool) {
         );
         let mut message = content(ctx, room, &text, &admins).await;
         message.relates_to = Some(Relation::Reply(Reply::with_event_id(event_id)));
-        if let Err(e) = room.send(message).await {
+        if let Err(e) = mxbot_common::send::send_with_retry(room, message).await {
             tracing::warn!("Failed to tell the admins about a 🆘: {e}");
         }
     }

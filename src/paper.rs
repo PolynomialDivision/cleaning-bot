@@ -270,12 +270,15 @@ fn unclear_note(page: &Page, unclear: &[Unclear], taken_back: &[TakenBack]) -> S
 async fn photo_problem(room: &Room, event: &OwnedEventId, text: &str) -> Result<()> {
     let txn: mxbot_common::matrix_sdk::ruma::OwnedTransactionId =
         format!("paper-{}", hash(event.as_str())).into();
-    room.send(crate::format::intentional(
-        mxbot_common::matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-            text,
+    mxbot_common::send::send_with_retry_txn(
+        room,
+        crate::format::intentional(
+            mxbot_common::matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+                text,
+            ),
         ),
-    ))
-    .with_transaction_id(txn)
+        &txn,
+    )
     .await?;
     Ok(())
 }
@@ -1044,12 +1047,17 @@ pub async fn image(
     // Stable transaction prevents duplicate previews after a crash between send/save.
     let txn: mxbot_common::matrix_sdk::ruma::OwnedTransactionId =
         format!("paper-{}", hash(event.as_str())).into();
-    let sent=room.send(crate::format::intentional(mxbot_common::matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(text))).with_transaction_id(txn).await?;
+    let sent_id = mxbot_common::send::send_with_retry_txn(
+        room,
+        crate::format::intentional(
+            mxbot_common::matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(text),
+        ),
+        &txn,
+    )
+    .await?;
     let pending = proposal.result.is_none();
     let mut state = ctx.state.lock().await;
-    state
-        .paper_scans
-        .insert(sent.response.event_id.to_string(), proposal);
+    state.paper_scans.insert(sent_id.to_string(), proposal);
     state.save(&ctx.state_path).await?;
     drop(state);
     if pending {
@@ -1057,10 +1065,10 @@ pub async fn image(
             reaction::ReactionEventContent, relation::Annotation,
         };
         for key in ["✅", "❌"] {
-            room.send(ReactionEventContent::new(Annotation::new(
-                sent.response.event_id.clone(),
-                key.into(),
-            )))
+            mxbot_common::send::send_with_retry(
+                room,
+                ReactionEventContent::new(Annotation::new(sent_id.clone(), key.into())),
+            )
             .await?;
         }
     }
@@ -1110,7 +1118,7 @@ pub async fn reaction(
         ),
     )
     .make_replacement(ReplacementMetadata::new(id, None));
-    room.send(content).await?;
+    mxbot_common::send::send_with_retry(room, content).await?;
     if let Some(main) = room.client().get_room(&ctx.room_id) {
         let (y, w) = crate::state::current_iso_week();
         crate::scheduler::refresh_pinned_plan(ctx, &main, y, w).await;

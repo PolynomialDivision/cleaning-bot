@@ -280,7 +280,7 @@ pub async fn post(
     };
     let mut content = format::intentional(crate::names::mentionify(ctx, &text, room).await);
     content.relates_to = relation;
-    let event_id = room.send(content).await?.response.event_id;
+    let event_id = mxbot_common::send::send_with_retry(room, content).await?;
     let buttons = menu.turns.len();
     {
         let mut state = ctx.state.lock().await;
@@ -295,7 +295,7 @@ pub async fn post(
         .chain([trades::SWAP, trades::ASK])
     {
         let reaction = ReactionEventContent::new(Annotation::new(event_id.clone(), key.into()));
-        if let Err(e) = room.send(reaction).await {
+        if let Err(e) = mxbot_common::send::send_with_retry(room, reaction).await {
             tracing::warn!("Failed to seed {key} on a turn menu: {e}");
         }
     }
@@ -412,7 +412,7 @@ pub async fn refresh_all(ctx: &BotContext, client: &Client) {
         };
         let edit = format::quiet(crate::names::mentionify(ctx, &text, &room).await)
             .make_replacement(ReplacementMetadata::new(event_id, None));
-        match room.send(edit).await {
+        match mxbot_common::send::send_with_retry(&room, edit).await {
             Ok(_) => {
                 let mut state = ctx.state.lock().await;
                 if let Some(menu) = state.turn_menus.get_mut(&id) {

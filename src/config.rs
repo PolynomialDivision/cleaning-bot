@@ -1,6 +1,7 @@
+use mxbot_common::config::TimeOfDay;
 pub use mxbot_common::config::{MatrixConfig, SecurityConfig};
 use mxbot_common::directory::DirectoryConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Strategy used by the slot resolver to fill empty assignments.
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
@@ -39,12 +40,16 @@ pub struct ScheduleConfig {
     #[serde(default = "default_final_reminder_weekday")]
     pub final_reminder_weekday: u8,
     /// Local time (HH:MM) at or after which reminders are allowed to fire.
-    /// Default: "09:00".
+    /// Default: "09:00". A malformed time is refused at startup.
     #[serde(default = "default_reminder_time")]
-    pub reminder_time: String,
-    /// IANA timezone string used for weekday calculations (e.g. "Europe/Berlin").
-    #[serde(default = "default_timezone")]
-    pub timezone: String,
+    pub reminder_time: TimeOfDay,
+    /// IANA timezone used for weekday calculations (e.g. "Europe/Berlin").
+    /// Default: UTC. An unknown name is refused at startup.
+    #[serde(
+        default = "default_timezone",
+        deserialize_with = "deserialize_timezone"
+    )]
+    pub timezone: chrono_tz::Tz,
     /// Assignment fill strategy.
     #[serde(default)]
     pub fill_strategy: FillStrategy,
@@ -95,11 +100,23 @@ fn default_reminder_weekday() -> u8 {
 fn default_final_reminder_weekday() -> u8 {
     6
 } // Sunday
-fn default_reminder_time() -> String {
-    "09:00".to_owned()
+fn default_reminder_time() -> TimeOfDay {
+    TimeOfDay::new(9, 0)
 }
-fn default_timezone() -> String {
-    "UTC".to_owned()
+fn default_timezone() -> chrono_tz::Tz {
+    chrono_tz::UTC
+}
+
+/// An IANA timezone name such as "Europe/Berlin".
+fn deserialize_timezone<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<chrono_tz::Tz, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    name.trim().parse().map_err(|_| {
+        serde::de::Error::custom(format!(
+            "unknown timezone {name:?} (expected an IANA name such as \"Europe/Berlin\")"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -110,7 +127,8 @@ mod tests {
     fn the_example_config_parses_and_passes_the_startup_checks() {
         let config: Config = toml::from_str(include_str!("../config.example.toml")).unwrap();
         let s = &config.schedule;
-        assert!(s.timezone.parse::<chrono_tz::Tz>().is_ok());
+        assert_eq!(s.timezone, chrono_tz::Europe::Berlin);
+        assert_eq!(s.reminder_time, TimeOfDay::new(9, 0));
         assert!((1..=52).contains(&s.interval_weeks));
         assert!(s.reminder_weekday < 7 && s.final_reminder_weekday < 7);
         assert_eq!(s.fill_strategy, FillStrategy::RoundRobin);
@@ -142,6 +160,45 @@ mod tests {
         assert_eq!(d.matrix_ids_attribute, "matrix_ids");
         assert_eq!(d.token_env, "DIRECTORY_TOKEN");
         assert_eq!(d.refresh_minutes, 15);
+    }
+
+    /// The config house-infra renders today (stacks/matrix-bots/secrets/
+    /// cleaning-bot.config.toml.j2, with placeholder secrets) still loads.
+    #[test]
+    fn the_deployed_config_parses() {
+        let config: Config = toml::from_str(include_str!("../tests/deployed.config.toml")).unwrap();
+        let s = &config.schedule;
+        assert_eq!(s.timezone, chrono_tz::Europe::Berlin);
+        assert_eq!(s.reminder_time, TimeOfDay::new(9, 0));
+        assert_eq!(s.final_reminder_weekday, 6);
+        assert!(config.ical_server.is_some() && config.directory.is_some());
+        config.security.validate().unwrap();
+    }
+
+    fn schedule(extra: &str) -> Result<ScheduleConfig, toml::de::Error> {
+        toml::from_str(&format!("room_id = \"!room:example.org\"\n{extra}"))
+    }
+
+    #[test]
+    fn reminder_time_and_timezone_are_checked_at_load() {
+        let s = schedule("").unwrap();
+        assert_eq!(s.timezone, chrono_tz::UTC);
+        assert_eq!(s.reminder_time, TimeOfDay::new(9, 0));
+        let s = schedule("reminder_time = \"18:30\"\ntimezone = \"America/New_York\"").unwrap();
+        assert_eq!(s.reminder_time, TimeOfDay::new(18, 30));
+        assert_eq!(s.timezone, chrono_tz::America::New_York);
+        for bad in ["9", "25:00", "09:60", "nine", ""] {
+            let Err(e) = schedule(&format!("reminder_time = \"{bad}\"")) else {
+                panic!("{bad} was accepted");
+            };
+            assert!(e.to_string().contains("time"), "{bad}: {e}");
+        }
+        for bad in ["Europe/Berlinn", "CEST", ""] {
+            let Err(e) = schedule(&format!("timezone = \"{bad}\"")) else {
+                panic!("{bad} was accepted");
+            };
+            assert!(e.to_string().contains("unknown timezone"), "{bad}: {e}");
+        }
     }
 
     #[test]

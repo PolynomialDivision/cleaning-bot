@@ -457,13 +457,11 @@ pub async fn post_selector(
     let content = format::intentional(format::mentionify(&selector.rendered));
     let event_id = if first_welcome {
         let txn = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, pending_key.as_bytes());
-        room.send(content)
-            .with_transaction_id(format!("welcome-{txn}").into())
-            .await?
-            .response
-            .event_id
+        let txn: mxbot_common::matrix_sdk::ruma::OwnedTransactionId =
+            format!("welcome-{txn}").into();
+        mxbot_common::send::send_with_retry_txn(room, content, &txn).await?
     } else {
-        room.send(content).await?.response.event_id
+        mxbot_common::send::send_with_retry(room, content).await?
     };
     let numbers = selector.group_ids.len();
     {
@@ -479,7 +477,7 @@ pub async fn post_selector(
     for number in &NUMBERS[..numbers] {
         let reaction =
             ReactionEventContent::new(Annotation::new(event_id.clone(), (*number).to_owned()));
-        if let Err(e) = room.send(reaction).await {
+        if let Err(e) = mxbot_common::send::send_with_retry(room, reaction).await {
             tracing::warn!("Failed to seed {number} on a group selector: {e}");
         }
     }
@@ -590,7 +588,7 @@ pub async fn refresh_selectors(ctx: &BotContext, room: &Room) {
         };
         let edit: RoomMessageEventContent = format::quiet(format::mentionify(&text))
             .make_replacement(ReplacementMetadata::new(event_id, Some(already_mentioned)));
-        match room.send(edit).await {
+        match mxbot_common::send::send_with_retry(room, edit).await {
             Ok(_) => {
                 let mut state = ctx.state.lock().await;
                 if let Some(s) = state.group_selectors.get_mut(&id) {

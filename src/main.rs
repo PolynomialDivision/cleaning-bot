@@ -136,10 +136,6 @@ async fn main() -> Result<()> {
         info!("iCal public URL: {}", ical.public_url);
     }
     anyhow::ensure!(
-        config.schedule.timezone.parse::<chrono_tz::Tz>().is_ok(),
-        "Invalid schedule timezone"
-    );
-    anyhow::ensure!(
         (1..=52).contains(&config.schedule.interval_weeks),
         "interval_weeks must be 1–52"
     );
@@ -168,7 +164,7 @@ async fn main() -> Result<()> {
     // state load, etc.) so "what week is it" is decided in the configured
     // local timezone from the very first use, not just once the scheduler
     // ticks.
-    state::set_timezone(config.schedule.timezone.parse().unwrap_or(chrono_tz::UTC));
+    state::set_timezone(config.schedule.timezone);
 
     let store_path = mxbot_common::config::store_path_from_env();
     tokio::fs::create_dir_all(&store_path).await?;
@@ -384,7 +380,12 @@ async fn main() -> Result<()> {
                         if !private {
                             content.relates_to = Some(answer_to);
                         }
-                        r.send(format::intentional(content)).await.ok();
+                        if let Err(e) =
+                            mxbot_common::send::send_with_retry(&r, format::intentional(content))
+                                .await
+                        {
+                            error!("Failed to answer {sender}: {e}");
+                        }
                     }
                 }
                 if !private {
@@ -589,7 +590,9 @@ async fn main() -> Result<()> {
                             ev.content.relates_to.event_id.clone(),
                         )));
                         if let Some(r) = client.get_room(&ctx.room_id) {
-                            r.send(content).await.ok();
+                            if let Err(e) = mxbot_common::send::send_with_retry(&r, content).await {
+                                error!("Failed to answer {sender_mxid}'s ✅: {e}");
+                            }
                         }
                     }
                     Ok(

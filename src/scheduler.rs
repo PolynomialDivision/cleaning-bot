@@ -1,5 +1,4 @@
 use chrono::{Datelike, Timelike};
-use chrono_tz::Tz;
 use matrix_sdk::{
     ruma::{
         events::{
@@ -11,7 +10,7 @@ use matrix_sdk::{
             },
             Mentions,
         },
-        OwnedEventId, OwnedUserId,
+        OwnedEventId, OwnedTransactionId, OwnedUserId, TransactionId,
     },
     Client, Room,
 };
@@ -44,12 +43,10 @@ async fn mention_message(
 /// The buttons under the plan and a reminder: ✅ done, 🆘 can't make it.
 async fn seed_buttons(room: &Room, event_id: &OwnedEventId) {
     for key in ["✅", crate::trades::ASK] {
-        room.send(ReactionEventContent::new(Annotation::new(
-            event_id.clone(),
-            key.to_owned(),
-        )))
-        .await
-        .ok();
+        let button = ReactionEventContent::new(Annotation::new(event_id.clone(), key.to_owned()));
+        if let Err(e) = mxbot_common::send::send_with_retry(room, button).await {
+            warn!("Failed to seed {key} under {event_id}: {e}");
+        }
     }
 }
 
@@ -125,7 +122,7 @@ pub(crate) async fn refresh_pinned_plan(ctx: &BotContext, room: &Room, year: i32
             canonical_eid.clone(),
             already_mentioned,
         ));
-    match room.send(content).await {
+    match mxbot_common::send::send_with_retry(room, content).await {
         Ok(_) => {
             if let Err(e) =
                 register_weekly_plan_message(ctx, year, week, &msg, &canonical_eid).await
@@ -180,17 +177,11 @@ async fn register_weekly_plan_message(
 
 async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
     let _operation = ctx.operations.lock().await;
-    let tz: Tz = ctx
-        .config
-        .schedule
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::UTC);
-    let local_now = chrono::Utc::now().with_timezone(&tz);
+    let local_now = chrono::Utc::now().with_timezone(&ctx.config.schedule.timezone);
     let local_weekday = local_now.weekday().num_days_from_monday() as u8;
     let today = local_now.date_naive();
-    let (remind_h, remind_m) = parse_hhmm(&ctx.config.schedule.reminder_time);
-    let after_hour = (local_now.hour() as u8, local_now.minute() as u8) >= (remind_h, remind_m);
+    let remind_at = ctx.config.schedule.reminder_time;
+    let after_hour = (local_now.hour(), local_now.minute()) >= (remind_at.hour, remind_at.minute);
     let (year, week) = current_iso_week();
 
     roll_planning_horizon(ctx).await?;
@@ -229,12 +220,14 @@ async fn tick(ctx: &BotContext, client: &Client) -> anyhow::Result<()> {
         .then(|| build_weekly_plan(&state, year, week, &plan_groups))
     };
     if let Some((msg, mxids)) = plan {
-        let resp = room
-            .send(mention_message(ctx, &msg, &mxids, &room).await)
-            .with_transaction_id(format!("weekly-{year}-{week}").into())
-            .await
-            .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
-        let plan_eid = resp.response.event_id.clone();
+        let txn: OwnedTransactionId = format!("weekly-{year}-{week}").into();
+        let plan_eid = mxbot_common::send::send_with_retry_txn(
+            &room,
+            mention_message(ctx, &msg, &mxids, &room).await,
+            &txn,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
         register_weekly_plan_message(ctx, year, week, &msg, &plan_eid).await?;
         info!("Sent consolidated weekly plan for week {week}/{year}");
 
@@ -388,11 +381,10 @@ pub(crate) async fn announce_weekly_plan(
     };
 
     // ── Phase 2: send message (no lock held) ─────────────────────────────────
-    let resp = room
-        .send(mention_message(ctx, &msg, &mxids, room).await)
-        .await
-        .map_err(|e| anyhow::anyhow!("announce send failed: {e}"))?;
-    let new_eid = resp.response.event_id.clone();
+    let new_eid =
+        mxbot_common::send::send_with_retry(room, mention_message(ctx, &msg, &mxids, room).await)
+            .await
+            .map_err(|e| anyhow::anyhow!("announce send failed: {e}"))?;
 
     // ── Phase 3: update state (brief lock, via shared bookkeeping helper) ─────
     // (Removes ALL stale `weekly_plan_event_ids` entries for this week so old
@@ -522,15 +514,17 @@ pub(crate) async fn send_reminder(
     let Some((text, mxids)) = rendered else {
         return Ok(None);
     };
-    let mut send = room.send(mention_message(ctx, &text, &mxids, room).await);
-    if let Some(txn_id) = txn_id {
-        send = send.with_transaction_id(txn_id.into());
-    }
-    let event_id = send
-        .await
-        .map_err(|e| anyhow::anyhow!("send failed: {e}"))?
-        .response
-        .event_id;
+    let txn: OwnedTransactionId = match txn_id {
+        Some(txn_id) => txn_id.into(),
+        None => TransactionId::new(),
+    };
+    let event_id = mxbot_common::send::send_with_retry_txn(
+        room,
+        mention_message(ctx, &text, &mxids, room).await,
+        &txn,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
     {
         let mut state = ctx.state.lock().await;
         let now = current_iso_week();
@@ -626,7 +620,7 @@ async fn refresh_reminders(ctx: &BotContext, room: &Room, year: i32, week: u32) 
         };
         let edit = crate::format::quiet(mention_message(ctx, &text, &[], room).await)
             .make_replacement(ReplacementMetadata::new(event_id, None));
-        match room.send(edit).await {
+        match mxbot_common::send::send_with_retry(room, edit).await {
             Ok(_) => {
                 let mut state = ctx.state.lock().await;
                 if let Some(r) = state.reminder_messages.get_mut(&id) {
@@ -931,7 +925,7 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
                 event_id.clone(),
                 already_mentioned,
             ));
-            match room.send(content).await {
+            match mxbot_common::send::send_with_retry(&room, content).await {
                 Ok(_) => {
                     match register_weekly_plan_message(ctx, year, week, &raw_msg, &event_id).await {
                         Ok(()) => {
@@ -949,9 +943,8 @@ pub async fn reconcile_on_startup(ctx: &BotContext, client: &Client) {
             warn!(
                 "Reconcile: stored plan event for {week_key} is missing/inaccessible, recreating"
             );
-            match room.send(expected_content).await {
-                Ok(resp) => {
-                    let new_eid = resp.response.event_id.clone();
+            match mxbot_common::send::send_with_retry(&room, expected_content).await {
+                Ok(new_eid) => {
                     match register_weekly_plan_message(ctx, year, week, &raw_msg, &new_eid).await {
                         Ok(()) => {
                             seed_buttons(&room, &new_eid).await;
@@ -1054,14 +1047,6 @@ fn turn_lines(
         }
     }
     out
-}
-
-/// Parse "HH:MM" → (hour, minute). Falls back to (9, 0) on bad input.
-fn parse_hhmm(s: &str) -> (u8, u8) {
-    let mut parts = s.splitn(2, ':');
-    let h = parts.next().and_then(|p| p.parse().ok()).unwrap_or(9u8);
-    let m = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0u8);
-    (h.min(23), m.min(59))
 }
 
 #[cfg(test)]

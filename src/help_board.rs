@@ -80,7 +80,7 @@ pub fn board_text() -> String {
 /// Post a board in the cleaning room and seed its buttons.
 pub async fn post(ctx: &BotContext, room: &Room) -> Result<OwnedEventId> {
     let content = format::intentional(format::mentionify(&board_text()));
-    let event_id = room.send(content).await?.response.event_id;
+    let event_id = mxbot_common::send::send_with_retry(room, content).await?;
     {
         let mut state = ctx.state.lock().await;
         state.help_boards.insert(event_id.to_string());
@@ -88,7 +88,7 @@ pub async fn post(ctx: &BotContext, room: &Room) -> Result<OwnedEventId> {
     }
     for (emoji, _) in BUTTONS {
         let reaction = ReactionEventContent::new(Annotation::new(event_id.clone(), emoji.into()));
-        if let Err(e) = room.send(reaction).await {
+        if let Err(e) = mxbot_common::send::send_with_retry(room, reaction).await {
             tracing::warn!("Failed to seed {emoji} on the help board: {e}");
         }
     }
@@ -165,7 +165,7 @@ pub async fn run(
     match private {
         Some(chat) => {
             let content = format::intentional(format::mentionify(&text));
-            if let Err(e) = chat.send(content).await {
+            if let Err(e) = mxbot_common::send::send_with_retry(&chat, content).await {
                 tracing::warn!("Failed to answer {user} privately: {e}");
             }
         }
@@ -174,7 +174,9 @@ pub async fn run(
 }
 
 async fn answer(room: &Room, board: &OwnedEventId, user: &UserId, text: &str) {
-    if let Err(e) = room.send(answer_content(board, user, text)).await {
+    if let Err(e) =
+        mxbot_common::send::send_with_retry(room, answer_content(board, user, text)).await
+    {
         tracing::warn!("Failed to answer a help board tap: {e}");
     }
 }
@@ -214,7 +216,7 @@ async fn open_private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId
         let content = format::intentional(format::mentionify(
             "👋 Here I am! Ask me anything you'd ask in the cleaning room:\n!next · !plan · !mygroups · !done · !ical",
         ));
-        chat.send(content).await?;
+        mxbot_common::send::send_with_retry(&chat, content).await?;
         return Ok(());
     }
     // Still waiting for them to accept an earlier invite: invite again
@@ -276,7 +278,7 @@ pub async fn greet_on_join(ctx: &BotContext, room: &Room, user: &OwnedUserId) {
         }
     }
     let hello = format::intentional(format::mentionify(&private_hello()));
-    if let Err(e) = room.send(hello).await {
+    if let Err(e) = mxbot_common::send::send_with_retry(room, hello).await {
         tracing::warn!("Failed to greet {user} privately: {e}");
         return;
     }
