@@ -73,7 +73,8 @@ materialize_weeks = 26
 # One resident, one person in the plan, whichever of their Matrix accounts writes:
 # the bot reads the house's directory (Authentik) every refresh_minutes with a
 # read-only token (view users), from the environment variable token_env. A
-# resident's accounts: their house account @<login>:<server_name> (or the
+# resident's accounts: their house account @<login>:<server_name> (default: the
+# bot's own server; or the
 # localpart in localpart_attribute) and the full Matrix IDs an admin put into
 # the user attribute matrix_ids_attribute, e.g. matrix_ids: ["@me:matrix.org"].
 # An account listed for two people counts for neither. Without this section,
@@ -85,7 +86,7 @@ materialize_weeks = 26
 # server_name = "example.org"
 # localpart_attribute  = "matrix_localpart"
 # matrix_ids_attribute = "matrix_ids"
-# token_env       = "CLEANING_DIRECTORY_TOKEN"
+# token_env       = "DIRECTORY_TOKEN"
 # refresh_minutes = 15
 
 # ── Groups and members ─────────────────────────────────────────────────────────
