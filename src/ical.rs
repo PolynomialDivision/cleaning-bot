@@ -5,7 +5,10 @@
 //!
 //! Determinism guarantee: identical snapshot + identical person_id → identical bytes.
 
-use crate::{domain::PersonId, schedule::ScheduleSnapshot};
+use crate::{
+    domain::PersonId,
+    schedule::{AssignmentInstance, ScheduleSnapshot},
+};
 
 /// Render an RFC 5545–compliant `.ics` string for a specific person.
 ///
@@ -28,75 +31,7 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
 
     let mut events = String::new();
     for a in &assignments {
-        let dtstart = a.start.format("%Y%m%d").to_string();
-        let dtend = (a.end + chrono::Duration::days(1))
-            .format("%Y%m%d")
-            .to_string();
-        let summary = ical_text(&match &a.shift_label {
-            Some(shift) => format!("🧹 {} ({shift})", a.group_name),
-            None => format!("🧹 {}", a.group_name),
-        });
-
-        let mut desc_parts = vec![a.period_label.clone()];
-        if let Some(slot) = &a.slot_name {
-            desc_parts.push(format!("Task: {slot}"));
-        }
-        if a.is_skipped {
-            desc_parts.push("Skipped: no cleaning required".into());
-        }
-        if let Some(date) = a.completed_at {
-            desc_parts.push(format!("Completed: {date}"));
-        }
-        if !a.room_names.is_empty() {
-            desc_parts.push(format!("Rooms: {}", a.room_names.join(", ")));
-        }
-        // Show other assignees of the same group and turn (siblings in snapshot).
-        let others: Vec<&str> = snapshot
-            .assignments
-            .iter()
-            .filter(|b| {
-                b.group_id == a.group_id
-                    && b.iso_year == a.iso_year
-                    && b.iso_week == a.iso_week
-                    && b.shift == a.shift
-                    && b.assignee
-                        .as_ref()
-                        .map(|p| &p.id != person_id)
-                        .unwrap_or(false)
-            })
-            .filter_map(|b| b.assignee.as_ref().map(|p| p.name.as_str()))
-            .collect();
-        if !others.is_empty() {
-            desc_parts.push(format!("Others: {}", others.join(", ")));
-        }
-        if a.is_completed && !a.is_skipped {
-            if let Some(by) = &a.completed_by {
-                desc_parts.push(format!("✓ Done by {by}"));
-            } else {
-                desc_parts.push("✓ Done".to_owned());
-            }
-        }
-        let description = ical_text(&desc_parts.join("\n"));
-
-        events.push_str("BEGIN:VEVENT\r\n");
-        prop(&mut events, "UID", &a.uid);
-        prop(&mut events, "DTSTAMP", &dtstamp);
-        prop(&mut events, "DTSTART;VALUE=DATE", &dtstart);
-        prop(&mut events, "DTEND;VALUE=DATE", &dtend);
-        prop(&mut events, "SUMMARY", &summary);
-        prop(&mut events, "DESCRIPTION", &description);
-        prop(
-            &mut events,
-            "STATUS",
-            if a.is_skipped {
-                "CANCELLED"
-            } else {
-                "CONFIRMED"
-            },
-        );
-        prop(&mut events, "LAST-MODIFIED", &dtstamp);
-        prop(&mut events, "TRANSP", "TRANSPARENT");
-        events.push_str("END:VEVENT\r\n");
+        push_event(&mut events, snapshot, a, person_id, &dtstamp);
     }
 
     let mut out = String::new();
@@ -111,6 +46,103 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
         &ical_text(&format!("Cleaning – {person_name}")),
     );
     out.push_str(&events);
+    out.push_str("END:VCALENDAR\r\n");
+    out
+}
+
+/// One turn of `person_id` as a VEVENT (its UID the turn's, stable), into `events`.
+fn push_event(
+    events: &mut String,
+    snapshot: &ScheduleSnapshot,
+    a: &AssignmentInstance,
+    person_id: &PersonId,
+    dtstamp: &str,
+) {
+    let dtstart = a.start.format("%Y%m%d").to_string();
+    let dtend = (a.end + chrono::Duration::days(1))
+        .format("%Y%m%d")
+        .to_string();
+    let summary = ical_text(&match &a.shift_label {
+        Some(shift) => format!("🧹 {} ({shift})", a.group_name),
+        None => format!("🧹 {}", a.group_name),
+    });
+
+    let mut desc_parts = vec![a.period_label.clone()];
+    if let Some(slot) = &a.slot_name {
+        desc_parts.push(format!("Task: {slot}"));
+    }
+    if a.is_skipped {
+        desc_parts.push("Skipped: no cleaning required".into());
+    }
+    if let Some(date) = a.completed_at {
+        desc_parts.push(format!("Completed: {date}"));
+    }
+    if !a.room_names.is_empty() {
+        desc_parts.push(format!("Rooms: {}", a.room_names.join(", ")));
+    }
+    // Show other assignees of the same group and turn (siblings in snapshot).
+    let others: Vec<&str> = snapshot
+        .assignments
+        .iter()
+        .filter(|b| {
+            b.group_id == a.group_id
+                && b.iso_year == a.iso_year
+                && b.iso_week == a.iso_week
+                && b.shift == a.shift
+                && b.assignee
+                    .as_ref()
+                    .map(|p| &p.id != person_id)
+                    .unwrap_or(false)
+        })
+        .filter_map(|b| b.assignee.as_ref().map(|p| p.name.as_str()))
+        .collect();
+    if !others.is_empty() {
+        desc_parts.push(format!("Others: {}", others.join(", ")));
+    }
+    if a.is_completed && !a.is_skipped {
+        if let Some(by) = &a.completed_by {
+            desc_parts.push(format!("✓ Done by {by}"));
+        } else {
+            desc_parts.push("✓ Done".to_owned());
+        }
+    }
+    let description = ical_text(&desc_parts.join("\n"));
+
+    events.push_str("BEGIN:VEVENT\r\n");
+    prop(events, "UID", &a.uid);
+    prop(events, "DTSTAMP", dtstamp);
+    prop(events, "DTSTART;VALUE=DATE", &dtstart);
+    prop(events, "DTEND;VALUE=DATE", &dtend);
+    prop(events, "SUMMARY", &summary);
+    prop(events, "DESCRIPTION", &description);
+    prop(
+        events,
+        "STATUS",
+        if a.is_skipped {
+            "CANCELLED"
+        } else {
+            "CONFIRMED"
+        },
+    );
+    prop(events, "LAST-MODIFIED", dtstamp);
+    prop(events, "TRANSP", "TRANSPARENT");
+    events.push_str("END:VEVENT\r\n");
+}
+
+/// One turn as a CalDAV calendar object: a VCALENDAR with only that VEVENT (no METHOD, which
+/// a stored object must not carry). `dtstamp` as `YYYYMMDDTHHMMSSZ`.
+pub fn render_event(
+    snapshot: &ScheduleSnapshot,
+    a: &AssignmentInstance,
+    person_id: &PersonId,
+    dtstamp: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str("BEGIN:VCALENDAR\r\n");
+    prop(&mut out, "VERSION", "2.0");
+    prop(&mut out, "PRODID", "-//Cleaning Bot//EN");
+    prop(&mut out, "CALSCALE", "GREGORIAN");
+    push_event(&mut out, snapshot, a, person_id, dtstamp);
     out.push_str("END:VCALENDAR\r\n");
     out
 }

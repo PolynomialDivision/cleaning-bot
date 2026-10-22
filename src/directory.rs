@@ -133,7 +133,34 @@ pub fn person_account(accounts: &Accounts, state: &State, user: &UserId) -> Owne
         .unwrap_or_else(|| user.to_owned())
 }
 
-/// Read the directory now and every `refresh_minutes`, into `ctx.accounts`.
+/// Each house account's directory login (its username, which is also the resident's
+/// Nextcloud user: `calendars`), for every Matrix account of each resident. An account
+/// listed for two residents counts for neither.
+pub type Logins = HashMap<OwnedUserId, String>;
+
+pub fn logins(people: &[mxbot_common::directory::Person]) -> Logins {
+    let mut out: Logins = HashMap::new();
+    let mut shared: BTreeSet<OwnedUserId> = BTreeSet::new();
+    for person in people {
+        for account in &person.accounts {
+            match out.get(account) {
+                Some(other) if *other != person.username => {
+                    shared.insert(account.clone());
+                }
+                _ => {
+                    out.insert(account.clone(), person.username.clone());
+                }
+            }
+        }
+    }
+    for account in &shared {
+        out.remove(account);
+    }
+    out
+}
+
+/// Read the directory now and every `refresh_minutes`, into `ctx.accounts` (and the logins
+/// into `ctx.logins`).
 pub async fn run(ctx: BotContext, cfg: DirectoryConfig) {
     let directory = match UserId::parse(ctx.config.matrix.user_id.as_str())
         .map_err(anyhow::Error::from)
@@ -149,6 +176,8 @@ pub async fn run(ctx: BotContext, cfg: DirectoryConfig) {
     loop {
         match directory.people().await {
             Ok(people) => {
+                *ctx.logins.write().unwrap_or_else(|e| e.into_inner()) =
+                    Some(std::sync::Arc::new(logins(&people)));
                 let (accounts, shared) =
                     Accounts::new(people.into_iter().map(|p| p.accounts).collect());
                 let split = accounts.split_people(&*ctx.state.lock().await);
@@ -186,6 +215,32 @@ mod tests {
 
     fn id(s: &str) -> OwnedUserId {
         UserId::parse(s).unwrap()
+    }
+
+    #[test]
+    fn every_account_of_a_resident_has_their_login() {
+        let person = |username: &str, accounts: &[&str]| mxbot_common::directory::Person {
+            username: username.to_owned(),
+            accounts: accounts.iter().map(|a| id(a)).collect(),
+            groups: Default::default(),
+        };
+        let logins = logins(&[
+            person(
+                "anna",
+                &["@anna:house.org", "@anna:matrix.org", "@both:matrix.org"],
+            ),
+            person("ben", &["@ben:house.org", "@both:matrix.org"]),
+        ]);
+        assert_eq!(
+            logins.get(&id("@anna:matrix.org")).map(String::as_str),
+            Some("anna")
+        );
+        assert_eq!(
+            logins.get(&id("@ben:house.org")).map(String::as_str),
+            Some("ben")
+        );
+        assert_eq!(logins.get(&id("@both:matrix.org")), None);
+        assert_eq!(logins.len(), 3);
     }
 
     #[test]

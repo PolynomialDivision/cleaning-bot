@@ -89,6 +89,23 @@ materialize_weeks = 26
 # token_env       = "DIRECTORY_TOKEN"
 # refresh_minutes = 15
 
+# ── Calendars in Nextcloud (optional) ─────────────────────────────────────────
+# With this section and [directory], every resident with a house account (in the
+# directory: their login is their Nextcloud user) gets a calendar of their own,
+# "Cleaning: <name>", owned by the bot's Nextcloud account and shared read-only
+# with them alone. It holds their turns, follows every change within a minute,
+# and is compared in full every refresh_minutes. Someone who moves out (no longer
+# in the directory, or in no group) loses it. Residents without a house account
+# keep the !ical link. The app password comes from the environment variable
+# password_env, never from this file.
+#
+# [nextcloud]
+# account_url     = "https://cloud.example.org/remote.php/dav/calendars/cleaning-bot/"
+# username        = "cleaning-bot"
+# password_env    = "CALDAV_PASSWORD"
+# refresh_minutes = 15
+# weeks           = 26
+
 # ── Groups and members ─────────────────────────────────────────────────────────
 # Groups and members are managed at runtime via bot commands, not in this file.
 #

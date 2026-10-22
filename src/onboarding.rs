@@ -163,7 +163,14 @@ fn selector_text_with(
             None => lines.push("📅 No upcoming turn yet.".into()),
         }
     }
+    let calendar = person.and_then(|p| state.nextcloud_calendars.get(&p.id));
     lines.push(match &selector.calendar_url {
+        // their own calendar in the cloud (`calendars`): no link needed, and no secret
+        _ if calendar.is_some() => format!(
+            "🗓 Your turns: in your calendar in the cloud, **{}** (its Calendar app, or DAVx⁵ \
+             on your phone)",
+            calendar.map_or("", String::as_str)
+        ),
         Some(url) => {
             format!("🗓 Your calendar: [subscribe]({url})\n📲 Add it in your calendar app.")
         }
@@ -436,7 +443,16 @@ pub fn prepare_selector(
     selector.room_id = room_id.to_string();
     selector.contact_url = Some(format!("https://matrix.to/#/{}", ctx.config.matrix.user_id));
     let private = room_id != ctx.room_id;
-    if let Some(cfg) = ctx.config.ical_server.as_ref().filter(|_| private) {
+    // Someone with their own calendar in the cloud (`calendars`) gets no feed link.
+    let has_calendar = state
+        .person_by_matrix_id(user_id)
+        .is_some_and(|p| state.nextcloud_calendars.contains_key(&p.id));
+    if let Some(cfg) = ctx
+        .config
+        .ical_server
+        .as_ref()
+        .filter(|_| private && !has_calendar)
+    {
         state.apply_event(DomainEvent::PersonCreated {
             person_id: uuid::Uuid::new_v4().to_string(),
             display_name: user_id.into(),

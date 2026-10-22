@@ -376,6 +376,31 @@ pub(crate) async fn cmd_ical(
         .id
         .clone();
 
+    // Their own calendar in the cloud (`calendars`): where it is, instead of a link.
+    let calendar = ctx
+        .state
+        .lock()
+        .await
+        .nextcloud_calendars
+        .get(&person_id)
+        .cloned();
+    if let Some(name) = calendar {
+        let web_url = ctx.config.nextcloud.as_ref().and_then(|n| n.web_url());
+        let text = format!(
+            "{}\n🔗 !ical reset gives you a subscription link instead (for another calendar app).",
+            crate::calendars::where_it_is(&name, web_url.as_deref())
+        );
+        if room.room_id() == ctx.room_id
+            && send_privately(ctx, room, sender, &text).await == PrivateDelivery::Sent
+        {
+            return Ok(Some(format::mentionify(
+                "🗓 Your turns are in your own calendar in the cloud: I've sent where to find it \
+                 to our private chat 📩",
+            )));
+        }
+        return Ok(Some(format::mentionify(&text)));
+    }
+
     // If HTTP server is configured, return URL (token-based feed).
     if let Some(ical_cfg) = &ctx.config.ical_server {
         let mut state = ctx.state.lock().await;

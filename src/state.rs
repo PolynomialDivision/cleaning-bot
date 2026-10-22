@@ -516,6 +516,11 @@ pub struct State {
     /// re-seated (`resolver::rebalance_shifts`).
     #[serde(default)]
     pub shifts_rebalanced: bool,
+    /// People whose turns are in a Nextcloud calendar of their own, made and shared with them
+    /// (`calendars`): person ID → the calendar's name. Their selectors and `!ical` point there
+    /// instead of a feed link.
+    #[serde(default)]
+    pub nextcloud_calendars: std::collections::BTreeMap<PersonId, String>,
 }
 
 // ── Load / Save ───────────────────────────────────────────────────────────────

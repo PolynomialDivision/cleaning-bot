@@ -48,3 +48,12 @@ server_name = "example.org"
 localpart_attribute = "matrix_localpart"
 matrix_ids_attribute = "matrix_ids"
 token_env = "DIRECTORY_TOKEN"
+
+# Every resident with a house account: their turns in a calendar of their own in the cloud,
+# owned by the bot's Nextcloud account (cloud.yml bot_accounts). The app password is
+# CALDAV_PASSWORD from session/nextcloud.env (roles/nextcloud_app_passwords), never in this file.
+[nextcloud]
+account_url = "https://cloud.example.org/remote.php/dav/calendars/cleaning-bot/"
+username = "cleaning-bot"
+password_env = "CALDAV_PASSWORD"
+refresh_minutes = 15

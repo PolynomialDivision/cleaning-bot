@@ -173,6 +173,7 @@ fn test_context(state: State) -> (BotContext, PathBuf, OwnedUserId) {
         admin_users: HashSet::from([admin.clone()]),
         room_id: OwnedRoomId::try_from("!room:example.org").unwrap(),
         accounts: Default::default(),
+        logins: Default::default(),
     };
     (ctx, path, admin)
 }
@@ -212,6 +213,7 @@ fn test_context_with_horizon(
         admin_users: HashSet::from([admin.clone()]),
         room_id: OwnedRoomId::try_from("!room:example.org").unwrap(),
         accounts: Default::default(),
+        logins: Default::default(),
     };
     (ctx, path, admin)
 }
@@ -6578,6 +6580,41 @@ async fn a_selector_in_a_private_chat_links_the_persons_own_feed() {
     let mia = state.person_by_matrix_id(MIA).unwrap().id.clone();
     let token = crate::private::calendar_token(&mut state, &mia);
     assert_eq!(url, format!("https://cal.example.org/ical/{token}.ics"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn someone_with_a_calendar_in_the_cloud_is_pointed_there_instead_of_a_link() {
+    let (ctx, path) = feed_world();
+    let private = OwnedRoomId::try_from("!private:example.org").unwrap();
+    let mut state = ctx.state.lock().await;
+    // a person first (the selector makes one), then their calendar is shared with them
+    onboarding::prepare_selector(&ctx, &mut state, &private, MIA, false, true).unwrap();
+    state.calendar_tokens.clear();
+    let mia = state.person_by_matrix_id(MIA).unwrap().id.clone();
+    state
+        .nextcloud_calendars
+        .insert(mia.clone(), "Cleaning: Mia".into());
+    for room in [private.clone(), ctx.room_id.clone()] {
+        let selector =
+            onboarding::prepare_selector(&ctx, &mut state, &room, MIA, false, true).unwrap();
+        assert_eq!(selector.calendar_url, None, "{room}");
+        assert!(
+            selector
+                .rendered
+                .contains("🗓 Your turns: in your calendar in the cloud, **Cleaning: Mia**"),
+            "{}",
+            selector.rendered
+        );
+        assert!(!selector.rendered.contains("/ical/"));
+    }
+    assert!(state.calendar_tokens.is_empty(), "no feed token made");
+    // without one (no house account, or not shared yet): the link as before
+    state.nextcloud_calendars.clear();
+    let selector =
+        onboarding::prepare_selector(&ctx, &mut state, &private, MIA, false, true).unwrap();
+    assert!(selector.calendar_url.is_some());
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }

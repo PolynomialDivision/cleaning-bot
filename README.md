@@ -310,6 +310,39 @@ Selectors in the cleaning room from before lose their link at startup.
   task and completion in the description, and `LAST-MODIFIED`. Calendar
   apps poll on their own schedule; changes can take hours to show.
 
+### Calendars in the cloud (`[nextcloud]`)
+
+With `[nextcloud]` and `[directory]`, every resident with a house account
+(in the directory; their login is their Nextcloud user) gets a calendar of
+their own in the house's Nextcloud, `cleaning-<login>` named "Cleaning:
+<name>". The bot's Nextcloud account owns it and shares it read-only with
+that resident alone. It holds their turns from today on (one event per turn,
+the same UIDs as the feed) and follows every change of the plan within a
+minute (takeovers, swaps, rhythms, done marks): only what changed is
+written. At the start and every `refresh_minutes` everything is compared
+with the server (the calendar, its share, every event's ETag); past and
+obsolete turns go. The bookkeeping is `store/nextcloud.json`; losing it
+costs one full comparison, nothing else.
+
+- Once the calendar is shared with them, `!ical` and their group selectors
+  say where it is (the cloud's Calendar app, DAVx⁵ on Android, a CalDAV
+  account on iPhone) instead of a link, and the bot tells them once in their
+  private chat, if they have one. A feed link handed out before keeps
+  working; `!ical reset` still gives a new one (for another calendar app).
+- Nextcloud only has an account for someone after their first login there:
+  until then, the calendar waits unshared and they keep the feed link.
+- Residents without a house account (not in the directory) keep the feed.
+- Someone who is no longer in the directory, or in no group and without
+  turns, loses the calendar: unshared, then deleted (Nextcloud's trash bin
+  keeps it for a while). Only after a complete comparison, never while the
+  directory has not been read, and never when nobody at all would get one.
+- The app password comes from the environment (`password_env`, default
+  `CALDAV_PASSWORD`). Without it, or without `[directory]`, the bot runs
+  without calendars and says so in the log.
+
+All of this lives in `src/calendars.rs`; the CalDAV side (calendars, shares,
+events by UID) is mxbot-common's `calendar::nextcloud`.
+
 ### PDF
 
 `!plan pdf [N] [group]` renders N weeks from this one. Without N, as many

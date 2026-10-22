@@ -31,6 +31,7 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 
 mod analytics;
+mod calendars;
 mod commands;
 mod config;
 mod directory;
@@ -96,6 +97,9 @@ pub struct BotContext {
     pub room_id: OwnedRoomId,
     /// Residents with more than one Matrix account (`[directory]`).
     pub accounts: Arc<std::sync::RwLock<directory::Accounts>>,
+    /// Every resident's directory login by Matrix account (`[directory]`); `None` until the
+    /// directory was read once.
+    pub logins: Arc<std::sync::RwLock<Option<Arc<directory::Logins>>>>,
 }
 
 impl BotContext {
@@ -263,6 +267,7 @@ async fn main() -> Result<()> {
         admin_users: bot.admins().clone(),
         room_id: room_id.clone(),
         accounts: Arc::default(),
+        logins: Arc::default(),
     };
     if let Some(directory) = config.directory.clone() {
         tokio::spawn(directory::run(ctx.clone(), directory));
@@ -746,6 +751,11 @@ async fn main() -> Result<()> {
     }
     // Group selectors catch up with anything that changed while down.
     onboarding::refresh_all_selectors(&ctx, &client).await;
+
+    // Every resident's turns in a calendar of their own in the cloud (`[nextcloud]`).
+    if let Some(nextcloud) = config.nextcloud.clone() {
+        tokio::spawn(calendars::run(ctx.clone(), client.clone(), nextcloud));
+    }
 
     tokio::spawn(scheduler::run(ctx, client.clone()));
 

@@ -22,6 +22,56 @@ pub struct Config {
     pub ical_server: Option<ICalServerConfig>,
     /// If set, one resident's Matrix accounts count as one person (src/directory.rs).
     pub directory: Option<DirectoryConfig>,
+    /// If set (with `[directory]`), every resident with a house account gets their turns in a
+    /// Nextcloud calendar of their own (src/calendars.rs).
+    pub nextcloud: Option<NextcloudConfig>,
+}
+
+/// The bot's own Nextcloud account, which owns one calendar per resident and shares it with
+/// them (read only).
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct NextcloudConfig {
+    /// The account's calendar home, e.g.
+    /// "https://cloud.example.org/remote.php/dav/calendars/cleaning-bot/".
+    pub account_url: String,
+    /// The account (its Nextcloud user ID).
+    pub username: String,
+    /// The environment variable with the account's app password, never the password itself.
+    #[serde(default = "default_password_env")]
+    pub password_env: String,
+    /// How often everything is compared with the calendars (they follow every plan change
+    /// within a minute anyway).
+    #[serde(default = "default_refresh_minutes")]
+    pub refresh_minutes: u64,
+    /// How many weeks ahead the calendars show (1–104).
+    #[serde(default = "default_calendar_weeks")]
+    pub weeks: u32,
+}
+
+impl NextcloudConfig {
+    pub fn refresh(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.refresh_minutes.max(1) * 60)
+    }
+
+    /// The Nextcloud Calendar app's address on the account's server.
+    pub fn web_url(&self) -> Option<String> {
+        let url = reqwest::Url::parse(&self.account_url).ok()?;
+        Some(format!(
+            "{}/apps/calendar",
+            url.origin().ascii_serialization()
+        ))
+    }
+}
+
+fn default_password_env() -> String {
+    "CALDAV_PASSWORD".to_owned()
+}
+fn default_refresh_minutes() -> u64 {
+    15
+}
+fn default_calendar_weeks() -> u32 {
+    26
 }
 
 #[derive(Deserialize)]
@@ -160,6 +210,26 @@ mod tests {
         assert_eq!(d.matrix_ids_attribute, "matrix_ids");
         assert_eq!(d.token_env, "DIRECTORY_TOKEN");
         assert_eq!(d.refresh_minutes, 15);
+        assert!(toml::from_str::<Config>(&directory)
+            .unwrap()
+            .nextcloud
+            .is_none());
+        let nextcloud = include_str!("../config.example.toml")
+            .replace("# [nextcloud]", "[nextcloud]")
+            .replace("# account_url", "account_url")
+            .replace("# username", "username");
+        let n = toml::from_str::<Config>(&nextcloud)
+            .unwrap()
+            .nextcloud
+            .unwrap();
+        assert_eq!(n.username, "cleaning-bot");
+        assert_eq!(n.password_env, "CALDAV_PASSWORD");
+        assert_eq!(n.refresh_minutes, 15);
+        assert_eq!(n.weeks, 26);
+        assert_eq!(
+            n.web_url().as_deref(),
+            Some("https://cloud.example.org/apps/calendar")
+        );
     }
 
     /// The config house-infra renders today (stacks/matrix-bots/secrets/
@@ -172,6 +242,9 @@ mod tests {
         assert_eq!(s.reminder_time, TimeOfDay::new(9, 0));
         assert_eq!(s.final_reminder_weekday, 6);
         assert!(config.ical_server.is_some() && config.directory.is_some());
+        let n = config.nextcloud.as_ref().unwrap();
+        assert_eq!(n.password_env, "CALDAV_PASSWORD");
+        assert!(n.account_url.ends_with("/calendars/cleaning-bot/"));
         config.security.validate().unwrap();
     }
 
