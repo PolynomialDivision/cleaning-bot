@@ -221,6 +221,7 @@ mod tests {
     fn every_account_of_a_resident_has_their_login() {
         let person = |username: &str, accounts: &[&str]| mxbot_common::directory::Person {
             username: username.to_owned(),
+            name: String::new(),
             accounts: accounts.iter().map(|a| id(a)).collect(),
             groups: Default::default(),
         };
