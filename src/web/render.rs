@@ -30,6 +30,8 @@ pub struct Plan {
     pub me: Option<PersonId>,
     /// Their name at the house's login (X-House-Name), for "logged in as".
     pub login_name: String,
+    /// Not logged in (in the house, `[web] guests`): the plan, but nobody is "you".
+    pub guest: bool,
 }
 
 /// A group as its card names it: the turns themselves come from the snapshot.
@@ -721,7 +723,12 @@ pub fn people_page(f: &Frame, plan: &Plan, weeks: usize) -> String {
 pub fn me_page(f: &Frame, plan: &Plan, weeks: usize) -> String {
     let lang = f.lang;
     let mut out = format!("<h1>{}</h1>", esc(t(lang, "me.title")));
-    if plan.me.is_none() {
+    if plan.guest {
+        out.push_str(&format!(
+            "<div class=\"h-note\" role=\"note\"><p>{}</p></div>",
+            esc(t(lang, "me.guest"))
+        ));
+    } else if plan.me.is_none() {
         out.push_str(&format!(
             "<div class=\"h-note warn\" role=\"note\"><p>{}</p><p>{}</p></div>",
             esc(&tf(lang, "me.login", &[&plan.login_name])),

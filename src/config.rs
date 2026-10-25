@@ -46,6 +46,10 @@ pub struct WebConfig {
     /// Groups (X-House-Groups) that may see it; empty: everyone the login lets through.
     #[serde(default)]
     pub allowed_groups: Vec<String>,
+    /// Requests through the proxy without a login see the plan as a guest (no "you", no
+    /// own turns): for a proxy that asks for the login only from outside the house.
+    #[serde(default)]
+    pub guests: bool,
     /// The house's start page, linked in the house bar ("⌂ Name"). Unset: public_url's
     /// parent domain (`https://putzplan.example.org` → `https://example.org/`).
     #[serde(default)]
@@ -66,6 +70,7 @@ impl Default for WebConfig {
             bind_addr: default_web_bind(),
             public_url: String::new(),
             allowed_groups: Vec::new(),
+            guests: false,
             home_url: None,
             home_name: None,
         }
@@ -303,7 +308,7 @@ mod tests {
         assert_eq!(s.timezone, chrono_tz::Europe::Berlin);
         assert_eq!(s.reminder_time, TimeOfDay::new(9, 0));
         assert_eq!(s.final_reminder_weekday, 6);
-        assert!(config.directory.is_some() && config.web.enabled);
+        assert!(config.directory.is_some() && config.web.enabled && config.web.guests);
         config.web.validate().unwrap();
         let n = config.nextcloud.as_ref().unwrap();
         assert_eq!(n.password_env, "CALDAV_PASSWORD");

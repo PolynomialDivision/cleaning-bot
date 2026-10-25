@@ -64,6 +64,8 @@ pub struct Settings {
     pub bind_addr: String,
     pub public_url: String,
     pub allowed_groups: Vec<String>,
+    /// Without a login (the proxy asks for it only from outside the house): a guest.
+    pub guests: bool,
     pub proxy_secret: Vec<u8>,
     /// The house's start page for the house bar; None: public_url's parent domain.
     pub home_url: Option<String>,
@@ -77,6 +79,7 @@ impl Settings {
             bind_addr: cfg.bind_addr.clone(),
             public_url: cfg.public_url.clone(),
             allowed_groups: cfg.allowed_groups.clone(),
+            guests: cfg.guests,
             proxy_secret,
             home_url: cfg.home_url.clone(),
             home_name: cfg.home_name.clone(),
@@ -161,8 +164,10 @@ pub async fn serve(web: Web) -> Result<()> {
 pub struct Visitor {
     /// Their house account first, then their other accounts (X-House-Matrix-Ids).
     pub accounts: Vec<OwnedUserId>,
-    /// Their name at the login (X-House-Name, else the login).
+    /// Their name at the login (X-House-Name, else the login); empty for a guest.
     pub name: String,
+    /// No login: in the house, where the proxy lets everyone through (`[web] guests`).
+    pub guest: bool,
     pub frame: Frame,
 }
 
@@ -237,6 +242,16 @@ fn visitor(headers: &HeaderMap, query: Option<&str>, web: &Web) -> Result<Visito
         return Err(Refused::Proxy(lang));
     }
     let login = header_text(headers, USER_HEADER);
+    if login.is_empty() && web.settings.guests {
+        // The proxy drops a client's own X-House-* headers and lets requests without a
+        // login through only from inside the house.
+        return Ok(Visitor {
+            accounts: Vec::new(),
+            name: String::new(),
+            guest: true,
+            frame,
+        });
+    }
     if login.is_empty() || login.len() > 128 || login.chars().any(char::is_control) {
         return Err(Refused::NoLogin(lang));
     }
@@ -268,6 +283,7 @@ fn visitor(headers: &HeaderMap, query: Option<&str>, web: &Web) -> Result<Visito
     Ok(Visitor {
         accounts,
         name,
+        guest: false,
         frame,
     })
 }
@@ -541,6 +557,7 @@ impl Web {
             people,
             me,
             login_name: visitor.name.clone(),
+            guest: visitor.guest,
         }
     }
 }

@@ -43,6 +43,8 @@ bind_addr = "0.0.0.0:8080"    # service_registry.cleaning-plan.upstream
 public_url = "https://cleaning.example.org"
 # The same groups Authentik lets through (identity_access.cleaning-plan), checked again by the bot.
 allowed_groups = ["residents", "house-admins", "it-admins"]
+# Caddy asks for the login only from outside the house: without one, the plan as to a guest.
+guests = true
 
 # One resident, one person in the plan, whichever of their Matrix accounts writes: the house
 # account and the other accounts an admin entered in the directory (docs/IDENTITY.md, "Other

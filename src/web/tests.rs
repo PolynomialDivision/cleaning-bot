@@ -111,6 +111,11 @@ impl Site {
     }
 
     fn with(state: State, accounts: Accounts) -> Site {
+        Site::configured(state, accounts, false)
+    }
+
+    /// `guests`: the proxy asks for the login only from outside the house.
+    fn configured(state: State, accounts: Accounts, guests: bool) -> Site {
         let web = Web::new(
             Arc::new(Mutex::new(state)),
             Arc::new(RwLock::new(accounts)),
@@ -118,6 +123,7 @@ impl Site {
                 bind_addr: "127.0.0.1:0".into(),
                 public_url: "https://putzplan.example.org".into(),
                 allowed_groups: vec!["residents".into()],
+                guests,
                 proxy_secret: SECRET.as_bytes().to_vec(),
                 home_url: None,
                 home_name: None,
@@ -266,6 +272,41 @@ async fn only_the_house_proxy_with_a_login_in_an_allowed_group_gets_in() {
     assert_eq!(headers["x-robots-tag"], "noindex, nofollow");
     let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
     assert!(csp.starts_with("default-src 'none'") && !csp.contains("unsafe"));
+}
+
+#[tokio::test]
+async fn in_the_house_a_guest_sees_the_plan_without_logging_in() {
+    let guest = |path: &str, secret: &str| {
+        Request::get(path)
+            .header(PROXY_SECRET_HEADER, secret)
+            .header(header::ACCEPT_LANGUAGE, "en")
+            .body(Body::empty())
+            .unwrap()
+    };
+    // Without `guests`, no login is no entry.
+    let (status, ..) = Site::new().send(guest("/", SECRET)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let site = Site::configured(house(), Accounts::default(), true);
+    let (status, _, week) = site.send(guest("/", SECRET)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        week.contains("Staircase") && week.contains("Alice"),
+        "{week}"
+    );
+    assert!(
+        !week.contains("class=\"you\"") && !week.contains("yours-title"),
+        "nobody is you"
+    );
+    let (_, _, me) = site.send(guest("/me", SECRET)).await;
+    assert!(me.contains("know who you are"), "{me}");
+    // Still only through the proxy.
+    let (status, ..) = site.send(guest("/", &"b".repeat(SECRET.len()))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // With a login, as always: their turns are theirs.
+    let (status, me) = site.get("/me", "alice").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!me.contains("know who you are"));
 }
 
 #[tokio::test]

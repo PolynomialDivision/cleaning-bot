@@ -301,6 +301,12 @@ pub const TEXTS: &[(&str, &str, &str, &str)] = &[
         "У найближчі {} тиж. у тебе немає чергувань.",
     ),
     ("me.login", "Angemeldet als {}.", "Logged in as {}.", "Ти увійшов(-ла) як {}."),
+    (
+        "me.guest",
+        "Im Hausnetz siehst du den Plan ohne Anmeldung, aber wir wissen nicht, wer du bist. Deine eigenen Termine schickt dir der Putzbot auf !next.",
+        "In the house you see the plan without logging in, but we don't know who you are. The cleaning bot sends you your own turns on !next.",
+        "У мережі будинку ти бачиш графік без входу, але ми не знаємо, хто ти. Свої чергування отримаєш від бота прибирання на !next.",
+    ),
     ("me.with", "mit {}", "with {}", "разом із {}"),
     (
         "me.calendar",

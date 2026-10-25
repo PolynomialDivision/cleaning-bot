@@ -431,6 +431,11 @@ else German (`src/lang.rs`).
   `CLEANING_PROXY_SECRET` (at least 32 characters; the bot refuses to start
   without it while `[web]` is on). No or a wrong secret: 403; no login: 401;
   not in `allowed_groups` (when set): 403.
+- **In the house without a login** (`[web] guests = true`): for a proxy that
+  asks for the login only from outside the house, the plan is shown to a
+  request without a login as to a guest: everything, but nobody is "you",
+  and `/me` says to ask the bot (`!next`). The proxy must drop a client's own
+  `X-House-*` headers (Caddy does) and still send the secret.
 - **Who you are:** your house account `@<login>:<the bot's server>` or one
   of the accounts in `X-House-Matrix-Ids`, the person the plan knows them
   by (see *Several Matrix accounts*). Someone the plan doesn't know sees
