@@ -56,7 +56,7 @@ main, .name, .g, .place-name { overflow-wrap: anywhere; }
 .not-due { font-size: 15px; }
 
 /* Turns: when, then each place with its people */
-.turns, .places, .weeks, .compact { list-style: none; margin: 0; padding: 0; }
+.turns, .places, .weeks, .timeline-weeks, .compact { list-style: none; margin: 0; padding: 0; }
 .turn { padding: 8px 10px; margin: 0 -10px; border-radius: 10px; }
 .turn + .turn { border-top: 1px solid var(--h-line); }
 .turn .when { font-size: 15px; margin-bottom: 4px; }
@@ -98,7 +98,8 @@ main, .name, .g, .place-name { overflow-wrap: anywhere; }
 .compact .g { font-weight: 650; }
 .compact .days, .compact .wk, .compact .sep { color: var(--h-muted); }
 
-/* Groups: a timeline per group */
+/* Groups: a timeline per group, one row per week (a list of its own: `.weeks` is the grid of
+   week cards on the first page, and would put the rows side by side) */
 .timeline .week { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--h-line); }
 .timeline .week:first-child { border-top: 0; padding-top: 0; }
 .timeline .week.now .wk strong { color: var(--h-accent); }

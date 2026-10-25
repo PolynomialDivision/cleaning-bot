@@ -302,12 +302,9 @@ fn turn_item(plan: &Plan, lang: Lang, turn: &Turn, in_week: bool) -> String {
             )
         })
         .collect();
+    // A whole week in a list of weeks: its week says when, "this week" says it runs.
     let when = if in_week && turn.whole_week {
-        if now.is_empty() {
-            String::new()
-        } else {
-            format!("<div class=\"when\">{}</div>", now.trim_start())
-        }
+        String::new()
     } else {
         format!(
             "<div class=\"when\">{}{now}</div>",
@@ -591,7 +588,8 @@ pub fn groups_page(f: &Frame, plan: &Plan, weeks: usize, only: Option<&str>) -> 
             group.meta(lang)
         ));
         let mut any = false;
-        out.push_str("<ol class=\"weeks\">");
+        // Not `weeks`: that is the grid of week cards on the first page.
+        out.push_str("<ol class=\"timeline-weeks\">");
         for week in weeks_from(plan.week, weeks) {
             let list = turns(
                 plan.snapshot
