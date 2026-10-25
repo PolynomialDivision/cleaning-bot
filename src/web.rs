@@ -41,7 +41,6 @@ use crate::{
     directory::{self, Accounts},
     schedule::build_schedule_from,
     state::{self, State},
-    subscribe,
 };
 
 mod i18n;
@@ -339,10 +338,10 @@ pub struct Frame {
 
 impl Frame {
     fn of(headers: &HeaderMap, query: Option<&str>) -> Frame {
-        let lang = subscribe::language(headers, query);
+        let lang = crate::lang::language(headers, query);
         Frame {
             lang,
-            lang_in_links: lang != subscribe::language(headers, None),
+            lang_in_links: lang != crate::lang::language(headers, None),
         }
     }
 

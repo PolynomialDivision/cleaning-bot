@@ -4,7 +4,7 @@
 //! The bot's Nextcloud account owns one calendar per resident with a house account,
 //! `cleaning-<login>` named "Cleaning: `<name>`", shared read-only with that resident alone
 //! (their Nextcloud user is their directory login). It holds their turns from today on, one
-//! event per turn with the turn's UID (the same as in the `!ical` feed), and follows every
+//! event per turn with the turn's UID (the same as in an `!ical` file), and follows every
 //! plan change (takeovers, swaps, rhythms, done marks) within a minute: only the events that
 //! changed are written. Every `refresh_minutes` (and at the start) everything is compared with
 //! the server: calendar, share, every event's ETag; past and obsolete turns go.
@@ -18,11 +18,10 @@
 //! Two logins with the same calendar (their slugs differ only in characters a slug cannot hold,
 //! or in case) get none: neither could tell whose turns and share it holds.
 //!
-//! Residents without a house account keep the feed link (`!ical`). Once a resident's calendar
-//! is shared with them, their selectors and `!ical` say where it is instead, and the bot tells
+//! Residents without a house account get their turns as a file (`!ical`). Once a resident's
+//! calendar is shared with them, their selectors and `!ical` say where it is, and the bot tells
 //! them once in their private chat (if they have one; a failed note is tried again next round).
-//! Feed links handed out before keep working. Without calendars managed (no `[nextcloud]`, no
-//! app password), everyone is pointed at the feed link again.
+//! Without calendars managed (no `[nextcloud]`, no app password), `!ical` sends files again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -274,7 +273,7 @@ async fn full_one(
         current = nc.shares(&want.slug).await?;
     }
     // Nextcloud answers a share with someone it has no account of with 200 and shares nothing:
-    // until their first login there, they keep the feed link.
+    // until their first login there, `!ical` sends them a file.
     cached.shared = current.contains(&share);
 
     let server: BTreeMap<String, String> = nc
@@ -500,7 +499,7 @@ pub fn forget_all(state: &mut State) -> bool {
 
 /// The calendars are not kept (no `[nextcloud]`, no `[directory]`, no app password): who was
 /// told their turns are in the cloud would never hear of a change, so selectors and `!ical`
-/// point at the feed link again.
+/// stop saying so (`!ical` sends a file).
 pub async fn not_managed(ctx: &BotContext, client: &Client) {
     let _operation = ctx.operations.lock().await;
     let changed = {
@@ -514,7 +513,7 @@ pub async fn not_managed(ctx: &BotContext, client: &Client) {
         changed
     };
     if changed {
-        info!("Calendars: not kept any more; everyone is pointed at the feed link again");
+        info!("Calendars: not kept any more; !ical sends files again");
         crate::onboarding::refresh_all_selectors(ctx, client).await;
     }
 }
@@ -532,7 +531,7 @@ pub async fn run(ctx: BotContext, client: Client, cfg: NextcloudConfig) {
         .filter(|p| !p.is_empty());
     let Some(password) = password else {
         warn!(
-            "Calendars: no app password in {}; no calendars, feed links only",
+            "Calendars: no app password in {}; no calendars, !ical sends files",
             cfg.password_env
         );
         not_managed(&ctx, &client).await;
@@ -683,11 +682,7 @@ async fn tell(
             .filter_map(|m| OwnedUserId::try_from(m).ok())
             .collect()
     };
-    let text = format!(
-        "{}\n🔗 A calendar link you subscribed to before keeps working; \
-         !ical revoke switches it off.",
-        where_it_is(&name, web_url)
-    );
+    let text = where_it_is(&name, web_url);
     for account in accounts {
         let Some(chat) = crate::help_board::private_chat(ctx, client, &account).await else {
             continue;
@@ -987,7 +982,7 @@ mod tests {
         assert_eq!(
             want.keys().collect::<Vec<_>>(),
             ["anna", "ben"],
-            "carol has no house account: no calendar, her feed link stays"
+            "carol has no house account: no calendar"
         );
         let mut cache = Cache::default();
         let outcome = reconcile(&nc, &mut cache, &want, true, NOW).await;
@@ -1015,7 +1010,11 @@ mod tests {
             .map(|a| a.uid.clone())
             .collect();
         assert!(!expected.is_empty());
-        assert_eq!(uids(&fake, "cleaning-anna"), expected, "the feed's UIDs");
+        assert_eq!(
+            uids(&fake, "cleaning-anna"),
+            expected,
+            "the UIDs of an !ical file"
+        );
         assert_eq!(
             ready(&cache, &want),
             BTreeMap::from([
@@ -1323,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn without_calendars_kept_everyone_gets_the_feed_link_again() {
+    fn without_calendars_kept_nobody_is_told_their_turns_are_in_the_cloud() {
         let (mut state, _) = house();
         assert!(!forget_all(&mut state));
         let anna = person_id(&state, "@anna:house.org");

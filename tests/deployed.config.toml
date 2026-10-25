@@ -34,9 +34,15 @@ final_reminder_weekday = 6    # Sunday
 reminder_time = "09:00"
 timezone = "Europe/Berlin"
 
-[ical_server]
-bind_addr = "0.0.0.0:80"      # service_registry.cleaning-ical.upstream
-public_url = "https://cleaning.example.org"   # also CLEANING_ICAL_PUBLIC_URL
+[web]
+# service_registry.cleaning-plan: the plan read-only, in the house and over the VPN, with
+# Authentik in front of every request (forward auth); the secret header's value is
+# CLEANING_PROXY_SECRET (secret_env), never in this file.
+enabled = true
+bind_addr = "0.0.0.0:8080"    # service_registry.cleaning-plan.upstream
+public_url = "https://cleaning.example.org"
+# The same groups Authentik lets through (identity_access.cleaning-plan), checked again by the bot.
+allowed_groups = ["residents", "house-admins", "it-admins"]
 
 # One resident, one person in the plan, whichever of their Matrix accounts writes: the house
 # account and the other accounts an admin entered in the directory (docs/IDENTITY.md, "Other

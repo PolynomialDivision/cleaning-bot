@@ -1,12 +1,12 @@
 //! The website's texts in German, English and Ukrainian: a key table, `t(lang, key)`, and
 //! dates, rhythms and numbers as each language writes them.
 //!
-//! The language is the subscribe page's (`subscribe::language`): `?lang=`, the house's
-//! `house_lang` cookie, Accept-Language, else German.
+//! The language is chosen as on the house's other pages (`crate::lang::language`):
+//! `?lang=`, the house's `house_lang` cookie, Accept-Language, else German.
 
 use chrono::{Datelike, NaiveDate, Weekday};
 
-pub use crate::subscribe::Lang;
+pub use crate::lang::Lang;
 
 /// The text for `key`; empty when there is none (a test checks every key used).
 pub fn t(lang: Lang, key: &str) -> &'static str {
@@ -304,9 +304,9 @@ pub const TEXTS: &[(&str, &str, &str, &str)] = &[
     ("me.with", "mit {}", "with {}", "разом із {}"),
     (
         "me.calendar",
-        "Deine Termine im Kalender: Schreib dem Putzbot im privaten Chat !ical.",
-        "Your turns in your calendar: send !ical to the cleaning bot in a private chat.",
-        "Твої чергування в календарі: напиши боту прибирання !ical у приватному чаті.",
+        "Deine Termine stehen in deinem eigenen Kalender in der Hauscloud (App „Kalender“, auf dem Handy DAVx⁵). Wo genau, sagt dir der Putzbot auf !ical.",
+        "Your turns are in your own calendar in the house cloud (its Calendar app, or DAVx⁵ on your phone). Send !ical to the cleaning bot to see which.",
+        "Твої чергування — у твоєму власному календарі в хмарі будинку (застосунок «Календар» або DAVx⁵ на телефоні). Який саме, підкаже бот прибирання на !ical.",
     ),
     (
         "me.change",

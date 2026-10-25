@@ -313,15 +313,6 @@ pub struct GroupSelector {
     /// memberships change after that, the feedback is out of date.
     #[serde(default)]
     pub feedback_at: Option<usize>,
-    /// The user's calendar feed, when feeds are set up.
-    #[serde(default)]
-    pub calendar_url: Option<String>,
-    #[serde(default)]
-    pub contact_url: Option<String>,
-    /// A selector in the cleaning room for someone the bot has just invited
-    /// to a private chat: their calendar link waits there.
-    #[serde(default)]
-    pub private_invite: bool,
     /// The groups offered, in number order (1️⃣ first). Fixed once posted,
     /// so a number always means the same group.
     pub group_ids: Vec<GroupId>,
@@ -357,8 +348,6 @@ pub enum TapEffect {
     /// Refused (e.g. leaving with this week's turn open) or no such group.
     Nothing,
 }
-
-pub use crate::domain::CalendarToken;
 
 /// Event IDs seen recently, oldest first, capped at `RecentIds::CAP`.
 /// Matrix only re-delivers recent events (after a restart, from the last
@@ -407,8 +396,6 @@ pub struct State {
     pub persons: Vec<Person>,
     #[serde(default)]
     pub cleaning_groups: Vec<CleaningGroup>,
-    #[serde(default)]
-    pub calendar_tokens: Vec<CalendarToken>,
 
     /// Frozen per-slot assignments produced by the resolver.
     /// These are the authoritative source for who cleans which slot each week.
@@ -517,8 +504,7 @@ pub struct State {
     #[serde(default)]
     pub shifts_rebalanced: bool,
     /// People whose turns are in a Nextcloud calendar of their own, made and shared with them
-    /// (`calendars`): person ID → the calendar's name. Their selectors and `!ical` point there
-    /// instead of a feed link.
+    /// (`calendars`): person ID → the calendar's name. Their selectors and `!ical` point there.
     #[serde(default)]
     pub nextcloud_calendars: std::collections::BTreeMap<PersonId, String>,
 }
@@ -539,7 +525,7 @@ impl State {
     ///
     /// This is the **only** permitted way to mutate domain state (persons,
     /// groups, completions, swaps, absences).  Bot-infrastructure state
-    /// (reaction_dones, greeted_users, calendar_tokens)
+    /// (reaction_dones, greeted_users)
     /// may still be mutated directly.
     ///
     /// Returns `Ok(())` whether the event caused a state change or was a

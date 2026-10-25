@@ -7,7 +7,7 @@
 //! for admin inspection at runtime.
 
 use crate::state::State;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 // ── Report ────────────────────────────────────────────────────────────────────
 
@@ -220,32 +220,6 @@ pub fn validate_state(state: &State) -> ValidationReport {
                 "Swap #{} references unknown GroupId: {}",
                 s.id, s.group_id
             ));
-        }
-    }
-
-    // ── 7. CalendarTokens ─────────────────────────────────────────────────────
-    {
-        let mut active_per_person: HashMap<&str, usize> = HashMap::new();
-        for ct in &state.calendar_tokens {
-            if ct.token_hash.is_empty() {
-                errors.push(format!("CalendarToken {} has empty hash", ct.id));
-            }
-            if !valid_person_ids.contains(ct.person_id.as_str()) {
-                warnings.push(format!(
-                    "CalendarToken {} references unknown PersonId: {}",
-                    ct.id, ct.person_id
-                ));
-            }
-            if !ct.revoked {
-                *active_per_person.entry(&ct.person_id).or_default() += 1;
-            }
-        }
-        for (pid, count) in active_per_person {
-            if count > 1 {
-                warnings.push(format!(
-                    "Person {pid} has {count} active calendar tokens (expected 1)"
-                ));
-            }
         }
     }
 

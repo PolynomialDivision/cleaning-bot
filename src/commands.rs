@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::Utc;
 use matrix_sdk::{
     ruma::{
         events::room::message::{
@@ -14,10 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     analytics::{self, DomainEvent},
-    domain::{
-        new_calendar_token, AssignmentSource, CalendarToken, CleaningGroup, GroupId, Person,
-        PersonId,
-    },
+    domain::{AssignmentSource, CleaningGroup, GroupId, Person, PersonId},
     format, resolver,
     rhythm::{parse_weekday, Turn},
     schedule::build_schedule,
@@ -175,8 +171,12 @@ pub async fn handle(
         }
         ("!help", Some("post")) => return cmd_help_post(ctx, sender, room).await,
         ("!member", Some("welcome")) => return cmd_member_welcome(ctx, sender, room, rest).await,
-        ("!ical", Some("revoke")) => return cmd_icalrevoke(ctx, sender, rest).await,
-        ("!ical", Some("reset")) => return cmd_icalreset(ctx, sender, room, rest).await,
+        ("!ical", Some("reset" | "revoke")) => {
+            return Ok(Some(format::mentionify(
+                "🗓 There are no calendar links anymore: your turns are in your own calendar \
+                 in the house cloud (!ical says where), or !ical sends them as a file.",
+            )))
+        }
         ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
         ("!member", Some("link")) => {
             let s = cmd_linkmatrix(ctx, sender, room, rest).await?;
@@ -442,8 +442,7 @@ fn more_help_text() -> String {
 👥 !groups [group] · groups, members, rooms\n\
 📈 !stats · cleaning history\n\
 📄 !plan pdf next 20 · a PDF from next week on (history = past weeks)\n\
-🖼️ !plan pdf view · the plan only to look at (to hang up), nothing to tick\n\
-🔑 !ical reset · a new calendar link (the old one stops working)\n\n\
+🖼️ !plan pdf view · the plan only to look at (to hang up), nothing to tick\n\n\
 👥 In !mygroups, tap a number to join that group. Tap it again to leave. \
 ✅ marks the groups you're in.\n\
 🆘 on the plan: someone can take your turn (🙋) or swap theirs for it (🔄).\n\
@@ -489,7 +488,7 @@ fn admin_help_text() -> String {
 !groups weight <group> [room] <factor>
 
 **Other**
-!ical · !ical reset (own feed, privately) · !ical revoke [person]
+!ical · where your calendar is (or a file)
 !validate · check the saved state for problems
 !admin · bot administration (verification, settings)"#
         .to_owned()
@@ -503,7 +502,7 @@ fn renamed_command_hint(cmd: &str) -> Option<String> {
         "!areas" | "!listgroups" | "!floors" => "!groups",
         "!joingroup" => "!join <group>",
         "!leavegroup" => "!leave <group>",
-        "!icalreset" => "!ical reset",
+        "!icalreset" => "!ical",
         "!leaderboard" => "!stats",
         "!fairness" | "!planfairness" => "!stats fairness [group]",
         "!workload" | "!groupstats" => "!stats load",

@@ -438,7 +438,7 @@ async fn names_are_escaped_and_no_matrix_id_or_calendar_link_shows() {
         }
     }
     let (_, me) = site.get("/me", "eve").await;
-    assert!(me.contains("send !ical to the cleaning bot in a private chat"));
+    assert!(me.contains("your own calendar in the house cloud"));
     // A display name with markup is plain text in every language too.
     let mut state = house();
     state.persons[0].display_name = "<script>x</script>".into();

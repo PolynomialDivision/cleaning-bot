@@ -1,4 +1,4 @@
-//! Plan exports: `!plan [N]`, !plan pdf, !ical, !ical reset.
+//! Plan exports: `!plan [N]`, !plan pdf, !ical.
 
 use super::*;
 
@@ -339,8 +339,12 @@ fn relation_content(relation: Answer) -> serde_json::Map<String, serde_json::Val
     extra
 }
 
-// ── !ical [N] / !ical <person> [N] ────────────────────────────────────────────
+// ── !ical [N] ─────────────────────────────────────────────────────────────────
 
+/// `!ical [weeks]`: where your turns are. Residents with a house account have
+/// them in their own calendar in the house cloud (`calendars`), kept up to
+/// date; everyone else (or before that calendar is ready) gets the next
+/// `weeks` (26) as a calendar file, which does not follow changes.
 pub(crate) async fn cmd_ical(
     ctx: &BotContext,
     sender: &OwnedUserId,
@@ -348,7 +352,16 @@ pub(crate) async fn cmd_ical(
     args: &[&str],
 ) -> Result<Option<RoomMessageEventContent>> {
     let sender_mxid = sender.as_str();
-    {
+    let weeks = match args {
+        [] => 26,
+        [n] if n.parse::<usize>().is_ok() => n.parse::<usize>().unwrap_or(26).clamp(1, 104),
+        _ => {
+            return Ok(Some(format::mentionify(
+                "🗓 !ical [weeks] is about your own turns: where your calendar is, or a file.",
+            )))
+        }
+    };
+    let (person_id, calendar) = {
         let mut state = ctx.state.lock().await;
         state.apply_event(DomainEvent::PersonCreated {
             person_id: Uuid::new_v4().to_string(),
@@ -356,79 +369,26 @@ pub(crate) async fn cmd_ical(
             matrix_id: Some(sender_mxid.into()),
         })?;
         state.save(&ctx.state_path).await?;
-    }
-    if args.len() > 1 || args.first().is_some_and(|a| a.parse::<usize>().is_err()) {
-        return Ok(Some(format::mentionify(
-            "🗓 !ical [weeks] shows only your own calendar. !ical reset replaces its link.",
-        )));
-    }
-    let weeks = args
-        .first()
-        .and_then(|n| n.parse::<usize>().ok())
-        .unwrap_or(26)
-        .clamp(1, 104);
-    let person_id = ctx
-        .state
-        .lock()
-        .await
-        .person_by_matrix_id(sender_mxid)
-        .unwrap()
-        .id
-        .clone();
+        let person_id = state.person_by_matrix_id(sender_mxid).unwrap().id.clone();
+        let calendar = state.nextcloud_calendars.get(&person_id).cloned();
+        (person_id, calendar)
+    };
 
-    // Their own calendar in the cloud (`calendars`): where it is, instead of a link.
-    let calendar = ctx
-        .state
-        .lock()
-        .await
-        .nextcloud_calendars
-        .get(&person_id)
-        .cloned();
+    // Their own calendar in the cloud: where it is.
     if let Some(name) = calendar {
         let web_url = ctx.config.nextcloud.as_ref().and_then(|n| n.web_url());
-        let text = format!(
-            "{}\n🔗 !ical reset gives you a subscription link instead (for another calendar app).",
-            crate::calendars::where_it_is(&name, web_url.as_deref())
-        );
-        if room.room_id() == ctx.room_id
-            && send_privately(ctx, room, sender, &text).await == PrivateDelivery::Sent
-        {
-            return Ok(Some(format::mentionify(
-                "🗓 Your turns are in your own calendar in the cloud: I've sent where to find it \
-                 to our private chat 📩",
-            )));
-        }
-        return Ok(Some(format::mentionify(&text)));
+        return Ok(Some(format::mentionify(&crate::calendars::where_it_is(
+            &name,
+            web_url.as_deref(),
+        ))));
     }
 
-    // If HTTP server is configured, return URL (token-based feed).
-    if let Some(ical_cfg) = &ctx.config.ical_server {
-        let mut state = ctx.state.lock().await;
-
-        let raw_token = crate::private::calendar_token(&mut state, &person_id);
-        state.save(&ctx.state_path).await?;
-        drop(state);
-
-        let url = crate::private::feed_url(ical_cfg, &raw_token);
-        let text = format!(
-            "📅 Your calendar feed URL:\n{url}\n\n\
-             Add this URL to your calendar app for automatic updates.\n\
-             !ical shows it again; !ical reset replaces it."
-        );
-        if room.room_id() == ctx.room_id {
-            let sent = send_privately(ctx, room, sender, &text).await;
-            return Ok(Some(format::mentionify(&private_link_notice(ctx, sent))));
-        }
-        return Ok(Some(format::mentionify(&text)));
-    }
-
-    // Fallback: generate and upload as a Matrix file attachment.
+    // Otherwise a file of their next turns.
     let ical_data = {
         let state = ctx.state.lock().await;
         let snapshot = build_schedule(&state, weeks);
         crate::ical::render_ics(&snapshot, &person_id)
     };
-
     let mime: mime::Mime = "text/calendar".parse().expect("valid mime");
     room.send_attachment(
         format!("cleaning-dates-{weeks}-weeks.ics"),
@@ -438,189 +398,19 @@ pub(crate) async fn cmd_ical(
             .mentions(Some(matrix_sdk::ruma::events::Mentions::new())),
     )
     .await?;
-    Ok(None)
+    Ok(Some(format::mentionify(&no_cloud_calendar_yet(ctx))))
 }
 
-// ── !ical reset [person] ───────────────────────────────────────────────────────
-
-/// How a calendar link asked for in the cleaning room reached its owner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PrivateDelivery {
-    /// Sent in their private chat.
-    Sent,
-    /// No private chat yet: invited to one, where the link comes with
-    /// their groups once they join (`help_board::greet_on_join`).
-    Invited,
-    /// No chat could be opened.
-    Failed,
-}
-
-/// `text` (with a calendar link) for `sender` in their private chat, never
-/// in the cleaning room: everyone there could subscribe as them.
-async fn send_privately(
-    ctx: &BotContext,
-    room: &Room,
-    sender: &OwnedUserId,
-    text: &str,
-) -> PrivateDelivery {
-    let client = room.client();
-    match crate::help_board::private_chat(ctx, &client, sender).await {
-        Some(chat) => {
-            let content = format::intentional(format::mentionify(text));
-            match mxbot_common::send::send_with_retry(&chat, content).await {
-                Ok(_) => PrivateDelivery::Sent,
-                Err(e) => {
-                    tracing::warn!("Could not send a calendar link privately: {e}");
-                    PrivateDelivery::Failed
-                }
-            }
-        }
-        None => match crate::help_board::invite_to_private_chat(ctx, &client, sender).await {
-            Ok(()) => PrivateDelivery::Invited,
-            Err(e) => {
-                tracing::warn!("Could not invite {sender} to a private chat: {e}");
-                PrivateDelivery::Failed
-            }
-        },
-    }
-}
-
-/// The answer in the cleaning room to a calendar link sent privately: no link.
-pub(crate) fn private_link_notice(ctx: &BotContext, delivery: PrivateDelivery) -> String {
-    match delivery {
-        PrivateDelivery::Sent => {
-            "🔒 Your calendar link is private: I've sent it to our private chat 📩".into()
-        }
-        PrivateDelivery::Invited => "🔒 Your calendar link is private: I've invited you to a \
-                                     chat with me, accept it and the link is there 📩"
-            .into(),
-        PrivateDelivery::Failed => format!(
-            "🔒 Your calendar link is private: open a chat with [me](https://matrix.to/#/{}) \
-             and send !ical there.",
-            ctx.config.matrix.user_id
-        ),
-    }
-}
-
-pub(crate) async fn cmd_icalreset(
-    ctx: &BotContext,
-    sender: &OwnedUserId,
-    room: &Room,
-    args: &[&str],
-) -> Result<Option<RoomMessageEventContent>> {
-    let sender_mxid = sender.as_str();
-    {
-        let mut state = ctx.state.lock().await;
-        state.apply_event(DomainEvent::PersonCreated {
-            person_id: Uuid::new_v4().to_string(),
-            display_name: sender_mxid.into(),
-            matrix_id: Some(sender_mxid.into()),
-        })?;
-        state.save(&ctx.state_path).await?;
-    }
-    if !args.is_empty() {
-        return Ok(Some(format::mentionify(
-            "🗓 !ical reset replaces only your own calendar link.",
-        )));
-    }
-    let Some(ical_cfg) = &ctx.config.ical_server else {
-        return Ok(Some(format::mentionify(
-            "🗓 Live subscriptions are unavailable. !ical gives you a calendar file.",
-        )));
-    };
-    let person_id = ctx
-        .state
-        .lock()
-        .await
-        .person_by_matrix_id(sender_mxid)
-        .unwrap()
-        .id
-        .clone();
-
-    let mut state = ctx.state.lock().await;
-    // Revoke all existing tokens for this person; their secrets go too.
-    for ct in state
-        .calendar_tokens
-        .iter_mut()
-        .filter(|ct| ct.person_id == person_id)
-    {
-        ct.revoked = true;
-        ct.raw_token = None;
-    }
-
-    // Issue new token.
-    let (raw_token, hash) = new_calendar_token();
-    state.calendar_tokens.push(CalendarToken {
-        id: Uuid::new_v4().to_string(),
-        raw_token: Some(raw_token.clone()),
-        token_hash: hash,
-        person_id: person_id.clone(),
-        created_at: Utc::now(),
-        revoked: false,
-    });
-    let url = crate::private::feed_url(ical_cfg, &raw_token);
-    for selector in state
-        .group_selectors
-        .values_mut()
-        .filter(|s| s.user_id == sender_mxid && s.calendar_url.is_some())
-    {
-        selector.calendar_url = Some(url.clone());
-    }
-    state.save(&ctx.state_path).await?;
-    drop(state);
-
-    let text = format!(
-        "🔄 New calendar feed URL:\n{url}\n\n\
-         ⚠️ Old URLs for this person are now invalid."
-    );
-    if room.room_id() == ctx.room_id {
-        let sent = send_privately(ctx, room, sender, &text).await;
-        return Ok(Some(format::mentionify(&format!(
-            "🔄 Your old calendar links no longer work.\n{}",
-            private_link_notice(ctx, sent)
-        ))));
-    }
-    Ok(Some(format::mentionify(&text)))
-}
-
-/// Revoke only: administrators may revoke someone else's feed, never retrieve it.
-pub(crate) async fn cmd_icalrevoke(
-    ctx: &BotContext,
-    sender: &OwnedUserId,
-    args: &[&str],
-) -> Result<Option<RoomMessageEventContent>> {
-    let mut state = ctx.state.lock().await;
-    let person = if args.is_empty() {
-        state.person_by_matrix_id(sender.as_str())
+/// Why someone gets a file instead of their calendar in the cloud.
+pub(crate) fn no_cloud_calendar_yet(ctx: &BotContext) -> String {
+    if ctx.config.nextcloud.is_some() {
+        "🗓 Your turns as a calendar file (it won't follow changes). With a house account, \
+         they come into your own calendar in the house cloud, kept up to date, once you've \
+         logged in there once."
+            .into()
     } else {
-        require_admin(ctx, sender)?;
-        match lookup_person(&state, &args.join(" ")) {
-            Ok(p) => p,
-            Err(e) => return Ok(Some(format::mentionify(&e))),
-        }
-    };
-    let Some(person) = person.cloned() else {
-        return Ok(Some(format::mentionify("No calendar found.")));
-    };
-    for token in state
-        .calendar_tokens
-        .iter_mut()
-        .filter(|t| t.person_id == person.id)
-    {
-        token.revoked = true;
-        token.raw_token = None;
+        "🗓 Your turns as a calendar file (it won't follow changes).".into()
     }
-    for selector in state
-        .group_selectors
-        .values_mut()
-        .filter(|s| Some(s.user_id.as_str()) == person.matrix_id.as_deref())
-    {
-        selector.calendar_url = None;
-    }
-    state.save(&ctx.state_path).await?;
-    Ok(Some(format::intentional(format::mentionify(
-        "🗓 Calendar links revoked. Existing subscriptions no longer work.",
-    ))))
 }
 
 #[cfg(test)]

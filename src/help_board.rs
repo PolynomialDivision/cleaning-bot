@@ -9,8 +9,7 @@
 //!
 //! 💬 makes the bot invite the person to a new encrypted chat: the bot
 //! invites rather than waits to be invited, so it needs no invite allowlist
-//! for it. Once they join, it greets them there with their group selector
-//! and (with calendar feeds set up) their calendar link.
+//! for it. Once they join, it greets them there with their group selector.
 
 use anyhow::Result;
 use mxbot_common::matrix_sdk::{
@@ -224,7 +223,7 @@ async fn open_private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId
 
 /// Invite `user` to the encrypted private chat the bot opens for them (or
 /// again to the one they haven't accepted yet). Once they join,
-/// `greet_on_join` greets them there with their groups and calendar link.
+/// `greet_on_join` greets them there with their groups.
 /// For someone without a verified private chat (`private_chat`).
 pub async fn invite_to_private_chat(
     ctx: &BotContext,
@@ -303,7 +302,7 @@ fn private_hello() -> String {
     "👋 Psst, it's just us here!\n\
      Ask me what you'd ask in the cleaning room, nobody else sees it:\n\
      📅 !next · 📋 !plan · ✅ !done · 🗓 !ical · ❓ !help\n\
-     Your groups (and your calendar link) come right below 👇"
+     Your groups come right below 👇"
         .to_owned()
 }
 

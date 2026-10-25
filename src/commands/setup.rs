@@ -378,14 +378,6 @@ pub(crate) async fn apply_linkmatrix(
             })?;
             apply_group_departure(ctx, &mut state, &stub_id, gid)?;
         }
-        // Same Matrix user: their calendar link keeps working.
-        for token in state
-            .calendar_tokens
-            .iter_mut()
-            .filter(|t| t.person_id == stub_id)
-        {
-            token.person_id = person_id.clone();
-        }
         state.persons.retain(|p| p.id != stub_id);
     }
 

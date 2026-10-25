@@ -18,12 +18,8 @@
 //! once, also across restarts.
 //!
 //! A selector belongs to one user and one room: the cleaning room, or a
-//! verified private chat (`private`). With calendar feeds set up, one in a
-//! private chat links the user's own feed; one in the cleaning room never
-//! does (everyone there could subscribe as them). A welcome in the cleaning
-//! room invites the newcomer to a private chat instead, where the link
-//! comes with their groups once they join; if no chat can be opened, the
-//! welcome tells them how to ask for it there.
+//! verified private chat (`private`). It says where the user's turns are in
+//! a calendar: their own one in the house cloud (`calendars`), or `!ical`.
 
 use anyhow::Result;
 use mxbot_common::matrix_sdk::{
@@ -180,30 +176,16 @@ fn selector_text_with(
             None => lines.push("📅 No upcoming turn yet.".into()),
         }
     }
-    let calendar = person.and_then(|p| state.nextcloud_calendars.get(&p.id));
-    lines.push(match &selector.calendar_url {
-        // their own calendar in the cloud (`calendars`): no link needed, and no secret
-        _ if calendar.is_some() => format!(
-            "🗓 Your turns: in your calendar in the cloud, **{}** (its Calendar app, or DAVx⁵ \
-             on your phone)",
-            calendar.map_or("", String::as_str)
-        ),
-        Some(url) => {
-            format!("🗓 Your calendar: [subscribe]({url})\n📲 Add it in your calendar app.")
-        }
-        None if selector.private_invite => {
-            "🗓 Your calendar link is private: I've invited you to a chat with me, \
-             accept it and the link is there 📩"
-                .to_owned()
-        }
-        None => format!(
-            "🗓 Your calendar: send !ical to {} in a private chat",
-            selector
-                .contact_url
-                .as_deref()
-                .map_or_else(|| "me".to_owned(), |url| format!("[me]({url})"))
-        ),
-    });
+    lines.push(
+        match person.and_then(|p| state.nextcloud_calendars.get(&p.id)) {
+            // their own calendar in the cloud (`calendars`)
+            Some(calendar) => format!(
+                "🗓 Your turns: in your calendar in the cloud, **{calendar}** (its Calendar app, \
+                 or DAVx⁵ on your phone)"
+            ),
+            None => "🗓 Your calendar: !ical says where your turns are".to_owned(),
+        },
+    );
     lines.push("!mygroups reopens this · !join / !leave · !help".into());
     lines.join("\n")
 }
@@ -354,8 +336,7 @@ pub fn number_index(key: &str) -> Option<usize> {
 
 /// Mark everyone as welcomed who has used the bot before welcomes were
 /// tracked per user. The old greeting's list, plus anyone who has done,
-/// swapped or taken over a turn, reacted to a plan or made a calendar
-/// feed. Members who were only added or linked by an admin still get
+/// swapped or taken over a turn or reacted to a plan. Members who were only added or linked by an admin still get
 /// theirs. Runs once; returns whether anything changed.
 pub fn migrate_welcomes(state: &mut State) -> bool {
     if state.welcomes_migrated {
@@ -369,7 +350,6 @@ pub fn migrate_welcomes(state: &mut State) -> bool {
             .values()
             .map(|r| r.completed_by_id.as_str()),
     );
-    active.extend(state.calendar_tokens.iter().map(|t| t.person_id.as_str()));
     let mut welcomed: Vec<String> = state
         .persons
         .iter()
@@ -422,83 +402,22 @@ pub async fn welcome_if_new(ctx: &BotContext, room: &Room, user_id: &OwnedUserId
             return;
         }
     }
-    // No private chat yet: the calendar link waits in one. Invite them to
-    // it (a welcome already pending from before a crash is sent as it was).
-    let pending_key = format!("{}|{user_id}", room.room_id());
-    let resending = ctx
-        .state
-        .lock()
-        .await
-        .pending_welcomes
-        .contains_key(&pending_key);
-    let invited = ctx.config.ical_server.is_some()
-        && !resending
-        && match crate::help_board::invite_to_private_chat(ctx, &room.client(), user_id).await {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("Could not invite {user_id} to a private chat: {e}");
-                false
-            }
-        };
-    if let Err(e) = post_selector_with(ctx, room, user_id.as_str(), true, invited).await {
+    if let Err(e) = post_selector(ctx, room, user_id.as_str(), true).await {
         tracing::error!("Failed to welcome {user_id}: {e}");
     }
 }
 
-/// The selector to post for `user_id` in `room_id`: with their calendar
-/// link only in a private chat (feeds set up), never in the cleaning room,
-/// where `invited` says whether a private chat invite is on its way.
+/// The selector to post for `user_id` in `room_id`.
 pub fn prepare_selector(
-    ctx: &BotContext,
     state: &mut State,
     room_id: &RoomId,
     user_id: &str,
     welcome: bool,
-    invited: bool,
 ) -> Result<GroupSelector> {
     let mut selector = new_selector(state, user_id, welcome);
     selector.room_id = room_id.to_string();
-    selector.contact_url = Some(format!("https://matrix.to/#/{}", ctx.config.matrix.user_id));
-    let private = room_id != ctx.room_id;
-    // Someone with their own calendar in the cloud (`calendars`) gets no feed link.
-    let has_calendar = state
-        .person_by_matrix_id(user_id)
-        .is_some_and(|p| state.nextcloud_calendars.contains_key(&p.id));
-    if let Some(cfg) = ctx
-        .config
-        .ical_server
-        .as_ref()
-        .filter(|_| private && !has_calendar)
-    {
-        state.apply_event(DomainEvent::PersonCreated {
-            person_id: uuid::Uuid::new_v4().to_string(),
-            display_name: user_id.into(),
-            matrix_id: Some(user_id.into()),
-        })?;
-        let person_id = state
-            .person_by_matrix_id(user_id)
-            .map(|p| p.id.clone())
-            .ok_or_else(|| anyhow::anyhow!("{user_id} has no person record"))?;
-        let token = crate::private::calendar_token(state, &person_id);
-        selector.calendar_url = Some(crate::private::feed_url(cfg, &token));
-    }
-    selector.private_invite = !private && invited && ctx.config.ical_server.is_some();
     selector.rendered = selector_text(state, &selector);
     Ok(selector)
-}
-
-/// Selectors in the cleaning room from before the calendar link moved to
-/// private chats lose it (the next refresh edits it out). Returns whether
-/// any changed.
-pub fn drop_room_feed_links(state: &mut State, room_id: &RoomId) -> bool {
-    let mut changed = false;
-    for selector in state.group_selectors.values_mut() {
-        let in_room = selector.room_id.is_empty() || selector.room_id == room_id.as_str();
-        if in_room && selector.calendar_url.take().is_some() {
-            changed = true;
-        }
-    }
-    changed
 }
 
 /// Post a selector for `user_id` in `room` and seed the number reactions to
@@ -508,18 +427,6 @@ pub async fn post_selector(
     room: &Room,
     user_id: &str,
     welcome: bool,
-) -> Result<()> {
-    post_selector_with(ctx, room, user_id, welcome, false).await
-}
-
-/// `post_selector`; `invited`: the bot has just invited `user_id` to a
-/// private chat (`prepare_selector`).
-async fn post_selector_with(
-    ctx: &BotContext,
-    room: &Room,
-    user_id: &str,
-    welcome: bool,
-    invited: bool,
 ) -> Result<()> {
     if room.room_id() != ctx.room_id {
         let user = OwnedUserId::try_from(user_id)?;
@@ -542,8 +449,7 @@ async fn post_selector_with(
         // already sent, whose text then matches `rendered`.
         Some(pending) => pending,
         None => {
-            let selector =
-                prepare_selector(ctx, &mut state, room.room_id(), user_id, welcome, invited)?;
+            let selector = prepare_selector(&mut state, room.room_id(), user_id, welcome)?;
             if first_welcome {
                 state
                     .pending_welcomes

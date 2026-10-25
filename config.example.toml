@@ -57,18 +57,6 @@ materialize_weeks = 26
 # Only "round_robin" is implemented (the default).
 # fill_strategy = "round_robin"
 
-# ── Calendar feeds (optional) ──────────────────────────────────────────────────
-# With this section, `!ical` and the welcome give each resident a personal
-# subscription URL (it shows only their own turns). Without it, `!ical` sends
-# a .ics file instead. The URLs are stored in state.json so they can be shown
-# again; serve the feed over HTTPS.
-# `!ical reset` replaces a link, `!ical revoke` (admins: `!ical revoke <person>`)
-# switches it off.
-#
-# [ical_server]
-# bind_addr  = "0.0.0.0:8080"
-# public_url = "https://cal.example.org"
-
 # ── Linked Matrix accounts (optional) ─────────────────────────────────────────
 # One resident, one person in the plan, whichever of their Matrix accounts writes:
 # the bot reads the house's directory (Authentik) every refresh_minutes with a
@@ -96,7 +84,7 @@ materialize_weeks = 26
 # with them alone. It holds their turns, follows every change within a minute,
 # and is compared in full every refresh_minutes. Someone who moves out (no longer
 # in the directory, or in no group) loses it. Residents without a house account
-# keep the !ical link. The app password comes from the environment variable
+# get their turns from !ical as a file. The app password comes from the environment variable
 # password_env, never from this file.
 #
 # [nextcloud]
@@ -111,8 +99,7 @@ materialize_weeks = 26
 # website"). Only behind the reverse proxy with the house's login (forward auth), which
 # sets X-House-User / X-House-Groups / X-House-Name / X-House-Matrix-Ids and the secret
 # header X-Cleaning-Proxy-Secret: the value of the environment variable
-# CLEANING_PROXY_SECRET (at least 32 characters; required when enabled). Its own
-# listener: never the iCal server's bind_addr or public host.
+# CLEANING_PROXY_SECRET (at least 32 characters; required when enabled).
 #
 # [web]
 # enabled    = true

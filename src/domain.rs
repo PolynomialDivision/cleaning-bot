@@ -3,9 +3,7 @@
 //! All scheduling references use opaque UUIDs (PersonId, GroupId).
 //! Display names and Matrix IDs are metadata only, never used as identity keys.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 // ── Type aliases ──────────────────────────────────────────────────────────────
@@ -254,41 +252,6 @@ impl CleaningGroup {
     pub fn slot_by_id_mut(&mut self, id: &SlotId) -> Option<&mut CleaningSlot> {
         self.slots.iter_mut().find(|s| &s.id == id)
     }
-}
-
-// ── CalendarToken ─────────────────────────────────────────────────────────────
-
-/// A per-person iCal bearer token. Legacy records have only a hash; new
-/// records also keep the token itself, so the same link can be shown again.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CalendarToken {
-    pub id: String, // UUID for the record itself
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_token: Option<String>,
-    pub token_hash: String, // hex SHA-256 of the 32-byte raw token
-    pub person_id: PersonId,
-    pub created_at: DateTime<Utc>,
-    pub revoked: bool,
-}
-
-/// Generate a new random token.
-/// Returns `(raw_hex_64_char_token, sha256_hex_hash)`.
-pub fn new_calendar_token() -> (String, String) {
-    let raw: [u8; 32] = rand::random();
-    let token = hex::encode(raw);
-    let hash = hex::encode(Sha256::digest(raw));
-    (token, hash)
-}
-
-/// Verify a raw hex token string against a stored SHA-256 hash.
-pub fn verify_calendar_token(token_hex: &str, stored_hash: &str) -> bool {
-    if token_hex.len() != 64 {
-        return false;
-    }
-    let Ok(raw) = hex::decode(token_hex) else {
-        return false;
-    };
-    hex::encode(Sha256::digest(&raw)) == stored_hash
 }
 
 // ── Slot assignment resolver types ───────────────────────────────────────────

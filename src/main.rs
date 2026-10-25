@@ -39,8 +39,8 @@ mod domain;
 mod format;
 mod help_board;
 mod house;
-mod http;
 mod ical;
+mod lang;
 mod names;
 mod onboarding;
 mod paper;
@@ -53,7 +53,6 @@ mod rhythm;
 mod schedule;
 mod scheduler;
 mod state;
-mod subscribe;
 mod trades;
 mod turn_menu;
 mod validate;
@@ -136,12 +135,8 @@ impl BotContext {
 async fn main() -> Result<()> {
     mxbot_common::logging::init("cleaning_bot");
 
-    let mut config: Config =
+    let config: Config =
         mxbot_common::config::load_toml(&mxbot_common::config::config_path_from_args())?;
-    if let Some(ical) = config.ical_server.as_mut() {
-        ical.apply_public_url_override(std::env::var(config::ICAL_PUBLIC_URL_ENV).ok());
-        info!("iCal public URL: {}", ical.public_url);
-    }
     anyhow::ensure!(
         (1..=52).contains(&config.schedule.interval_weeks),
         "interval_weeks must be 1–52"
@@ -158,14 +153,7 @@ async fn main() -> Result<()> {
         (1..=104).contains(&config.schedule.materialize_weeks),
         "materialize_weeks must be 1–104"
     );
-    if let Some(ical) = &config.ical_server {
-        if !ical.public_url.starts_with("https://") {
-            tracing::warn!(
-                "ical_server.public_url is not HTTPS: calendar feed tokens would travel in clear text"
-            );
-        }
-    }
-    config.web.validate(config.ical_server.as_ref())?;
+    config.web.validate()?;
     // The website needs the proxy's secret: refused at startup, not on the first visit.
     let web_secret = if config.web.enabled {
         Some(web::proxy_secret_from_env()?)
@@ -197,12 +185,6 @@ async fn main() -> Result<()> {
 
     let room_id =
         mxbot_common::rooms::parse_room_id("[schedule] room_id", &config.schedule.room_id)?;
-    // Calendar links only in private chats: the selectors in the cleaning
-    // room lose theirs (edited out once the bot is in sync).
-    if onboarding::drop_room_feed_links(&mut st, &room_id) {
-        st.save(&state_path).await?;
-    }
-
     // Groups from before per-group rhythms keep the old global interval.
     if migrate_rhythms(&mut st, config.schedule.interval_weeks) {
         st.save(&state_path).await?;
@@ -250,17 +232,6 @@ async fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(st));
     // Filled by `directory::run` once the bot is up; the website reads it too.
     let accounts: Arc<std::sync::RwLock<directory::Accounts>> = Arc::default();
-
-    // ── Optional HTTP iCal server ─────────────────────────────────────────────
-    if let Some(ref ical_cfg) = config.ical_server {
-        let ical_cfg = ical_cfg.clone();
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = http::run(state_clone, ical_cfg).await {
-                error!("iCal HTTP server error: {e}");
-            }
-        });
-    }
 
     // ── Optional website (its own listener, behind the house login) ─────────────
     if let Some(secret) = web_secret {

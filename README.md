@@ -12,7 +12,7 @@ keeps track of who actually cleaned.
 👥 !mygroups · join or leave groups
 ✅ !done · done! (or ✅ on the plan)
 🆘 !sos · can't make it? find cover (or 🆘 on the plan)
-🗓 !ical · your private calendar
+🗓 !ical · where your calendar is
 📄 !plan pdf · printable plan
 ```
 
@@ -29,7 +29,7 @@ that); once you join, it greets you there with your groups and calendar
 link.
 
 `!help more` lists the rest (`!status`, `!undo`, `!takeover`, `!swap`,
-`!join`, `!leave`, `!groups`, `!stats`, `!plan pdf history`, `!ical reset`).
+`!join`, `!leave`, `!groups`, `!stats`, `!plan pdf history`).
 
 **The weekly plan** is posted and pinned on the configured weekday (later
 that week if the bot was down then). React ✅ on it when your part is done;
@@ -130,14 +130,12 @@ Tap a number to join or leave a group:
 ✅ Joined **2nd Floor**
 
 📅 Next: 2nd Floor · 5 – 11 Oct
-🗓 Your calendar link is private: I've invited you to a chat with me, accept it and the link is there 📩
+🗓 Your turns: in your calendar in the cloud, **Cleaning: mia** (its Calendar app, or DAVx⁵ on your phone)
 !mygroups reopens this · !join / !leave · !help
 ```
 
-The calendar link never appears in the cleaning room (anyone there could
-subscribe as you): a welcome there comes with an invite to a private chat,
-where your selector shows `🗓 Your calendar: subscribe`. If no chat can be
-opened, the welcome says to send `!ical` to the bot in a private chat.
+Without a calendar in the cloud yet, the selector says `🗓 Your calendar:
+!ical says where your turns are`.
 
 Tapping a number toggles that group. The bot edits the selector (no extra
 message) and, once the tap is saved, removes your reaction so the same
@@ -334,50 +332,17 @@ lookups are cached and bounded in time; when a server refuses (403/404) or
 can't be reached, the stored name stays. Nothing depends on them, and a
 lookup never creates a person. All of this lives in `src/names.rs`.
 
-### Calendar feeds (`!ical`)
+### `!ical`
 
-With `[ical_server]` configured, `!ical` gives a personal subscription URL
-(`https://…/ical/<token>.ics`); without it, a .ics file. Group selectors in
-a private chat show the link too. A feed holds only that person's own
-turns, which the plan in the room shows anyway, but anyone with the link
-can follow those turns as them: the link is only ever sent in the person's
-private chat. `!ical` or `!ical reset` in the cleaning room sends it there
-(or invites them to one) and says so in the room, without the link.
-Selectors in the cleaning room from before lose their link at startup.
+`!ical [weeks]` says where your turns are: in your own calendar in the
+house cloud (below), kept up to date. Without one (no house account, or
+before your first login in the cloud), it sends your next turns (26 weeks,
+or `weeks`) as a `.ics` file, which does not follow changes. Events carry
+`STATUS:CONFIRMED` (or `CANCELLED` for a skipped turn), the task and who
+you clean it with, the completion, and `LAST-MODIFIED`.
 
-- Opened in a browser (Accept prefers `text/html` over `text/calendar`:
-  tapping the link in Element), the feed URL answers a page instead
-  (`src/subscribe.rs`), in German, English or Ukrainian (`?lang=`, the
-  house-wide `house_lang` cookie, Accept-Language, else German): "Add to
-  iPhone/Mac calendar" (`webcal://`), Google Calendar's add-by-URL link, a
-  hint for Android (ICSx⁵ / DAVx⁵) and the address in a read-only field
-  with a copy button. No name or other personal data. It links the house
-  UI kit `/_house/ui.css` (same origin) before its own `/assets/subscribe.css`
-  and `/assets/subscribe.js`, and works without either; its own CSP allows
-  only this origin, nothing inline. A dead link gets a translated page with
-  the same 404. Calendar apps (`*/*`, `text/calendar`, no Accept) keep
-  getting the `.ics`.
-
-- Tokens are 256 bits of randomness. The server checks the exact token
-  format, that the token isn't revoked, and that its person is active and
-  linked to Matrix. It answers with an ETag (and 304 for `If-None-Match`)
-  and `Cache-Control: private`; tokens are never logged.
-- The tokens are stored in `state.json` (with their hash) so `!ical` can
-  show the same link again. Serve the feed over HTTPS (the bot warns at
-  startup otherwise).
-- The environment variable `CLEANING_ICAL_PUBLIC_URL` overrides
-  `[ical_server] public_url`, so a deployment can change the public address
-  without editing the config. Links already handed out keep the old host.
-- `!ical reset` replaces your link (the old one stops working); `!ical
-  revoke` switches it off; admins can `!ical revoke <person>` without ever
-  seeing the link.
-- A feed keeps working after someone leaves the room. The server doesn't
-  check room membership live. Revoke it, or remove the person.
-- A feed belongs to a person. When `!member link` joins a name to a Matrix
-  user who already had a feed, the feed moves along.
-- Events carry `STATUS:CONFIRMED` (or `CANCELLED` for a skipped turn), the
-  task and completion in the description, and `LAST-MODIFIED`. Calendar
-  apps poll on their own schedule; changes can take hours to show.
+There are no subscription links (feeds) anymore: `!ical reset` and `!ical
+revoke` only say so, and links handed out before stopped working.
 
 ### Calendars in the cloud (`[nextcloud]`)
 
@@ -386,7 +351,7 @@ With `[nextcloud]` and `[directory]`, every resident with a house account
 their own in the house's Nextcloud, `cleaning-<login>` named "Cleaning:
 <name>". The bot's Nextcloud account owns it and shares it read-only with
 that resident alone. It holds their turns from today on (one event per turn,
-the same UIDs as the feed) and follows every change of the plan within a
+the same UIDs as an `!ical` file) and follows every change of the plan within a
 minute (takeovers, swaps, rhythms, done marks): only what changed is
 written. At the start and every `refresh_minutes` everything is compared
 with the server (the calendar, its share, every event's ETag); past and
@@ -395,13 +360,12 @@ costs one full comparison, nothing else.
 
 - Once the calendar is shared with them, `!ical` and their group selectors
   say where it is (the cloud's Calendar app, DAVx⁵ on Android, a CalDAV
-  account on iPhone) instead of a link, and the bot tells them once in their
-  private chat, if they have one (a note that did not arrive is tried again
-  in the next round). A feed link handed out before keeps
-  working; `!ical reset` still gives a new one (for another calendar app).
+  account on iPhone), and the bot tells them once in their private chat, if
+  they have one (a note that did not arrive is tried again in the next
+  round).
 - Nextcloud only has an account for someone after their first login there:
-  until then, the calendar waits unshared and they keep the feed link.
-- Residents without a house account (not in the directory) keep the feed.
+  until then, the calendar waits unshared and `!ical` sends them a file.
+- Residents without a house account (not in the directory) get files.
 - Someone who is no longer in the directory, or in no group and without
   turns, loses the calendar: unshared, then deleted (Nextcloud's trash bin
   keeps it for a while). Only after a complete comparison, never while the
@@ -410,12 +374,11 @@ costs one full comparison, nothing else.
   at once is a directory gone wrong, so none is removed and the log says so.
 - Two logins that would get the same calendar (they differ only in
   characters a calendar name cannot hold, or in case) get none, and the log
-  names them; they keep the feed link.
+  names them; `!ical` sends them files.
 - The app password comes from the environment (`password_env`, default
   `CALDAV_PASSWORD`). Without it, or without `[directory]`, the bot runs
   without calendars and says so in the log. Without calendars (also once
-  `[nextcloud]` is removed), `!ical` and the selectors give everyone the
-  feed link again.
+  `[nextcloud]` is removed), `!ical` sends everyone files.
 
 All of this lives in `src/calendars.rs`; the CalDAV side (calendars, shares,
 events by UID) is mxbot-common's `calendar::nextcloud`.
@@ -454,10 +417,11 @@ by side, "Scharni: Alice & Bob · Colbe: Carol & Dan"), **People**
 many and their load, the rooms weighted as the rotation balances them) and
 **Mine** (`/me`: your turns of the next 12 weeks, with who shares the
 place). Your own turns are highlighted and say "you". German, English or
-Ukrainian, chosen like the subscribe page.
+Ukrainian: `?lang=`, the house-wide `house_lang` cookie, Accept-Language,
+else German (`src/lang.rs`).
 
 - **Read only, and always the plan of the room.** Every page is built from
-  the same schedule snapshot as the plan, the PDF and the feeds, under the
+  the same schedule snapshot as the plan, the PDF and the calendars, under the
   bot's own state lock: nothing on the website can differ from Matrix, and
   nothing can be changed there. ✅, `!sos` and swaps stay in Matrix.
 - **Only behind the house login.** The reverse proxy (Caddy with
@@ -471,10 +435,8 @@ Ukrainian, chosen like the subscribe page.
   of the accounts in `X-House-Matrix-Ids`, the person the plan knows them
   by (see *Several Matrix accounts*). Someone the plan doesn't know sees
   everything, just without "you". Display names only, never Matrix IDs, and
-  never a calendar link (`/me` says to send `!ical` in a private chat).
-- **Its own listener** (`bind_addr`, default `0.0.0.0:8080`), never the iCal
-  server's: that one is public, the website must not be. The startup check
-  refuses the iCal server's listener or public host.
+  never anything to subscribe to (`/me` points to `!ical`).
+- **Its own listener** (`bind_addr`, default `0.0.0.0:8080`).
 - Pages are never cached (`no-store`) or indexed (`X-Robots-Tag`), load
   nothing from elsewhere and need no script (CSP: this origin's style sheets
   only): the house UI kit `/_house/ui.css`, then `/style.css`.
@@ -520,8 +482,10 @@ All new state fields have defaults, so an existing `state.json` loads as is:
 
 - group rhythms gain windows (`shift_ends`), a start date and earlier
   versions: old rhythms keep their meaning;
-- old calendar tokens (hash only) keep working; `!ical` issues a new link
-  that can be shown again, and the old URL still works until `!ical reset`;
+- the calendar feeds are gone: their tokens in an old `state.json` and an
+  `[ical_server]` section in an old config are ignored (and dropped from the
+  state with its next save); selectors lose their link with the first
+  refresh after the start;
 - selectors without a room belong to the cleaning room;
 - bookkeeping for commands, redactions and welcomes starts empty.
 
