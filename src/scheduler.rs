@@ -66,9 +66,17 @@ pub async fn run(ctx: BotContext, client: Client) {
 /// that is already frozen.
 pub(crate) async fn roll_planning_horizon(ctx: &BotContext) -> anyhow::Result<()> {
     let mut state = ctx.state.lock().await;
+    // A failed sync must not stop reminders and plans: logged, tried again next tick.
+    let moved = match crate::house::sync(ctx, &mut state, crate::house::Leavers::Go) {
+        Ok(changes) => !changes.is_empty(),
+        Err(e) => {
+            tracing::error!("House-wide groups: {e}");
+            true
+        }
+    };
     let events =
         crate::resolver::materialize(&state, ctx.config.schedule.materialize_weeks as usize);
-    if events.is_empty() {
+    if events.is_empty() && !moved {
         return Ok(());
     }
     for ev in events {
@@ -668,7 +676,7 @@ pub(crate) fn reminder_text(
     let what = |a: &crate::schedule::AssignmentInstance| {
         let mut parts = vec![a.group_name.clone()];
         parts.extend(a.shift_label.clone());
-        parts.extend(a.slot_name.clone());
+        parts.extend(a.place.clone());
         parts.join(" · ")
     };
     let mut open = Vec::new();
@@ -1027,19 +1035,20 @@ fn turn_lines(
     with_done: bool,
 ) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
-    for a in snapshot
+    let duties: Vec<_> = snapshot
         .assignments
         .iter()
         .filter(|a| a.group_id == group.id && a.shift == turn.shift)
-    {
-        if a.is_completed && !with_done {
-            continue;
-        }
+        .filter(|a| with_done || !a.is_completed)
+        .collect();
+    for (i, a) in duties.iter().enumerate() {
         out.push((
             a.matrix_line(false, true),
             a.assignee.as_ref().and_then(|p| p.mxid.clone()),
         ));
-        if a.slot_name.is_some() && !a.room_names.is_empty() {
+        // A place cleaned by several people lists its rooms once, below them all.
+        let place_goes_on = duties.get(i + 1).is_some_and(|b| b.place == a.place);
+        if a.slot_name.is_some() && !a.room_names.is_empty() && !place_goes_on {
             out.push((
                 format!("{}{}", view::INDENT, view::rooms(&a.room_names)),
                 None,

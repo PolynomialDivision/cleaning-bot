@@ -57,14 +57,15 @@ pub fn claim_welcome(state: &mut State, user_id: &str) -> bool {
     state.greeted_users.insert(user_id.to_owned())
 }
 
-/// A selector for `user_id`, offering every active group.
+/// A selector for `user_id`, offering every active group but the
+/// house-wide ones, which nobody joins or leaves by a tap (`house`).
 pub fn new_selector(state: &State, user_id: &str, welcome: bool) -> GroupSelector {
     let mut selector = GroupSelector {
         user_id: user_id.to_owned(),
         group_ids: state
             .cleaning_groups
             .iter()
-            .filter(|g| g.is_active)
+            .filter(|g| g.is_active && !g.house_wide)
             .take(NUMBERS.len())
             .map(|g| g.id.clone())
             .collect(),
@@ -131,7 +132,13 @@ fn selector_text_with(
             format!("{number} {}{paused}", group.name)
         });
     }
-    if state.cleaning_groups.iter().filter(|g| g.is_active).count() > NUMBERS.len() {
+    if state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active && !g.house_wide)
+        .count()
+        > NUMBERS.len()
+    {
         choices.push("➕ More groups: !groups · !join <group>".into());
     }
     if choices.is_empty() {
@@ -139,6 +146,16 @@ fn selector_text_with(
     } else {
         lines.push(tap_line);
         lines.extend(choices);
+    }
+    for group in state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.is_active && g.house_wide)
+    {
+        lines.push(format!(
+            "🏠 **{}**: the whole house, in turn. You're in it with your first group.",
+            group.name
+        ));
     }
     if let Some(feedback) = current_feedback(state, selector) {
         lines.push(feedback.to_owned());

@@ -29,6 +29,8 @@ use crate::{
 mod assignments;
 mod exports;
 mod helpers;
+#[cfg(test)]
+mod house_tests;
 mod maintenance;
 mod member;
 mod overview;
@@ -234,6 +236,7 @@ pub async fn handle(
         ("!groups", Some("slot")) => cmd_groups_slot(ctx, sender, rest).await,
         ("!groups", Some("room")) => cmd_groups_room(ctx, sender, rest).await,
         ("!groups", Some("rhythm")) => cmd_groups_rhythm(ctx, sender, rest).await,
+        ("!groups", Some("house")) => cmd_groups_house(ctx, sender, rest).await,
         ("!groups", Some(_)) => cmd_groups(ctx, Some(&args.join(" "))).await,
         ("!validate", _) => cmd_validate(ctx, sender).await,
 
@@ -339,6 +342,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
         },
         ("!groups", Some("add" | "enable" | "disable")) => with_sub(args[0], joined(rest)),
         ("!groups", Some("rhythm")) => with_sub(args[0], group_first(state, rest, 0)),
+        ("!groups", Some("house")) => with_sub(args[0], group_first(state, rest, 1)),
         ("!groups", Some("slot" | "room")) if !rest.is_empty() => {
             let mut out = vec![args[0].to_owned(), rest[0].to_owned()];
             let tail = group_first(state, &rest[1..], 1);
@@ -478,7 +482,9 @@ fn admin_help_text() -> String {
 !groups rhythm <group> weekly | 2x | every 2 | mon-tue thu-fri · how often it is cleaned
 !groups add|enable|disable <group>
 !groups remove <group> [confirm] · deletes it with its history
-!groups slot add|remove <group> <slot>
+!groups house <group> on|off · everyone living here is in it (the staircase)
+!groups slot add <group> <slot> [x2] · x2: two people clean it together
+!groups slot remove <group> <slot>
 !groups room add|remove <group> [slot] <room>
 !groups weight <group> [room] <factor>
 

@@ -289,7 +289,25 @@ pub(crate) fn apply_group_join(
         keep_active_week_unassigned_for_first_member(ctx, state, group_id)?;
     }
 
-    replan_from_next_cycle(state, group_id, person_id)
+    let replanned_from = replan_from_next_cycle(state, group_id, person_id)?;
+    sync_house_after(ctx, state, group_id)?;
+    Ok(replanned_from)
+}
+
+/// After a membership change in `group_id`: a newcomer to the house is in
+/// the house-wide groups now; someone in no group anymore leaves them with
+/// the next roll of the horizon (`house::sync`), so a move between floors
+/// isn't a leave and a join there. Nothing for a change in a house-wide
+/// group itself.
+fn sync_house_after(
+    ctx: &BotContext,
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+) -> anyhow::Result<()> {
+    if state.group_by_id(group_id).is_none_or(|g| !g.house_wide) {
+        crate::house::sync(ctx, state, crate::house::Leavers::Stay)?;
+    }
+    Ok(())
 }
 
 /// The re-planning half of `apply_group_join` (see there).
@@ -543,7 +561,7 @@ pub(crate) struct Departure {
 /// the leaver's own pinned weeks are refilled too and reported back via
 /// `Departure::vacated`, never dropped silently.
 pub(crate) fn apply_group_departure(
-    _ctx: &BotContext,
+    ctx: &BotContext,
     state: &mut crate::state::State,
     person_id: &PersonId,
     group_id: &GroupId,
@@ -571,10 +589,12 @@ pub(crate) fn apply_group_departure(
     // creates gaps, it never needs to extend the horizon further out.
     replaced.extend(vacated.iter().cloned());
     refill_replanned(state, group_id, horizon, &replaced)?;
-    Ok(Departure {
+    let departure = Departure {
         changed_from: first_changed_turn(state, &replaced),
         vacated,
-    })
+    };
+    sync_house_after(ctx, state, group_id)?;
+    Ok(departure)
 }
 
 /// Confirmation lines for a departure: what happened to the leaver's
@@ -771,11 +791,13 @@ pub(crate) fn resolve_group_and_slot<'r, 'a>(
         .group_by_name(group_name)
         .ok_or_else(|| group_not_found(group_name))?;
     if group.is_multi_slot() {
+        // A slot's own name, else the first slot at that place.
         match rest.first().and_then(|s| {
             group
                 .slots
                 .iter()
                 .position(|slot| slot.name.eq_ignore_ascii_case(s))
+                .or_else(|| group.slots.iter().position(|slot| slot.answers_to(s)))
         }) {
             Some(idx) => Ok((group.id.clone(), idx, &rest[1..])),
             None => Err(format!(
@@ -837,13 +859,12 @@ pub(crate) fn resolve_takeover_target(
             if !group.is_multi_slot() {
                 return Err(format!("🤷 «{}» does not have slots.", group.name));
             }
-            match group
-                .slots
-                .iter()
-                .position(|s| s.name.eq_ignore_ascii_case(name))
+            match (0..group.slots.len())
+                .filter(|&i| group.slots[i].answers_to(name))
+                .collect::<Vec<_>>()
             {
-                Some(idx) => vec![idx],
-                None => {
+                found if !found.is_empty() => found,
+                _ => {
                     return Err(format!(
                         "«{name}» is not a group or a slot of «{}». Slots: {}",
                         group.name,

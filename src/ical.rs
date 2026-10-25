@@ -68,8 +68,17 @@ fn push_event(
     });
 
     let mut desc_parts = vec![a.period_label.clone()];
-    if let Some(slot) = &a.slot_name {
-        desc_parts.push(format!("Task: {slot}"));
+    if let Some(place) = &a.place {
+        desc_parts.push(format!("Task: {place}"));
+    }
+    let crew: Vec<&str> = snapshot
+        .crew(a)
+        .iter()
+        .filter_map(|b| b.assignee.as_ref())
+        .map(|p| p.name.as_str())
+        .collect();
+    if !crew.is_empty() {
+        desc_parts.push(format!("Together with: {}", crew.join(", ")));
     }
     if a.is_skipped {
         desc_parts.push("Skipped: no cleaning required".into());

@@ -181,7 +181,7 @@ fn test_context(state: State) -> (BotContext, PathBuf, OwnedUserId) {
 /// Same as `test_context` but with a configurable materialize horizon,
 /// for tests that need to pre-seed several already-frozen weeks and then
 /// still have room for a join/leave to reach a genuinely new week.
-fn test_context_with_horizon(
+pub(super) fn test_context_with_horizon(
     state: State,
     materialize_weeks: u32,
 ) -> (BotContext, PathBuf, OwnedUserId) {

@@ -78,6 +78,14 @@ pub struct CleaningSlot {
     /// Per-slot workload multiplier on top of room weights (default 1.0).
     #[serde(default = "default_weight")]
     pub weight: f64,
+    /// The place this slot cleans when several people clean it together:
+    /// `!groups slot add Staircase Scharni x2` makes the slots "Scharni 1"
+    /// and "Scharni 2", both at place "Scharni". Each person still has a
+    /// slot of their own (their reminder, their ✅, their swap); plans and
+    /// the website show the place once with everyone on it. `None`: the
+    /// slot is a place of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
 }
 
 impl CleaningSlot {
@@ -88,7 +96,23 @@ impl CleaningSlot {
             room_names: Vec::new(),
             room_weights: std::collections::HashMap::new(),
             weight: 1.0,
+            place: None,
         }
+    }
+
+    /// Whether a command naming `name` means this slot: its own name or its
+    /// place's ("Scharni" for "Scharni 1").
+    pub fn answers_to(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name)
+            || self
+                .place
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(name))
+    }
+
+    /// Where this slot cleans: its place, else its own name.
+    pub fn place_name(&self) -> &str {
+        self.place.as_deref().unwrap_or(&self.name)
     }
 }
 
@@ -135,6 +159,24 @@ pub struct CleaningGroup {
     /// turns (see `rhythm`).
     #[serde(default)]
     pub rhythm: crate::rhythm::Rhythm,
+    /// A house-wide group (the staircase): every resident is a member,
+    /// whatever their floor groups, and the bot keeps `member_ids` so
+    /// (`house::sync`): a resident is everyone active in another active
+    /// group, plus `house_added`, minus `house_excused`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub house_wide: bool,
+    /// Excused from this house-wide group by an admin (`!member remove`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub house_excused: Vec<PersonId>,
+    /// In this house-wide group though in no other group (`!member add`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub house_added: Vec<PersonId>,
+    /// How many people the rotation has drawn ahead of someone to spare them
+    /// a clash with their other duties (`resolver`): so nobody is put off for
+    /// long, and the places are made up on their next turn. Cleared once
+    /// they are drawn.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub rotation_deferred: std::collections::BTreeMap<PersonId, u32>,
 }
 
 fn default_active() -> bool {
@@ -159,7 +201,22 @@ impl CleaningGroup {
             weight: 1.0,
             is_active: true,
             rhythm: crate::rhythm::Rhythm::weekly(),
+            house_wide: false,
+            house_excused: Vec::new(),
+            house_added: Vec::new(),
+            rotation_deferred: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// How much work one turn of `slot_index` is, in room equivalents:
+    /// its rooms (with their weights) × the slot's weight × the group's.
+    /// What the rotation balances across groups (`resolver::Workload`).
+    pub fn duty_load(&self, slot_index: usize) -> f64 {
+        let (rooms, weights, slot_weight) = match self.slots.get(slot_index) {
+            Some(s) => (&s.room_names, &s.room_weights, s.weight),
+            None => (&self.room_names, &self.room_weights, 1.0),
+        };
+        crate::analytics::effective_rooms_pub(rooms, weights) * slot_weight * self.weight
     }
 
     pub fn is_multi_slot(&self) -> bool {
@@ -170,6 +227,24 @@ impl CleaningGroup {
         self.slots
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The slot named `name`, else every slot at place `name`
+    /// (`CleaningSlot::place`), in order: what a command naming a slot means.
+    pub fn slots_at(&self, name: &str) -> Vec<SlotId> {
+        match self.slot_by_name(name) {
+            Some(slot) => vec![slot.id.clone()],
+            None => self
+                .slots
+                .iter()
+                .filter(|s| {
+                    s.place
+                        .as_deref()
+                        .is_some_and(|p| p.eq_ignore_ascii_case(name))
+                })
+                .map(|s| s.id.clone())
+                .collect(),
+        }
     }
 
     pub fn slot_by_id(&self, id: &SlotId) -> Option<&CleaningSlot> {
@@ -270,7 +345,7 @@ const ASSIGNMENT_NS: Uuid = Uuid::from_bytes([
     0xc1, 0xea, 0x3b, 0x07, 0xc1, 0xea, 0x3b, 0x07, 0xc1, 0xea, 0x3b, 0x07, 0xc1, 0xea, 0x3b, 0x07,
 ]);
 
-/// Stable UUID v5 for a (group, [slot,] year, week, assignee) tuple.
+/// Stable UUID v5 for a (group, \[slot,\] year, week, assignee) tuple.
 /// Identical inputs always produce the same UID. No storage required.
 pub fn assignment_uid(group_id: &str, year: i32, week: u32, person_id: &str) -> String {
     let name = format!("{group_id}:{year}:W{week:02}:{person_id}");

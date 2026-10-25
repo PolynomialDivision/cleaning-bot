@@ -264,6 +264,24 @@ pub fn validate_state(state: &State) -> ValidationReport {
         }
     }
 
+    // ── 9. House-wide groups follow the residents ────────────────────────────
+    for g in state
+        .cleaning_groups
+        .iter()
+        .filter(|g| g.house_wide && g.is_active)
+    {
+        let wanted = crate::house::residents(state, g);
+        let missing = wanted.iter().filter(|p| !g.member_ids.contains(p)).count();
+        let extra = g.member_ids.iter().filter(|p| !wanted.contains(p)).count();
+        if missing + extra > 0 {
+            warnings.push(format!(
+                "House-wide group «{}»: {missing} resident(s) missing, {extra} non-resident(s) in it \
+                 (the bot catches up within half an hour)",
+                g.name
+            ));
+        }
+    }
+
     report
 }
 

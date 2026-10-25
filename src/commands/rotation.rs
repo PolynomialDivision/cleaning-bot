@@ -51,6 +51,7 @@ pub(crate) async fn add_matrix_participant(
         .expect("validated Matrix person must exist")
         .id
         .clone();
+    crate::house::note_admin_choice(&mut state, &group_id, &person_id, true)?;
     let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
     let summary = join_summary(&state, &group_id, &person_id, replanned_from);
     state.save(&ctx.state_path).await?;
@@ -110,6 +111,7 @@ pub(crate) async fn remove_matrix_participant(
         )));
     }
 
+    crate::house::note_admin_choice(&mut state, &group_id, &person_id, false)?;
     state.apply_event(DomainEvent::PersonLeftGroup {
         person_id: person_id.clone(),
         group_id: group_id.clone(),

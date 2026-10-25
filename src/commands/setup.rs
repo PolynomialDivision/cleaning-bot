@@ -122,6 +122,7 @@ pub(crate) async fn cmd_addperson(
             "{name} is already in «{group_name}». No changes made."
         )));
     }
+    crate::house::note_admin_choice(&mut state, &group_id, &person_id, true)?;
     let replanned_from = apply_group_join(ctx, &mut state, &group_id, &person_id)?;
     let summary = join_summary(&state, &group_id, &person_id, replanned_from);
     // Matched an existing person (possibly one with Matrix), or created a
@@ -181,6 +182,7 @@ pub(crate) async fn cmd_removeperson(
             open.join(", ")
         )));
     }
+    crate::house::note_admin_choice(&mut state, &group_id, &person_id, false)?;
     state.apply_event(DomainEvent::PersonLeftGroup {
         person_id: person_id.clone(),
         group_id: group_id.clone(),
@@ -487,6 +489,8 @@ pub(crate) async fn cmd_removefloor(
     state.apply_event(DomainEvent::GroupDeleted {
         group_id: group.id.clone(),
     })?;
+    // Who lived only in that group isn't a resident anymore.
+    crate::house::sync(ctx, &mut state, crate::house::Leavers::Go)?;
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Removed group «{}».", group.name)))
 }
@@ -531,34 +535,63 @@ pub(crate) async fn cmd_addslot(
     args: &[&str],
 ) -> Result<Option<String>> {
     require_admin(ctx, sender)?;
+    const USAGE: &str =
+        "💡 Usage: !groups slot add <group> <slot> [x2] · x2: two people clean it together";
     let (group_name, slot_name) = match (args.first(), args.get(1..).map(|s| s.join(" "))) {
         (Some(g), Some(s)) if !s.is_empty() => (g.to_string(), s),
-        _ => return Ok(Some("💡 Usage: !groups slot add <group> <slot>".into())),
+        _ => return Ok(Some(USAGE.into())),
+    };
+    // "Scharni x2": two slots, "Scharni 1" and "Scharni 2", at place "Scharni".
+    let count = |word: &str| {
+        let digits = word.strip_prefix(['x', 'X', '×'])?;
+        (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| digits.parse::<usize>().ok())
+    };
+    let (slot_name, people) = match slot_name.rsplit_once(' ') {
+        Some((name, word)) if !name.trim().is_empty() => match count(word) {
+            Some(Some(n @ 1..=6)) => (name.trim().to_owned(), n),
+            Some(_) => return Ok(Some(format!("{USAGE} (1 to 6 people)"))),
+            None => (slot_name.clone(), 1),
+        },
+        _ => (slot_name, 1),
     };
     let mut state = ctx.state.lock().await;
     let group_id = match state.group_by_name(&group_name) {
         Some(g) => g.id.clone(),
         None => return Ok(Some(group_not_found(&group_name))),
     };
-    if state
-        .group_by_id(&group_id)
-        .and_then(|g| g.slot_by_name(&slot_name))
-        .is_some()
-    {
+    let names: Vec<String> = match people {
+        1 => vec![slot_name.clone()],
+        n => (1..=n).map(|i| format!("{slot_name} {i}")).collect(),
+    };
+    if let Some(taken) = state.group_by_id(&group_id).and_then(|g| {
+        names
+            .iter()
+            .chain(std::iter::once(&slot_name))
+            .find(|n| !g.slots_at(n).is_empty())
+    }) {
         return Ok(Some(format!(
-            "Slot «{slot_name}» already exists in «{group_name}»."
+            "Slot «{taken}» already exists in «{group_name}»."
         )));
     }
-    let slot_id = uuid::Uuid::new_v4().to_string();
-    state.apply_event(DomainEvent::SlotAdded {
-        group_id,
-        slot_id,
-        slot_name: slot_name.clone(),
-    })?;
+    for name in &names {
+        state.apply_event(DomainEvent::SlotAdded {
+            group_id: group_id.clone(),
+            slot_id: uuid::Uuid::new_v4().to_string(),
+            slot_name: name.clone(),
+            place: (people > 1).then(|| slot_name.clone()),
+        })?;
+    }
     state.save(&ctx.state_path).await?;
-    Ok(Some(format!(
-        "✅ Added slot «{slot_name}» to «{group_name}»."
-    )))
+    Ok(Some(if people > 1 {
+        format!(
+            "✅ Added «{slot_name}» to «{group_name}» for {people} people: {}. \
+             Rooms and weights given for «{slot_name}» go to all of them.",
+            names.join(", ")
+        )
+    } else {
+        format!("✅ Added slot «{slot_name}» to «{group_name}».")
+    }))
 }
 
 // ── Admin: !groups slot remove <group> <slot_name> ───────────────────────────────────
@@ -574,10 +607,10 @@ pub(crate) async fn cmd_removeslot(
         _ => return Ok(Some("💡 Usage: !groups slot remove <group> <slot>".into())),
     };
     let mut state = ctx.state.lock().await;
-    let (group_id, slot_id) = match state.group_by_name(&group_name) {
-        Some(g) => match g.slot_by_name(&slot_name) {
-            Some(s) => (g.id.clone(), s.id.clone()),
-            None => {
+    let (group_id, slot_ids) = match state.group_by_name(&group_name) {
+        Some(g) => match g.slots_at(&slot_name) {
+            ids if !ids.is_empty() => (g.id.clone(), ids),
+            _ => {
                 return Ok(Some(format!(
                     "Slot «{slot_name}» not found in «{group_name}»."
                 )))
@@ -585,7 +618,12 @@ pub(crate) async fn cmd_removeslot(
         },
         None => return Ok(Some(group_not_found(&group_name))),
     };
-    state.apply_event(DomainEvent::SlotRemoved { group_id, slot_id })?;
+    for slot_id in slot_ids {
+        state.apply_event(DomainEvent::SlotRemoved {
+            group_id: group_id.clone(),
+            slot_id,
+        })?;
+    }
     state.save(&ctx.state_path).await?;
     Ok(Some(format!(
         "✅ Removed slot «{slot_name}» from «{group_name}»."
@@ -616,14 +654,16 @@ pub(crate) async fn cmd_addroom(
         None => return Ok(Some(group_not_found(&group_name))),
     };
 
-    // Detect slot targeting: if args[1] matches a slot name and there are more args, route to slot.
-    let (slot_id, room_name) = {
+    // Detect slot targeting: if args[1] names a slot (or a place several
+    // slots share) and there are more args, route to it.
+    let (slot_ids, room_name) = {
         let g = state.group_by_id(&group_id).unwrap();
         if args.len() >= 3 {
-            if let Some(slot) = g.slot_by_name(args[1]) {
-                (Some(slot.id.clone()), args[2..].join(" "))
-            } else {
-                (None, args[1..].join(" "))
+            match g.slots_at(args[1]) {
+                ids if !ids.is_empty() => {
+                    (ids.into_iter().map(Some).collect(), args[2..].join(" "))
+                }
+                _ => (vec![None], args[1..].join(" ")),
             }
         } else if g.is_multi_slot() {
             return Ok(Some(format!(
@@ -631,15 +671,17 @@ pub(crate) async fn cmd_addroom(
                 g.slots.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
             )));
         } else {
-            (None, args[1..].join(" "))
+            (vec![None], args[1..].join(" "))
         }
     };
 
-    state.apply_event(DomainEvent::RoomAdded {
-        group_id,
-        slot_id,
-        room_name: room_name.clone(),
-    })?;
+    for slot_id in slot_ids {
+        state.apply_event(DomainEvent::RoomAdded {
+            group_id: group_id.clone(),
+            slot_id,
+            room_name: room_name.clone(),
+        })?;
+    }
     state.save(&ctx.state_path).await?;
     Ok(Some(format!("✅ Added room «{room_name}».")))
 }
@@ -664,24 +706,23 @@ pub(crate) async fn cmd_removeroom(
         None => return Ok(Some(group_not_found(&group_name))),
     };
 
-    let (slot_id, room_name) = {
+    let (slot_ids, room_name) = {
         let g = state.group_by_id(&group_id).unwrap();
-        if args.len() >= 3 {
-            if let Some(slot) = g.slot_by_name(args[1]) {
-                (Some(slot.id.clone()), args[2..].join(" "))
-            } else {
-                (None, args[1..].join(" "))
+        match g.slots_at(args[1]) {
+            ids if args.len() >= 3 && !ids.is_empty() => {
+                (ids.into_iter().map(Some).collect(), args[2..].join(" "))
             }
-        } else {
-            (None, args[1..].join(" "))
+            _ => (vec![None], args[1..].join(" ")),
         }
     };
 
-    state.apply_event(DomainEvent::RoomRemoved {
-        group_id,
-        slot_id,
-        room_name: room_name.clone(),
-    })?;
+    for slot_id in slot_ids {
+        state.apply_event(DomainEvent::RoomRemoved {
+            group_id: group_id.clone(),
+            slot_id,
+            room_name: room_name.clone(),
+        })?;
+    }
     state.save(&ctx.state_path).await?;
     Ok(Some(format!(
         "✅ Removed room «{room_name}» from «{group_name}»."
@@ -713,60 +754,101 @@ pub(crate) async fn cmd_setroomweight(
         }
     };
     let mut state = ctx.state.lock().await;
-    let (group_id, slot_id) = match state.group_by_name(group_name) {
-        Some(g) => {
-            // Check if the room exists in a slot or at group level.
-            let in_group = g
-                .room_names
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(room_name));
-            let slot = g.slots.iter().find(|s| {
-                s.room_names
-                    .iter()
-                    .any(|r| r.eq_ignore_ascii_case(room_name))
-            });
-            match (in_group, slot) {
-                (true, _) => (g.id.clone(), None),
-                (_, Some(s)) => (g.id.clone(), Some(s.id.clone())),
-                _ => {
-                    return Ok(Some(format!(
-                        "Room «{room_name}» not found in «{group_name}»."
-                    )))
-                }
-            }
-        }
-        None => return Ok(Some(group_not_found(group_name))),
+    let Some(g) = state.group_by_name(group_name) else {
+        return Ok(Some(group_not_found(group_name)));
     };
-    // Canonicalize room name from actual stored name.
-    let canonical = {
-        let g = state.group_by_name(group_name).unwrap();
-        match &slot_id {
-            None => g
-                .room_names
-                .iter()
-                .find(|r| r.eq_ignore_ascii_case(room_name))
-                .unwrap()
-                .clone(),
-            Some(s) => g
-                .slot_by_id(s)
-                .unwrap()
-                .room_names
-                .iter()
-                .find(|r| r.eq_ignore_ascii_case(room_name))
-                .unwrap()
-                .clone(),
-        }
+    // The room at group level, else in every slot that has it (all the
+    // slots of a place, say), canonicalized from the stored name.
+    let stored = |rooms: &[String]| {
+        rooms
+            .iter()
+            .find(|r| r.eq_ignore_ascii_case(room_name))
+            .cloned()
     };
-    state.apply_event(DomainEvent::RoomWeightSet {
-        group_id,
-        slot_id,
-        room_name: canonical.clone(),
-        weight,
-    })?;
+    let targets: Vec<(Option<crate::domain::SlotId>, String)> = match stored(&g.room_names) {
+        Some(room) => vec![(None, room)],
+        None => g
+            .slots
+            .iter()
+            .filter_map(|s| stored(&s.room_names).map(|room| (Some(s.id.clone()), room)))
+            .collect(),
+    };
+    let group_id = g.id.clone();
+    let Some(canonical) = targets.first().map(|(_, room)| room.clone()) else {
+        return Ok(Some(format!(
+            "Room «{room_name}» not found in «{group_name}»."
+        )));
+    };
+    for (slot_id, room) in targets {
+        state.apply_event(DomainEvent::RoomWeightSet {
+            group_id: group_id.clone(),
+            slot_id,
+            room_name: room,
+            weight,
+        })?;
+    }
     state.save(&ctx.state_path).await?;
     Ok(Some(format!(
         "✅ Room «{canonical}» in «{group_name}» weight set to {weight:.2}×."
     )))
+}
+
+// ── Admin: !groups house <group> on|off ──────────────────────────────────────
+
+/// `!groups house <group> on|off`: a house-wide group has every resident as
+/// a member, kept so by the bot (`house`); off makes it an ordinary group
+/// with the members it has.
+pub(crate) async fn cmd_groups_house(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    const USAGE: &str =
+        "💡 Usage: !groups house <group> on|off · on: everyone living here is in it, in turn";
+    let (group_name, on) = match args {
+        [group, on] if on.eq_ignore_ascii_case("on") => (*group, true),
+        [group, off] if off.eq_ignore_ascii_case("off") => (*group, false),
+        _ => return Ok(Some(USAGE.into())),
+    };
+    let mut state = ctx.state.lock().await;
+    let Some(group) = state.group_by_name(group_name).cloned() else {
+        return Ok(Some(group_not_found(group_name)));
+    };
+    if group.house_wide == on {
+        return Ok(Some(format!(
+            "«{}» is {} house-wide. No changes made.",
+            group.name,
+            if on { "already" } else { "not" }
+        )));
+    }
+    state.apply_event(DomainEvent::HouseWideSet {
+        group_id: group.id.clone(),
+        house_wide: on,
+        excused: Vec::new(),
+        added: Vec::new(),
+    })?;
+    let changes = crate::house::sync(ctx, &mut state, crate::house::Leavers::Go)?;
+    let group = state.group_by_id(&group.id).cloned().unwrap_or(group);
+    let next = next_assignment_summary(&state, &group.id);
+    state.save(&ctx.state_path).await?;
+    Ok(Some(if on {
+        let joined: usize = changes.iter().map(|c| c.joined.len()).sum();
+        format!(
+            "🏠 «{}» is for the whole house now: everyone in a group is in it ({} joined), \
+             newcomers too; who leaves their last group leaves it. \
+             !member remove excuses someone, !member add adds someone in no other group.\n\
+             Turns are given with everyone's other duties in view: nobody gets two in one week \
+             if it can be helped.\n{next}",
+            group.name, joined
+        )
+    } else {
+        format!(
+            "«{}» is an ordinary group again, with its {} members.",
+            group.name,
+            group.member_ids.len()
+        )
+    }))
 }
 
 // ── Admin: !groups weight <group> <weight> ───────────────────────────────────

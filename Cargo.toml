@@ -30,3 +30,5 @@ tracing       = "0.1"
 [dev-dependencies]
 # A fake homeserver for the Matrix profile lookups (src/names.rs).
 wiremock = "0.6"
+# Requests against the website's router (src/web/tests.rs).
+tower    = { version = "0.5", features = ["util"] }

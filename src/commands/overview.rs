@@ -203,7 +203,10 @@ pub(crate) fn groups_text(state: &State) -> String {
         ));
         lines.push(String::new());
         lines.push(header);
-        if !members.is_empty() {
+        if let Some(house) = crate::house::describe(state, group) {
+            // Everyone is in it: their names would only repeat the list.
+            lines.push(house);
+        } else if !members.is_empty() {
             lines.push(
                 members
                     .iter()
@@ -237,6 +240,7 @@ pub(crate) fn group_detail_text(state: &State, group: &CleaningGroup) -> String 
         header.push_str(&format!(" · weight ×{:.1}", group.weight));
     }
     let mut lines = vec![header];
+    lines.extend(crate::house::describe(state, group));
 
     let weight_of = |w: f64| {
         if (w - 1.0).abs() > 0.01 {

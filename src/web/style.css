@@ -1,0 +1,129 @@
+/* The website (src/web.rs). The house kit (/_house/ui.css) comes first and sets the look:
+   tokens, light and dark, .h-bar, .h-card, .h-badge, .h-note, .h-lang. This only lays the
+   pages out. Phones first: one column, cards in a grid from 720px. */
+
+body { overflow-x: hidden; }
+.h-bar .brand { font-weight: 700; }
+.h-bar .h-lang a { min-height: 36px; }
+
+nav.tabs {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; gap: 4px; overflow-x: auto;
+  padding: 8px 16px; background: var(--h-bg); border-bottom: 1px solid var(--h-line);
+}
+nav.tabs a {
+  flex: 0 0 auto; display: inline-flex; align-items: center; min-height: 40px; padding: 0 14px;
+  border-radius: 999px; color: var(--h-text); font-weight: 600; text-decoration: none;
+}
+nav.tabs a:hover { background: var(--h-bg-2); }
+nav.tabs a[aria-current="page"] { background: var(--h-accent); color: var(--h-accent-ink); }
+
+main { max-width: 72rem; margin: 0 auto; padding: 16px 16px 24px; }
+footer { max-width: 72rem; margin: 0 auto; padding: 0 16px 32px; color: var(--h-muted); font-size: 14px; }
+h1 { font-size: 1.6rem; line-height: 1.2; margin: 8px 0 4px; }
+h2 { font-size: 1.15rem; margin: 0 0 8px; }
+h2.section { margin: 28px 0 12px; }
+h3 { font-size: 1.05rem; margin: 0; }
+p { margin: 4px 0; }
+.muted, .meta, .dates { color: var(--h-muted); }
+.meta { font-size: 14px; margin: 2px 0 10px; }
+.empty { padding: 16px 0; color: var(--h-muted); }
+.more { margin: 12px 0 0; }
+.crumb { margin: 0 0 4px; }
+main, .name, .g, .place-name { overflow-wrap: anywhere; }
+
+/* This week */
+.hero { margin: 0 0 16px; }
+.hero .eyebrow { color: var(--h-accent); font-weight: 700; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; margin: 0; }
+.hero h1 { font-size: 2.1rem; margin: 2px 0; }
+.hero .dates { font-size: 1.05rem; color: var(--h-text); }
+.hero .today { color: var(--h-muted); font-size: 14px; }
+
+.yours h2 { margin-top: 8px; }
+.strip { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.duty-card { padding: 12px 14px; }
+.duty-card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0; }
+.duty-card .g { font-weight: 700; color: var(--h-text); text-decoration: none; }
+.duty-card .rel { color: var(--h-accent); font-weight: 650; white-space: nowrap; }
+.duty-card .when, .duty-card .where { font-size: 15px; }
+.duty-card .wk { color: var(--h-muted); }
+.duty-card .state { margin-top: 6px; }
+
+.cards { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); margin: 0; padding: 0; list-style: none; }
+.cards > * { min-width: 0; }
+.group h3 a, .timeline h2 a { color: var(--h-text); text-decoration: none; }
+.group h3 a:hover, .timeline h2 a:hover { color: var(--h-accent); }
+.not-due { font-size: 15px; }
+
+/* Turns: when, then each place with its people */
+.turns, .places, .weeks, .compact { list-style: none; margin: 0; padding: 0; }
+.turn { padding: 8px 10px; margin: 0 -10px; border-radius: 10px; }
+.turn + .turn { border-top: 1px solid var(--h-line); }
+.turn .when { font-size: 15px; margin-bottom: 4px; }
+.turn .days { color: var(--h-text); }
+.places .place { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 2px 0; }
+.place-name { font-weight: 650; color: var(--h-muted); }
+.places.side { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.places.side .place { display: block; padding: 8px 10px; border: 1px solid var(--h-line); border-radius: 10px; background: var(--h-bg); }
+.places.side .place-name { display: block; margin-bottom: 2px; }
+.places.side .duty { display: flex; margin: 2px 0; }
+.places.side .amp { display: none; }
+.people { display: inline; }
+.duty { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.amp { color: var(--h-muted); }
+.st { white-space: nowrap; }
+.h-badge.open { background: transparent; color: var(--h-muted); box-shadow: inset 0 0 0 1px var(--h-line); }
+.h-badge.skipped { background: var(--h-bg-2); color: var(--h-muted); }
+.h-badge.now { background: var(--h-accent); color: var(--h-accent-ink); }
+.nobody { color: var(--h-muted); }
+
+/* The visitor's own: a tint and a bar (a ring on cards), and always the word "you" */
+.turn.mine, .compact li.mine { background: var(--h-accent-soft); box-shadow: inset 4px 0 0 var(--h-accent); }
+.group.mine, .person.mine { box-shadow: inset 0 0 0 2px var(--h-accent), var(--h-shadow); }
+.duty-card.mine { background: var(--h-surface); box-shadow: inset 4px 0 0 var(--h-accent), var(--h-shadow); }
+.places.side .place:has(.duty.mine) { border-color: var(--h-accent); background: var(--h-accent-soft); }
+.you {
+  display: inline-block; padding: 0 7px; border-radius: 999px; font-size: 12px; font-weight: 700;
+  line-height: 1.6; background: var(--h-accent); color: var(--h-accent-ink); text-transform: uppercase;
+}
+
+/* The weeks ahead, in short */
+.weeks { display: grid; gap: 12px; }
+.week-compact { padding: 12px 14px; border: 1px solid var(--h-line); border-radius: var(--h-radius); background: var(--h-surface); }
+.week-compact h3 { margin-bottom: 6px; }
+.week-compact h3 .dates { font-weight: 400; font-size: 14px; }
+.compact li { padding: 4px 8px; margin: 0 -8px; border-radius: 8px; font-size: 15px; }
+.compact .place, .compact .duty { display: inline; }
+.compact .st { margin-left: 4px; }
+.compact .g { font-weight: 650; }
+.compact .days, .compact .wk, .compact .sep { color: var(--h-muted); }
+
+/* Groups: a timeline per group */
+.timeline .week { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--h-line); }
+.timeline .week:first-child { border-top: 0; padding-top: 0; }
+.timeline .week.now .wk strong { color: var(--h-accent); }
+.timeline .wk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.timeline .wk .dates { font-size: 14px; }
+
+/* People */
+.person h2 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.figures { display: flex; gap: 20px; margin: 4px 0 8px; }
+.figures div { display: flex; flex-direction: column-reverse; }
+.figures dt { color: var(--h-muted); font-size: 13px; }
+.figures dd { margin: 0; font-size: 1.35rem; font-weight: 700; line-height: 1.2; }
+.person .compact .when { color: var(--h-muted); }
+
+@media (min-width: 720px) {
+  main { padding-top: 24px; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .strip.all { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .weeks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .timeline .week { grid-template-columns: 9rem minmax(0, 1fr); gap: 12px; }
+  .timeline .wk { flex-direction: column; gap: 0; }
+}
+@media (min-width: 1080px) {
+  .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cards.timelines { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .weeks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}

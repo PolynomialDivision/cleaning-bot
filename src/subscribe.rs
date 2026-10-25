@@ -38,7 +38,8 @@ impl Lang {
         }
     }
 
-    fn code(self) -> &'static str {
+    /// For `<html lang>` and `?lang=`.
+    pub fn code(self) -> &'static str {
         match self {
             Lang::De => "de",
             Lang::En => "en",

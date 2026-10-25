@@ -25,6 +25,112 @@ pub struct Config {
     /// If set (with `[directory]`), every resident with a house account gets their turns in a
     /// Nextcloud calendar of their own (src/calendars.rs).
     pub nextcloud: Option<NextcloudConfig>,
+    /// The residents' website (src/web.rs), off unless enabled.
+    #[serde(default)]
+    pub web: WebConfig,
+}
+
+/// The website (src/web.rs): the plan in a browser, read only, off unless enabled. It sits
+/// behind the house's login at the reverse proxy, which passes the person on as X-House-*
+/// headers and proves itself with the secret header X-Cleaning-Proxy-Secret
+/// ([`crate::web::PROXY_SECRET_ENV`] in the environment). Its own listener, never the
+/// iCal server's: that one is public.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct WebConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_web_bind")]
+    pub bind_addr: String,
+    /// Its address as people open it, e.g. `https://putzplan.example.org`.
+    #[serde(default)]
+    pub public_url: String,
+    /// Groups (X-House-Groups) that may see it; empty: everyone the login lets through.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// The house's start page, linked in the house bar ("⌂ Name"). Unset: public_url's
+    /// parent domain (`https://putzplan.example.org` → `https://example.org/`).
+    #[serde(default)]
+    pub home_url: Option<String>,
+    /// Its name in the house bar. Unset: from its address (example.org → "Example").
+    #[serde(default)]
+    pub home_name: Option<String>,
+}
+
+fn default_web_bind() -> String {
+    "0.0.0.0:8080".into()
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        WebConfig {
+            enabled: false,
+            bind_addr: default_web_bind(),
+            public_url: String::new(),
+            allowed_groups: Vec::new(),
+            home_url: None,
+            home_name: None,
+        }
+    }
+}
+
+impl WebConfig {
+    /// Checked at startup when enabled: the addresses, and that the website doesn't share
+    /// the public iCal server's listener or host name.
+    pub fn validate(&self, ical: Option<&ICalServerConfig>) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let Some(host) = http_host(&self.public_url) else {
+            anyhow::bail!("[web] public_url must be the website's http(s) address");
+        };
+        let bind: std::net::SocketAddr = self
+            .bind_addr
+            .parse()
+            .map_err(|_| anyhow::anyhow!("[web] bind_addr {:?} is not ip:port", self.bind_addr))?;
+        if let Some(home) = &self.home_url {
+            if http_host(home).is_none() {
+                anyhow::bail!("[web] home_url must be the start page's http(s) address");
+            }
+        }
+        if self
+            .home_name
+            .as_ref()
+            .is_some_and(|n| n.trim().is_empty() || n.chars().count() > 40)
+        {
+            anyhow::bail!("[web] home_name: 1–40 characters");
+        }
+        if self.allowed_groups.iter().any(|g| g.trim().is_empty()) {
+            anyhow::bail!("[web] allowed_groups: no empty names");
+        }
+        if let Some(ical) = ical {
+            if let Ok(other) = ical.bind_addr.parse::<std::net::SocketAddr>() {
+                let overlap = bind.ip() == other.ip()
+                    || bind.ip().is_unspecified()
+                    || other.ip().is_unspecified();
+                if overlap && bind.port() == other.port() {
+                    anyhow::bail!(
+                        "[web] bind_addr {bind} is the iCal server's: the website needs a listener of its own"
+                    );
+                }
+            }
+            if http_host(&ical.public_url).is_some_and(|h| h.eq_ignore_ascii_case(host)) {
+                anyhow::bail!(
+                    "[web] public_url is the iCal server's public host: the website must stay behind the house login"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The host (and port) of an http(s) address; `None` for anything else.
+fn http_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    (!host.is_empty() && !host.contains(char::is_whitespace)).then_some(host)
 }
 
 /// The bot's own Nextcloud account, which owns one calendar per resident and shares it with
@@ -33,7 +139,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct NextcloudConfig {
     /// The account's calendar home, e.g.
-    /// "https://cloud.example.org/remote.php/dav/calendars/cleaning-bot/".
+    /// `https://cloud.example.org/remote.php/dav/calendars/cleaning-bot/`.
     pub account_url: String,
     /// The account (its Nextcloud user ID).
     pub username: String,
@@ -115,7 +221,7 @@ pub struct ScheduleConfig {
 pub struct ICalServerConfig {
     /// Address to bind the HTTP server to, e.g. "0.0.0.0:8080".
     pub bind_addr: String,
-    /// Public base URL shown to users, e.g. "https://cal.example.org" (a
+    /// Public base URL shown to users, e.g. `https://cal.example.org` (a
     /// trailing slash is ignored). Should be HTTPS: feed URLs carry the
     /// token that grants access. Overridden by the environment variable
     /// [`ICAL_PUBLIC_URL_ENV`] if it is set.
@@ -183,17 +289,33 @@ mod tests {
         assert!(s.reminder_weekday < 7 && s.final_reminder_weekday < 7);
         assert_eq!(s.fill_strategy, FillStrategy::RoundRobin);
         assert!((1..=104).contains(&s.materialize_weeks));
+        assert!(!config.web.enabled);
         // With the commented-out section filled in, it reads too.
         let ical = include_str!("../config.example.toml")
             .replace("# [ical_server]", "[ical_server]")
-            .replace("# bind_addr", "bind_addr")
-            .replace("# public_url", "public_url");
+            .replacen("# bind_addr", "bind_addr", 1)
+            .replacen("# public_url", "public_url", 1);
         let config: Config = toml::from_str(&ical).unwrap();
         assert!(config
             .ical_server
             .unwrap()
             .public_url
             .starts_with("https://"));
+        let web = include_str!("../config.example.toml")
+            .replace("# [web]", "[web]")
+            .replace("# enabled", "enabled")
+            .replace(
+                "# bind_addr  = \"0.0.0.0:8081\"",
+                "bind_addr  = \"0.0.0.0:8081\"",
+            )
+            .replace(
+                "# public_url = \"https://putzplan",
+                "public_url = \"https://putzplan",
+            )
+            .replace("# allowed_groups", "allowed_groups");
+        let config: Config = toml::from_str(&web).unwrap();
+        assert!(config.web.enabled && config.web.validate(None).is_ok());
+        assert_eq!(config.web.allowed_groups, ["residents"]);
         let directory = include_str!("../config.example.toml")
             .replace("# [directory]", "[directory]")
             .replace("# provider", "provider")
@@ -272,6 +394,58 @@ mod tests {
             };
             assert!(e.to_string().contains("unknown timezone"), "{bad}: {e}");
         }
+    }
+
+    fn web(raw: &str) -> WebConfig {
+        toml::from_str(raw).unwrap()
+    }
+
+    #[test]
+    fn the_website_is_off_by_default_and_checked_when_on() {
+        let off = WebConfig::default();
+        assert!(!off.enabled);
+        assert_eq!(off.bind_addr, "0.0.0.0:8080");
+        assert!(off.validate(None).is_ok());
+        assert!(toml::from_str::<WebConfig>("enabld = true").is_err());
+
+        let ok = web("enabled = true\npublic_url = \"https://putzplan.example.org\"");
+        assert!(ok.validate(None).is_ok());
+        for bad in [
+            "enabled = true",
+            "enabled = true\npublic_url = \"putzplan.example.org\"",
+            "enabled = true\npublic_url = \"ftp://putzplan.example.org\"",
+            "enabled = true\npublic_url = \"https://\"",
+            "enabled = true\npublic_url = \"https://p.example.org\"\nbind_addr = \"nope\"",
+            "enabled = true\npublic_url = \"https://p.example.org\"\nhome_url = \"example.org\"",
+            "enabled = true\npublic_url = \"https://p.example.org\"\nhome_name = \"\"",
+            "enabled = true\npublic_url = \"https://p.example.org\"\nallowed_groups = [\"\"]",
+        ] {
+            assert!(web(bad).validate(None).is_err(), "{bad}");
+        }
+        let full = web(
+            "enabled = true\nbind_addr = \"127.0.0.1:8090\"\npublic_url = \"https://p.example.org\"\n\
+             allowed_groups = [\"residents\"]\nhome_url = \"https://example.org/\"\nhome_name = \"Example\"",
+        );
+        assert!(full.validate(None).is_ok());
+        assert_eq!(full.allowed_groups, ["residents"]);
+    }
+
+    #[test]
+    fn the_website_never_shares_the_public_ical_server() {
+        let ical = ICalServerConfig {
+            bind_addr: "0.0.0.0:8080".to_owned(),
+            public_url: "https://cal.example.org".to_owned(),
+        };
+        let with = |bind: &str, url: &str| {
+            web(&format!(
+                "enabled = true\nbind_addr = \"{bind}\"\npublic_url = \"{url}\""
+            ))
+            .validate(Some(&ical))
+        };
+        assert!(with("0.0.0.0:8081", "https://putzplan.example.org").is_ok());
+        assert!(with("0.0.0.0:8080", "https://putzplan.example.org").is_err());
+        assert!(with("127.0.0.1:8080", "https://putzplan.example.org").is_err());
+        assert!(with("0.0.0.0:8081", "https://CAL.example.org/plan").is_err());
     }
 
     #[test]

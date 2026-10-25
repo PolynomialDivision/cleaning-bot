@@ -38,6 +38,7 @@ mod directory;
 mod domain;
 mod format;
 mod help_board;
+mod house;
 mod http;
 mod ical;
 mod names;
@@ -57,6 +58,7 @@ mod trades;
 mod turn_menu;
 mod validate;
 mod view;
+mod web;
 
 use config::Config;
 use state::State;
@@ -163,6 +165,13 @@ async fn main() -> Result<()> {
             );
         }
     }
+    config.web.validate(config.ical_server.as_ref())?;
+    // The website needs the proxy's secret: refused at startup, not on the first visit.
+    let web_secret = if config.web.enabled {
+        Some(web::proxy_secret_from_env()?)
+    } else {
+        None
+    };
     let config = Arc::new(config);
 
     // Must happen before any `current_iso_week()` call (materialize below,
@@ -239,6 +248,8 @@ async fn main() -> Result<()> {
     }
 
     let state = Arc::new(Mutex::new(st));
+    // Filled by `directory::run` once the bot is up; the website reads it too.
+    let accounts: Arc<std::sync::RwLock<directory::Accounts>> = Arc::default();
 
     // ── Optional HTTP iCal server ─────────────────────────────────────────────
     if let Some(ref ical_cfg) = config.ical_server {
@@ -247,6 +258,21 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = http::run(state_clone, ical_cfg).await {
                 error!("iCal HTTP server error: {e}");
+            }
+        });
+    }
+
+    // ── Optional website (its own listener, behind the house login) ─────────────
+    if let Some(secret) = web_secret {
+        let site = web::Web::new(
+            state.clone(),
+            accounts.clone(),
+            web::Settings::new(&config.web, secret),
+            &config.matrix.user_id,
+        )?;
+        tokio::spawn(async move {
+            if let Err(e) = web::serve(site).await {
+                error!("Website error: {e:#}");
             }
         });
     }
@@ -266,7 +292,7 @@ async fn main() -> Result<()> {
         config: Arc::clone(&config),
         admin_users: bot.admins().clone(),
         room_id: room_id.clone(),
-        accounts: Arc::default(),
+        accounts,
         logins: Arc::default(),
     };
     if let Some(directory) = config.directory.clone() {

@@ -106,6 +106,23 @@ materialize_weeks = 26
 # refresh_minutes = 15
 # weeks           = 26
 
+# ── The website (optional) ────────────────────────────────────────────────────
+# The plan in a browser for residents on the house network, read only (README "The
+# website"). Only behind the reverse proxy with the house's login (forward auth), which
+# sets X-House-User / X-House-Groups / X-House-Name / X-House-Matrix-Ids and the secret
+# header X-Cleaning-Proxy-Secret: the value of the environment variable
+# CLEANING_PROXY_SECRET (at least 32 characters; required when enabled). Its own
+# listener: never the iCal server's bind_addr or public host.
+#
+# [web]
+# enabled    = true
+# bind_addr  = "0.0.0.0:8081"
+# public_url = "https://putzplan.example.org"
+# allowed_groups = ["residents"]   # X-House-Groups that may see it; [] = everyone logged in
+# The house bar's link home ("⌂ Example"); unset: public_url's parent domain and its name.
+# home_url  = "https://example.org/"
+# home_name = "Example"
+
 # ── Groups and members ─────────────────────────────────────────────────────────
 # Groups and members are managed at runtime via bot commands, not in this file.
 #

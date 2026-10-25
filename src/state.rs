@@ -619,6 +619,7 @@ impl State {
                 group_id,
                 slot_id,
                 slot_name,
+                place,
             } => {
                 let g = self
                     .cleaning_groups
@@ -630,6 +631,7 @@ impl State {
                 }
                 let mut s = CleaningSlot::new(slot_name);
                 s.id = slot_id.clone();
+                s.place = place.clone();
                 g.slots.push(s);
                 true
             }
@@ -839,6 +841,38 @@ impl State {
                     return Ok(());
                 }
                 g.rotation_queue = queue.clone();
+                true
+            }
+            E::RotationDeferralsSet { group_id, deferred } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if &g.rotation_deferred == deferred {
+                    return Ok(());
+                }
+                g.rotation_deferred = deferred.clone();
+                true
+            }
+            E::HouseWideSet {
+                group_id,
+                house_wide,
+                excused,
+                added,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if (g.house_wide, &g.house_excused, &g.house_added) == (*house_wide, excused, added)
+                {
+                    return Ok(());
+                }
+                g.house_wide = *house_wide;
+                g.house_excused = excused.clone();
+                g.house_added = added.clone();
                 true
             }
             E::RoomWeightSet {
@@ -1399,8 +1433,8 @@ impl State {
     }
 
     /// Who is responsible for one slot (0 without slots) of one turn: the
-    /// frozen plan first; past its horizon, a preview of the rotation that
-    /// agrees with what `resolver::materialize` will freeze.
+    /// frozen plan first; past its horizon, a preview of the rotation
+    /// (`resolver::preview_slot_assignee`).
     pub fn slot_assignee(
         &self,
         group: &CleaningGroup,

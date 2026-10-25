@@ -109,7 +109,7 @@ pub(crate) async fn cmd_swap(
                 group
                     .slots
                     .get(d.slot_index)
-                    .is_some_and(|s| s.name.eq_ignore_ascii_case(name))
+                    .is_some_and(|s| s.answers_to(name))
             })
         })
         .cloned()
@@ -379,7 +379,7 @@ pub(crate) async fn cmd_sos(
                 d.group
                     .slots
                     .get(d.slot_index)
-                    .is_some_and(|s| s.name.eq_ignore_ascii_case(name))
+                    .is_some_and(|s| s.answers_to(name))
             })
         })
         .filter(|d| !week_named || d.turn.week() == parsed.week)

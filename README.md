@@ -206,6 +206,75 @@ When a group has more duties per week (slots × shifts) than members, the rest
 stay *nobody assigned*: visible in the plan, fillable with `!plan assign`.
 `!validate` warns about such groups.
 
+### The staircase: a group for the whole house
+
+Some places are everyone's: the staircases. `!groups house <group> on` makes
+a group **house-wide**: every resident is in it, whatever floor or corridor
+they live on, and the bot keeps it so. A resident is anyone in at least one
+other group (a paused one too). Joining a first group puts them on the
+staircase as well, right away. Leaving their last one takes them off it
+within half an hour (their turns handed on), once a staircase turn of the
+running week is done or over: someone moving floors (out of one group, into
+another) stays on it with their turns as they were. Nobody joins or leaves
+it with `!join`, `!leave` or a selector.
+An admin can excuse someone (`!member remove <person> <group>`) or add
+someone who is in no other group (`!member add`); the bot remembers both.
+`!groups` shows such a group as `🏠 everyone (14) · excused: Mia`.
+
+Two people per staircase are two slots at one **place**: `!groups slot add
+Staircase Scharni x2` makes the slots "Scharni 1" and "Scharni 2" at the
+place "Scharni". Each of the two has their own turn (reminder, ✅, 🆘, swap);
+the plan, reminders and calendars name the place, and a room, weight or
+`!groups slot remove` given for the place applies to all of its slots.
+Commands that take a slot (`!sos`, `!takeover`, `!plan assign`) take the
+place's name too. Calendar events say who you clean it with.
+
+Our house: the staircases Scharni and Colbe, every two weeks, two people
+each:
+
+```
+!groups add Staircase
+!groups rhythm Staircase every 2
+!groups slot add Staircase Scharni x2
+!groups slot add Staircase Colbe x2
+!groups room add Staircase Scharni Staircase Scharni
+!groups room add Staircase Colbe Staircase Colbe
+!groups weight Staircase 1.5
+!groups house Staircase on
+```
+
+### Fair across all groups
+
+Each group's rotation queue decides **how often** someone cleans there:
+everyone in a group gets the same number of turns, as before. Which of the
+people nearly due gets **which week** is decided with all their other duties
+in view, in every group:
+
+- Every turn is some work: its rooms (with their weights) × its slot's
+  weight × its group's weight (`!groups weight`). Make unpopular or heavy
+  tasks (bathrooms, the staircase) heavier: they are spread further apart.
+- A clash is another duty of the same person on the same days, in the same
+  week, or a week or two apart, counted by both duties' work (the same days
+  much more than two weeks apart), plus a little for everything they have on
+  around then.
+- Of the first few in line (the week's open turns and as many again, but
+  never as far back as the people who cleaned last time, so a small group
+  just runs in order), the bot takes whoever clashes least with this week
+  **compared with the group's next due week**: putting someone off only
+  happens when they have less on then. A place further back in line counts
+  against a candidate, so a vague difference never reorders the rotation.
+- Someone put off keeps their place at the front, is drawn first after two
+  due weeks of it whatever it costs, and makes up the places they lost on
+  their next turn. A clash moves a turn by a week or two; nobody cleans less
+  often because of it, and nobody more.
+- Groups cleaned every two weeks are planned twice as far ahead as weekly
+  ones; there, the weekly groups' coming turns are forecast from their
+  rotation, so the staircase is planned around them too.
+
+With nothing else on (one group, or nobody in two), the rotation runs in
+line order exactly as it always did. Frozen turns are never moved: only
+weeks not planned yet are planned this way.
+
 ### Private chats
 
 For a resident, a room other than the cleaning room counts as a private chat
@@ -372,6 +441,55 @@ everything the renderer does (a test checks).
 The PDF fonts cover Latin-1 (German, French, Scandinavian, …) and common
 punctuation. Other characters (Polish ł, Cyrillic, Greek, emoji) are
 missing from the PDF.
+
+## The website
+
+With `[web] enabled`, residents on the house network see the plan in a
+browser, on phones too: **This week** (`/`: the week, your next three turns
+with how far off they are, every group's turns with their state, then the
+next six weeks in short; `?weeks=` 1–26), **Groups** (`/groups`, one group
+at `/g/<id>`: each group's coming weeks; the staircase with its places side
+by side, "Scharni: Alice & Bob · Colbe: Carol & Dan"), **People**
+(`/people`: everyone in the plan with their turns of the next 8 weeks, how
+many and their load, the rooms weighted as the rotation balances them) and
+**Mine** (`/me`: your turns of the next 12 weeks, with who shares the
+place). Your own turns are highlighted and say "you". German, English or
+Ukrainian, chosen like the subscribe page.
+
+- **Read only, and always the plan of the room.** Every page is built from
+  the same schedule snapshot as the plan, the PDF and the feeds, under the
+  bot's own state lock: nothing on the website can differ from Matrix, and
+  nothing can be changed there. ✅, `!sos` and swaps stay in Matrix.
+- **Only behind the house login.** The reverse proxy (Caddy with
+  Authentik's forward auth) sends `X-House-User`, `X-House-Groups`
+  (`|`-separated), `X-House-Name`, `X-House-Matrix-Ids` and the secret header
+  `X-Cleaning-Proxy-Secret`, whose value is the environment variable
+  `CLEANING_PROXY_SECRET` (at least 32 characters; the bot refuses to start
+  without it while `[web]` is on). No or a wrong secret: 403; no login: 401;
+  not in `allowed_groups` (when set): 403.
+- **Who you are:** your house account `@<login>:<the bot's server>` or one
+  of the accounts in `X-House-Matrix-Ids`, the person the plan knows them
+  by (see *Several Matrix accounts*). Someone the plan doesn't know sees
+  everything, just without "you". Display names only, never Matrix IDs, and
+  never a calendar link (`/me` says to send `!ical` in a private chat).
+- **Its own listener** (`bind_addr`, default `0.0.0.0:8080`), never the iCal
+  server's: that one is public, the website must not be. The startup check
+  refuses the iCal server's listener or public host.
+- Pages are never cached (`no-store`) or indexed (`X-Robots-Tag`), load
+  nothing from elsewhere and need no script (CSP: this origin's style sheets
+  only): the house UI kit `/_house/ui.css`, then `/style.css`.
+
+```toml
+[web]
+enabled        = true
+bind_addr      = "0.0.0.0:8081"
+public_url     = "https://putzplan.example.org"
+allowed_groups = ["residents"]
+# home_url = "https://example.org/"  # the house bar's link home (default: public_url's parent domain)
+# home_name = "Example"
+```
+
+All of this lives in `src/web.rs` and `src/web/`.
 
 ## Reliability, honestly
 

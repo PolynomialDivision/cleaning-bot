@@ -105,18 +105,50 @@ pub fn reconcile_queue(state: &State, group: &CleaningGroup) -> Vec<PersonId> {
 /// repeatedly, and it never revisits or changes a turn it already froze.
 /// Callers rely on that to make join/leave additive rather than destructive.
 pub fn materialize(state: &State, cycles_ahead: usize) -> Vec<DomainEvent> {
+    let mut workload = Workload::forecast(state, cycles_ahead);
     let mut events = Vec::new();
     for group in &state.cleaning_groups {
-        events.extend(materialize_group(state, group, cycles_ahead));
+        events.extend(materialize_with(state, group, cycles_ahead, &mut workload));
     }
     events
 }
 
-/// `materialize` for one group.
+/// `materialize` for one group, weighed against everyone's stored duties.
 pub fn materialize_group(
     state: &State,
     group: &CleaningGroup,
     cycles_ahead: usize,
+) -> Vec<DomainEvent> {
+    materialize_with(
+        state,
+        group,
+        cycles_ahead,
+        &mut Workload::forecast(state, cycles_ahead),
+    )
+}
+
+/// `materialize_group` with the duties drawn so far in this run, in other
+/// groups too (`workload`), which it extends by its own draws.
+///
+/// # Who is drawn
+///
+/// The queue decides *how often* everyone cleans: each pick comes from the
+/// front of it, so within a group everyone gets the same number of turns.
+/// Which of the people nearly due gets *this* week is decided by what else
+/// they have to do around then (`pick_week`): of the first few in line, the
+/// ones whose other duties clash least with this week, compared with the
+/// next due week (waiting only helps someone with less on then), a place
+/// further back in line counting against them a little (`LINE_COST`), so the
+/// plain rotation order wins unless a real clash is spared. Someone put off
+/// keeps their place at the front, after `MAX_DEFERRALS` due weeks of it is
+/// drawn first whatever it costs, and makes the delay up on their next turn
+/// (they go back in line ahead of the people who jumped them). A clash
+/// postpones a turn by a week or two; nobody cleans less often for it.
+fn materialize_with(
+    state: &State,
+    group: &CleaningGroup,
+    cycles_ahead: usize,
+    workload: &mut Workload,
 ) -> Vec<DomainEvent> {
     if cycles_ahead == 0 || group.member_ids.is_empty() || !group.is_active {
         return vec![];
@@ -125,6 +157,12 @@ pub fn materialize_group(
     let num_slots = group.slots.len().max(1);
     let first_due = state.next_due_week(group, current_iso_week());
     let mut queue = reconcile_queue(state, group);
+    let mut deferred: std::collections::BTreeMap<PersonId, u32> = group
+        .rotation_deferred
+        .iter()
+        .filter(|(pid, _)| queue.contains(pid))
+        .map(|(pid, n)| (pid.clone(), *n))
+        .collect();
     let mut any_pop = false;
     // The queue reflects every rotation draw up to the group's last one.
     // A pinned turn after that (an import, `!plan assign`, a takeover or
@@ -160,49 +198,99 @@ pub fn materialize_group(
             .filter_map(|a| a.person_id.clone())
             .collect();
 
-        let mut drawn: Vec<(Turn, usize, Option<PersonId>)> = Vec::new();
-        for turn in state.turns_in_week(group, dy, dw) {
+        let turns = state.turns_in_week(group, dy, dw);
+        let frozen = |turn: Turn, si: usize| {
+            state.slot_assignments.iter().find(|a| {
+                a.group_id == group.id
+                    && a.slot_index == si
+                    && (a.iso_year, a.iso_week, a.shift) == (turn.year, turn.week, turn.shift)
+            })
+        };
+        let mut open: Vec<(Turn, usize)> = Vec::new();
+        for &turn in &turns {
             for si in 0..num_slots {
                 // Skip if already frozen. This is what makes materialize additive.
-                if let Some(frozen) = state.slot_assignments.iter().find(|a| {
-                    a.group_id == group.id
-                        && a.slot_index == si
-                        && (a.iso_year, a.iso_week, a.shift) == (turn.year, turn.week, turn.shift)
-                }) {
-                    let pinned_after_last_draw = frozen.source != AssignmentSource::RoundRobin
-                        && drawn_until.is_none_or(|last| turn > last);
-                    if let (true, Some(pid)) = (pinned_after_last_draw, &frozen.person_id) {
-                        if let Some(pos) = queue.iter().position(|q| q == pid) {
-                            let pinned = queue.remove(pos);
-                            queue.push(pinned);
-                            any_pop = true;
-                        }
-                    }
+                let Some(frozen) = frozen(turn, si) else {
+                    open.push((turn, si));
                     continue;
+                };
+                let pinned_after_last_draw = frozen.source != AssignmentSource::RoundRobin
+                    && drawn_until.is_none_or(|last| turn > last);
+                if let (true, Some(pid)) = (pinned_after_last_draw, &frozen.person_id) {
+                    if let Some(pos) = queue.iter().position(|q| q == pid) {
+                        let pinned = queue.remove(pos);
+                        queue.push(pinned);
+                        any_pop = true;
+                    }
+                    // Their turn came, if by other means: nothing left to make up.
+                    deferred.remove(pid);
                 }
-
-                // First queue member not already used this week and not on
-                // record absence. Removed from wherever they sit and pushed
-                // to the back like a normal draw. An absent member in front
-                // of them is skipped over, not touched, so they keep their
-                // place in line and lose no turn.
-                let pick_pos = queue.iter().position(|pid| {
-                    !used_this_week.contains(pid) && !state.is_absent(pid, &group.id, dy, dw)
-                });
-                let person_id = pick_pos.map(|pos| {
-                    let picked = queue.remove(pos);
-                    queue.push(picked.clone());
-                    any_pop = true;
-                    used_this_week.insert(picked.clone());
-                    picked
-                });
-                drawn.push((turn, si, person_id));
             }
+        }
+
+        // Who is in line this week: queue members not already used this
+        // week and not on record absence, in line order. Anyone passed over
+        // is not touched, so they keep their place in line and lose no turn.
+        let line: Vec<PersonId> = queue
+            .iter()
+            .filter(|pid| {
+                !used_this_week.contains(*pid) && !state.is_absent(pid, &group.id, dy, dw)
+            })
+            .cloned()
+            .collect();
+        let picks = pick_week(
+            group,
+            &line,
+            &open,
+            turns.len() * num_slots,
+            &deferred,
+            workload,
+        );
+        let picked: HashSet<&PersonId> = picks.iter().collect();
+        // Whoever was in line ahead of someone drawn this week, but not
+        // drawn themselves, was put off: by as many people as were drawn
+        // behind them. Whoever was drawn is owed the places they lost (`debt`).
+        let mut debt: std::collections::HashMap<PersonId, u32> = Default::default();
+        for (rank, pid) in line.iter().enumerate() {
+            if picked.contains(pid) {
+                debt.extend(deferred.remove(pid).map(|n| (pid.clone(), n)));
+                continue;
+            }
+            let jumped = line[rank + 1..]
+                .iter()
+                .filter(|p| picked.contains(p))
+                .count() as u32;
+            if jumped > 0 {
+                *deferred.entry(pid.clone()).or_default() += jumped;
+            }
+        }
+
+        // The week's open turns, in order, go to the people drawn, in line
+        // order; each is removed from wherever they sit and pushed to the
+        // back like a normal draw, but ahead of the people who were drawn
+        // before them: that is made up next time, so being put off never
+        // means cleaning less often. Seats beyond them stay unassigned.
+        let mut drawn: Vec<(Turn, usize, Option<PersonId>)> = Vec::new();
+        let mut picks = picks.into_iter();
+        for (turn, si) in open {
+            let person_id = picks.next().inspect(|picked| {
+                if let Some(pos) = queue.iter().position(|q| q == picked) {
+                    queue.remove(pos);
+                }
+                let owed = debt.get(picked).copied().unwrap_or(0) as usize;
+                queue.insert(queue.len().saturating_sub(owed), picked.clone());
+                any_pop = true;
+                used_this_week.insert(picked.clone());
+            });
+            drawn.push((turn, si, person_id));
         }
 
         seat_by_shift(state, group, &planned, &mut drawn);
         for (turn, si, person_id) in drawn {
-            planned.extend(person_id.clone().map(|pid| (turn, pid)));
+            if let Some(pid) = &person_id {
+                planned.push((turn, pid.clone()));
+                workload.add(pid, group, si, turn);
+            }
             events.push(DomainEvent::SlotAssigned {
                 group_id: group.id.clone(),
                 slot_index: si,
@@ -226,7 +314,239 @@ pub fn materialize_group(
             queue,
         });
     }
+    if deferred != group.rotation_deferred {
+        events.push(DomainEvent::RotationDeferralsSet {
+            group_id: group.id.clone(),
+            deferred,
+        });
+    }
     events
+}
+
+/// Who cleans the `open` turns of one due week, of the people in `line`
+/// (in line order), returned in line order: as many as there are open turns
+/// (fewer if the line is shorter).
+///
+/// Anyone put off by `MAX_DEFERRALS` weeks' worth of people (the week's open
+/// turns each) already goes first. The rest come
+/// from the front of the line (the open turns and as many again, but never
+/// reaching the people drawn the due week before: the week's seats at the
+/// back of the line, so in a small group the rotation runs strictly in
+/// order), whoever's other duties clash least with this week compared with
+/// the group's next due week (`Workload::clash`): putting someone off only
+/// helps if they have less on then. Each place further back in line counts
+/// against them a little (`LINE_COST`).
+fn pick_week(
+    group: &CleaningGroup,
+    line: &[PersonId],
+    open: &[(Turn, usize)],
+    seats_in_week: usize,
+    deferred: &std::collections::BTreeMap<PersonId, u32>,
+    workload: &Workload,
+) -> Vec<PersonId> {
+    let (Some(first), Some(last)) = (open.first(), open.last()) else {
+        return Vec::new();
+    };
+    let start = first.0.dates(&group.rhythm).0;
+    let end = last.0.dates(&group.rhythm).1;
+    // The group's next due week: where someone put off would land.
+    let later = chrono::Duration::weeks(group.rhythm.every_weeks() as i64);
+    let load = open.iter().map(|&(_, si)| group.duty_load(si)).sum::<f64>() / open.len() as f64;
+    let reach = (open.len() * 2)
+        .min(line.len().saturating_sub(seats_in_week))
+        .max(open.len());
+    let mut ranked: Vec<(bool, f64, usize)> = line
+        .iter()
+        .take(reach)
+        .enumerate()
+        .map(|(rank, pid)| {
+            let overdue =
+                deferred.get(pid).copied().unwrap_or(0) as usize >= MAX_DEFERRALS * open.len();
+            // What drawing them now costs more than drawing them next time:
+            // someone just as busy then gains nothing by waiting.
+            let clash = workload.clash(pid, &group.id, start, end, load)
+                - workload.clash(pid, &group.id, start + later, end + later, load);
+            (!overdue, clash + LINE_COST * load * rank as f64, rank)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut ranks: Vec<usize> = ranked.iter().take(open.len()).map(|r| r.2).collect();
+    ranks.sort_unstable();
+    ranks.into_iter().map(|rank| line[rank].clone()).collect()
+}
+
+/// How far back in line a candidate may sit and still be drawn first: each
+/// place behind the front costs this much times the turn's load (clash units,
+/// see `Workload::clash`). Enough that a vague difference never reorders the
+/// rotation, small enough that a real clash (another duty in the same week)
+/// moves someone a few places.
+const LINE_COST: f64 = 0.15;
+
+/// Due weeks someone may be put off to spare them a clash before they are
+/// drawn first anyway.
+pub const MAX_DEFERRALS: usize = 2;
+
+/// Of a clash between two duties: on overlapping days, in the same week, a
+/// week apart, two weeks apart. Multiplied by both duties' loads.
+const CLASH_OVERLAP: f64 = 1.0;
+const CLASH_SAME_WEEK: f64 = 0.6;
+const CLASH_NEXT_WEEK: f64 = 0.25;
+const CLASH_TWO_WEEKS: f64 = 0.08;
+/// Of everything else someone has to do in the four weeks around a turn, a
+/// small pull towards whoever has less on.
+const BUSY_WEIGHT: f64 = 0.03;
+
+/// Everyone's duties, in every active group, from a little before today on:
+/// what a draw weighs a candidate's turn against.
+#[derive(Default)]
+pub struct Workload {
+    duties: std::collections::HashMap<PersonId, Vec<Duty>>,
+}
+
+struct Duty {
+    group_id: crate::domain::GroupId,
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+    load: f64,
+}
+
+impl Workload {
+    /// The duties stored in `state` (frozen turns of active groups), from
+    /// five weeks back on: older ones can't clash with anything planned.
+    pub fn of(state: &State) -> Self {
+        let since = crate::state::today() - chrono::Duration::days(35);
+        let mut workload = Workload::default();
+        for a in &state.slot_assignments {
+            let (Some(pid), Some(group)) = (&a.person_id, state.group_by_id(&a.group_id)) else {
+                continue;
+            };
+            let turn = Turn::new(a.iso_year, a.iso_week, a.shift);
+            if group.is_active && turn.dates(&group.rhythm).1 >= since {
+                workload.add(pid, group, a.slot_index, turn);
+            }
+        }
+        workload
+    }
+
+    /// `of` with what the rotation of every group will most likely bring
+    /// until the last week any of them is planned to with `cycles` due
+    /// weeks: a group cleaned every 2 weeks is planned twice as far ahead
+    /// as a weekly one, and is weighed against the weekly one's coming
+    /// turns there too, not against nothing. The forecast is plain
+    /// planning on a scratch copy, so it is what will happen unless
+    /// something changes.
+    pub fn forecast(state: &State, cycles: usize) -> Self {
+        let last_due = |group: &CleaningGroup| {
+            let mut due = state.next_due_week(group, current_iso_week());
+            for _ in 1..cycles {
+                due = state.next_due_week(group, add_weeks(due.0, due.1, 1));
+            }
+            due
+        };
+        let active = || {
+            state
+                .cleaning_groups
+                .iter()
+                .filter(|g| g.is_active && !g.member_ids.is_empty())
+        };
+        let Some(until) = active().map(last_due).max() else {
+            return Workload::of(state);
+        };
+        // Planned in the order `materialize` goes, each group seeing the
+        // forecasts before it; kept are only the turns beyond a group's own
+        // horizon, which `materialize` adds itself as it draws them.
+        let mut planning = Workload::of(state);
+        let mut workload = Workload::of(state);
+        for group in active() {
+            let first = state.next_due_week(group, current_iso_week());
+            let weeks = weeks_between(first, until).max(0) as usize + 1;
+            let due = (0..weeks)
+                .filter(|&i| {
+                    let (y, w) = add_weeks(first.0, first.1, i as i64);
+                    state.is_due_week(group, y, w)
+                })
+                .count();
+            if due <= cycles {
+                continue;
+            }
+            let horizon = last_due(group);
+            for event in materialize_with(state, group, due, &mut planning) {
+                if let DomainEvent::SlotAssigned {
+                    slot_index,
+                    iso_year,
+                    iso_week,
+                    shift,
+                    person_id: Some(pid),
+                    ..
+                } = event
+                {
+                    if (iso_year, iso_week) > horizon {
+                        workload.add(
+                            &pid,
+                            group,
+                            slot_index,
+                            Turn::new(iso_year, iso_week, shift),
+                        );
+                    }
+                }
+            }
+        }
+        workload
+    }
+
+    pub fn add(&mut self, person: &PersonId, group: &CleaningGroup, slot_index: usize, turn: Turn) {
+        let (start, end) = turn.dates(&group.rhythm);
+        self.duties.entry(person.clone()).or_default().push(Duty {
+            group_id: group.id.clone(),
+            start,
+            end,
+            load: group.duty_load(slot_index),
+        });
+    }
+
+    /// What it costs `person` to take a turn of `group` from `start` to
+    /// `end` that is `load` work, on top of their duties in *other* groups
+    /// (their own group's spacing is the queue's job): each duty on the same
+    /// days, in the same week, or a week or two apart counts by its load
+    /// times this one, closer ones much more; plus a little for all they
+    /// have on in the four weeks around it. 0 for someone with nothing else
+    /// on, so a single group's rotation runs exactly in line order.
+    pub fn clash(
+        &self,
+        person: &PersonId,
+        group: &crate::domain::GroupId,
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+        load: f64,
+    ) -> f64 {
+        let Some(duties) = self.duties.get(person) else {
+            return 0.0;
+        };
+        let monday = |d: chrono::NaiveDate| {
+            d - chrono::Duration::days(chrono::Datelike::weekday(&d).num_days_from_monday() as i64)
+        };
+        duties
+            .iter()
+            .filter(|d| &d.group_id != group)
+            .map(|d| {
+                let gap = (d.start - end).num_days().max((start - d.end).num_days());
+                let weeks_apart = (monday(d.start) - monday(start)).num_weeks().abs();
+                let closeness = if gap <= 0 {
+                    CLASH_OVERLAP
+                } else if weeks_apart == 0 {
+                    CLASH_SAME_WEEK
+                } else if weeks_apart == 1 {
+                    CLASH_NEXT_WEEK
+                } else if weeks_apart == 2 {
+                    CLASH_TWO_WEEKS
+                } else {
+                    0.0
+                };
+                let busy = if gap <= 14 { BUSY_WEIGHT } else { 0.0 };
+                (closeness + busy) * load * d.load
+            })
+            .sum()
+    }
 }
 
 /// Who of the people drawn for one week (`drawn`, in turn order) cleans
@@ -394,8 +714,11 @@ fn plain_rotation(
 
 /// Preview who `materialize` would assign to one (group, slot, turn) beyond
 /// the already-materialized horizon, without persisting anything. Used as
-/// the fallback in `State::slot_assignee` for turns nobody has frozen yet,
-/// so a preview always agrees with what actually gets frozen later.
+/// the fallback in `State::slot_assignee` for turns nobody has frozen yet.
+/// It plans every group as `materialize` does (as the plan views do,
+/// `schedule::project`), so they agree; what is frozen later can still
+/// differ when the other groups' plans change in between, since every draw
+/// weighs them.
 pub fn preview_slot_assignee(
     state: &State,
     group: &CleaningGroup,
@@ -409,17 +732,23 @@ pub fn preview_slot_assignee(
     }
     let cycles = offset as usize + 1;
 
-    materialize_group(state, group, cycles)
+    materialize(state, cycles)
         .into_iter()
         .find_map(|e| match e {
             DomainEvent::SlotAssigned {
+                group_id,
                 slot_index: si,
                 iso_year,
                 iso_week,
                 shift,
                 person_id,
                 ..
-            } if si == slot_index && Turn::new(iso_year, iso_week, shift) == turn => person_id,
+            } if group_id == group.id
+                && si == slot_index
+                && Turn::new(iso_year, iso_week, shift) == turn =>
+            {
+                person_id
+            }
             _ => None,
         })
 }
@@ -1372,5 +1701,266 @@ mod tests {
         let (mut st, _) = three_member_state();
         st.cleaning_groups[0].is_active = false;
         assert!(materialize(&st, 6).is_empty());
+    }
+
+    // ── The house: floors, bathrooms and the staircase, side by side ─────────
+
+    /// 16 residents on 4 floors of 4: each floor has a weekly floor turn and
+    /// a weekly bathroom (so everyone has one or the other two weeks in
+    /// four), and the house-wide staircase every 2 weeks, two people at
+    /// Scharni and two at Colbe, planned last, as it was added.
+    fn house() -> (State, Vec<PersonId>) {
+        let mut st = State::default();
+        st.created_at = Some(Utc::now());
+        let people: Vec<Person> = (0..16)
+            .map(|i| Person::new_named(&format!("P{i}")))
+            .collect();
+        let ids: Vec<PersonId> = people.iter().map(|p| p.id.clone()).collect();
+        st.persons.extend(people);
+        for floor in 0..4 {
+            let members = ids[floor * 4..floor * 4 + 4].to_vec();
+            let mut g = CleaningGroup::new(&format!("Floor {floor}"));
+            g.member_ids = members.clone();
+            st.cleaning_groups.push(g);
+            let mut bath = CleaningGroup::new(&format!("Bathroom {floor}"));
+            bath.member_ids = members;
+            bath.weight = 1.5;
+            // Bathroom turns start half a cycle after floor turns.
+            bath.member_ids.rotate_left(floor % 4);
+            st.cleaning_groups.push(bath);
+        }
+        let mut stairs = CleaningGroup::new("Staircase");
+        stairs.house_wide = true;
+        stairs.weight = 1.5;
+        stairs.rhythm.every_weeks = Some(2);
+        for place in ["Scharni", "Colbe"] {
+            for n in 1..=2 {
+                let mut slot = CleaningSlot::new(&format!("{place} {n}"));
+                slot.place = Some(place.into());
+                stairs.slots.push(slot);
+            }
+        }
+        stairs.member_ids = ids.clone();
+        st.cleaning_groups.push(stairs);
+        for ev in materialize(&st, 52) {
+            st.apply_event(ev).unwrap();
+        }
+        (st, ids)
+    }
+
+    fn turns_of(st: &State, group: &str, person: &PersonId) -> Vec<(i32, u32)> {
+        let gid = &st.group_by_name(group).unwrap().id;
+        let mut weeks: Vec<(i32, u32)> = st
+            .slot_assignments
+            .iter()
+            .filter(|a| &a.group_id == gid && a.person_id.as_ref() == Some(person))
+            .map(|a| (a.iso_year, a.iso_week))
+            .collect();
+        weeks.sort_unstable();
+        weeks
+    }
+
+    /// Staircase turns that fall into a week with another duty of the same person.
+    fn clashes(st: &State, ids: &[PersonId]) -> usize {
+        ids.iter()
+            .map(|pid| {
+                let other: HashSet<(i32, u32)> = st
+                    .cleaning_groups
+                    .iter()
+                    .filter(|g| !g.house_wide)
+                    .flat_map(|g| turns_of(st, &g.name, pid))
+                    .collect();
+                turns_of(st, "Staircase", pid)
+                    .iter()
+                    .filter(|w| other.contains(w))
+                    .count()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn the_staircase_goes_round_the_whole_house_evenly() {
+        let (st, ids) = house();
+        let counts: Vec<usize> = ids
+            .iter()
+            .map(|p| turns_of(&st, "Staircase", p).len())
+            .collect();
+        // 52 due weeks × 4 people = 208 turns for 16 people: 13 each.
+        assert_eq!(counts.iter().sum::<usize>(), 208);
+        assert!(
+            counts.iter().all(|&n| (12..=14).contains(&n)),
+            "staircase turns per person: {counts:?}"
+        );
+        // Every due week: four different people, two per staircase.
+        let gid = &st.group_by_name("Staircase").unwrap().id;
+        let mut weeks: std::collections::BTreeMap<(i32, u32), Vec<&PersonId>> = Default::default();
+        for a in st.slot_assignments.iter().filter(|a| &a.group_id == gid) {
+            weeks
+                .entry((a.iso_year, a.iso_week))
+                .or_default()
+                .extend(a.person_id.as_ref());
+        }
+        assert_eq!(weeks.len(), 52);
+        for people in weeks.values() {
+            assert_eq!(people.len(), 4);
+            assert_eq!(people.iter().collect::<HashSet<_>>().len(), 4);
+        }
+    }
+
+    /// `st` with the staircase planned blind, by plain rotation: as if
+    /// nobody had any other duty.
+    fn planned_blind(st: &State) -> State {
+        let mut blind = st.clone();
+        let stairs = blind.group_by_name("Staircase").unwrap().clone();
+        blind.slot_assignments.retain(|a| a.group_id != stairs.id);
+        let stairs = CleaningGroup {
+            rotation_queue: Vec::new(),
+            rotation_deferred: Default::default(),
+            ..stairs
+        };
+        let alone = State {
+            persons: blind.persons.clone(),
+            cleaning_groups: vec![stairs.clone()],
+            created_at: blind.created_at,
+            ..State::default()
+        };
+        for ev in materialize(&alone, 52) {
+            if matches!(ev, DomainEvent::SlotAssigned { .. }) {
+                blind.apply_event(ev).unwrap();
+            }
+        }
+        blind
+    }
+
+    #[test]
+    fn the_staircase_avoids_weeks_with_other_duties_and_nobody_waits_long() {
+        let (st, ids) = house();
+        let clashing = clashes(&st, &ids);
+        let blind = clashes(&planned_blind(&st), &ids);
+        // Blind, every fourth staircase turn meets the same person's floor
+        // or bathroom week; planned with them in view, few do.
+        assert!(
+            clashing * 3 <= blind && clashing <= 16,
+            "{clashing} of 208 staircase turns clash, {blind} planned blind"
+        );
+        // Put off to spare a clash, never for long: at most a cycle (4 due
+        // weeks) and `MAX_DEFERRALS` more between two turns of anyone.
+        for pid in &ids {
+            let weeks = turns_of(&st, "Staircase", pid);
+            for pair in weeks.windows(2) {
+                let gap = weeks_between(pair[0], pair[1]);
+                assert!(
+                    gap <= 2 * (4 + MAX_DEFERRALS as i64 + 1),
+                    "{gap} weeks between turns"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_plan_made_bit_by_bit_is_as_fair_and_never_changes_what_is_frozen() {
+        let (whole, ids) = house();
+        let mut bits = whole.clone();
+        bits.slot_assignments.clear();
+        for g in &mut bits.cleaning_groups {
+            g.rotation_queue.clear();
+            g.rotation_deferred.clear();
+        }
+        // The horizon grows a few weeks at a time, as it rolls in the bot.
+        for weeks in (4..=52).step_by(4) {
+            let before = bits.slot_assignments.clone();
+            for ev in materialize(&bits, weeks) {
+                bits.apply_event(ev).unwrap();
+            }
+            assert!(before.iter().all(|a| bits.slot_assignments.contains(a)));
+        }
+        assert_eq!(bits.slot_assignments.len(), whole.slot_assignments.len());
+        let counts: Vec<usize> = ids
+            .iter()
+            .map(|p| turns_of(&bits, "Staircase", p).len())
+            .collect();
+        assert!(counts.iter().all(|&n| (12..=14).contains(&n)), "{counts:?}");
+        let clashing = clashes(&bits, &ids);
+        assert!(
+            clashing * 3 <= clashes(&planned_blind(&bits), &ids),
+            "{clashing} clash"
+        );
+    }
+
+    /// Six people in the Hall (weekly), Ann also in the Garden, alone, on
+    /// the given rhythm.
+    fn hall_and_garden(garden: crate::rhythm::Rhythm) -> (State, Vec<PersonId>) {
+        let mut st = State::default();
+        st.created_at = Some(Utc::now());
+        let people: Vec<Person> = ["Ann", "Ben", "Cat", "Dan", "Eve", "Fay"]
+            .iter()
+            .map(|n| Person::new_named(n))
+            .collect();
+        let ids: Vec<PersonId> = people.iter().map(|p| p.id.clone()).collect();
+        st.persons.extend(people);
+        let mut busy = CleaningGroup::new("Garden");
+        busy.member_ids = vec![ids[0].clone()];
+        busy.rhythm = garden;
+        st.cleaning_groups.push(busy);
+        let mut g = CleaningGroup::new("Hall");
+        g.member_ids = ids.clone();
+        st.cleaning_groups.push(g);
+        for ev in materialize(&st, 36) {
+            st.apply_event(ev).unwrap();
+        }
+        (st, ids)
+    }
+
+    #[test]
+    fn someone_busy_every_week_gains_nothing_by_waiting_so_is_not_put_off() {
+        let (st, ids) = hall_and_garden(crate::rhythm::Rhythm::weekly());
+        let (y, w) = current_iso_week();
+        let ann = turns_of(&st, "Hall", &ids[0]);
+        let in_line: Vec<_> = (0..6).map(|i| add_weeks(y, w, 6 * i)).collect();
+        assert_eq!(ann, in_line);
+    }
+
+    #[test]
+    fn someone_put_off_makes_it_up_and_cleans_as_often_as_everyone() {
+        // The Garden every other week, from this one: Ann's Hall turns in
+        // line order fall on Garden weeks, so she cleans a week later or
+        // earlier, and makes it up.
+        let garden = crate::rhythm::Rhythm {
+            every_weeks: Some(2),
+            ..crate::rhythm::Rhythm::weekly()
+        };
+        let (st, ids) = hall_and_garden(garden);
+        let (y, w) = current_iso_week();
+        let counts: Vec<usize> = ids.iter().map(|p| turns_of(&st, "Hall", p).len()).collect();
+        // Equally often, but for where 36 weeks happen to end.
+        assert!(counts.iter().all(|&n| (5..=7).contains(&n)), "{counts:?}");
+        let ann = turns_of(&st, "Hall", &ids[0]);
+        let garden_weeks = turns_of(&st, "Garden", &ids[0]);
+        for (i, week) in ann.iter().enumerate() {
+            let late = weeks_between(add_weeks(y, w, 6 * i as i64), *week);
+            // A week later, or earlier: before a Garden week rather than in it.
+            assert!(
+                late.abs() <= MAX_DEFERRALS as i64,
+                "turn {i}: {late} weeks late"
+            );
+            assert!(!garden_weeks.contains(week), "turn {i} in a Garden week");
+        }
+    }
+
+    #[test]
+    fn without_other_duties_the_rotation_runs_in_line_order() {
+        let (st, a, b) = two_person_state();
+        let events = materialize(&st, 6);
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, DomainEvent::RotationDeferralsSet { .. })));
+        let picked: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                DomainEvent::SlotAssigned { person_id, .. } => person_id.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(picked, [&a, &b, &a, &b, &a, &b].map(|s| s.clone()));
     }
 }

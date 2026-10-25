@@ -1,4 +1,4 @@
-//! Member commands: !done, !stats <person>, !join, !leave.
+//! Member commands: !done, `!stats <person>`, !join, !leave.
 
 use super::*;
 
@@ -398,6 +398,9 @@ pub(crate) fn join_group(
     if !state.group_by_id(group_id).is_some_and(|g| g.is_active) {
         return Ok(Err("⚠️ This group is paused.".into()));
     }
+    if let Some(why) = house_wide_refusal(state, group_id) {
+        return Ok(Err(why));
+    }
     // PersonCreated is idempotent: safe even if this Matrix user already exists.
     state.apply_event(DomainEvent::PersonCreated {
         person_id: uuid::Uuid::new_v4().to_string(),
@@ -434,6 +437,9 @@ pub(crate) fn leave_group(
     group_id: &GroupId,
 ) -> Result<std::result::Result<String, String>> {
     let group_name = group_name_of(state, group_id);
+    if let Some(why) = house_wide_refusal(state, group_id) {
+        return Ok(Err(why));
+    }
     let Some(person_id) = state
         .person_by_matrix_id(mxid)
         .map(|p| p.id.clone())
@@ -455,4 +461,19 @@ pub(crate) fn leave_group(
     })?;
     let departure = apply_group_departure(ctx, state, &person_id, group_id)?;
     Ok(Ok(departure_summary(state, group_id, &departure)))
+}
+
+/// Why nobody joins or leaves a house-wide group on their own: everyone
+/// living here is in it (`house`), from their first group on.
+fn house_wide_refusal(state: &crate::state::State, group_id: &GroupId) -> Option<String> {
+    state
+        .group_by_id(group_id)
+        .filter(|g| g.house_wide)
+        .map(|g| {
+            format!(
+                "🏠 «{}» is for the whole house: everyone in a group is in it, in turn. \
+                 Can't take part? An admin can excuse you.",
+                g.name
+            )
+        })
 }

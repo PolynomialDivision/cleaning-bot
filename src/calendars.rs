@@ -2,7 +2,7 @@
 //! `[directory]`).
 //!
 //! The bot's Nextcloud account owns one calendar per resident with a house account,
-//! `cleaning-<login>` named "Cleaning: <name>", shared read-only with that resident alone
+//! `cleaning-<login>` named "Cleaning: `<name>`", shared read-only with that resident alone
 //! (their Nextcloud user is their directory login). It holds their turns from today on, one
 //! event per turn with the turn's UID (the same as in the `!ical` feed), and follows every
 //! plan change (takeovers, swaps, rhythms, done marks) within a minute: only the events that

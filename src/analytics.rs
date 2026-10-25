@@ -58,6 +58,9 @@ pub enum DomainEvent {
         group_id: GroupId,
         slot_id: SlotId,
         slot_name: String,
+        /// The place it shares with other slots (`CleaningSlot::place`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        place: Option<String>,
     },
     SlotRemoved {
         group_id: GroupId,
@@ -128,6 +131,22 @@ pub enum DomainEvent {
     RotationQueueSet {
         group_id: GroupId,
         queue: Vec<PersonId>,
+    },
+    /// Full replace of who the rotation has put off to spare them a clash,
+    /// and by how many people (`CleaningGroup::rotation_deferred`).
+    RotationDeferralsSet {
+        group_id: GroupId,
+        deferred: std::collections::BTreeMap<PersonId, u32>,
+    },
+    /// Whether a group is house-wide (every resident in it, `house`), and
+    /// who an admin excused from it or added to it by hand. Full replace.
+    HouseWideSet {
+        group_id: GroupId,
+        house_wide: bool,
+        #[serde(default)]
+        excused: Vec<PersonId>,
+        #[serde(default)]
+        added: Vec<PersonId>,
     },
     PersonMatrixLinked {
         person_id: PersonId,

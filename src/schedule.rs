@@ -41,6 +41,13 @@ pub struct AssignmentInstance {
     #[allow(dead_code)]
     pub slot_id: Option<SlotId>,
     pub slot_name: Option<String>,
+    /// Where the slot cleans (`CleaningSlot::place_name`): slots sharing a
+    /// place are cleaned together ("Scharni" for "Scharni 1" and "Scharni 2").
+    pub place: Option<String>,
+    /// The group is house-wide (everyone is in it: the staircase).
+    pub house_wide: bool,
+    /// How much work the turn is (`CleaningGroup::duty_load`).
+    pub load: f64,
     pub room_names: Vec<String>,
     pub iso_year: i32,
     pub iso_week: u32,
@@ -73,7 +80,8 @@ impl AssignmentInstance {
             labels.push(self.group_name.clone());
         }
         labels.extend(self.shift_label.clone());
-        labels.extend(self.slot_name.clone());
+        // The place: both people at a staircase read "Scharni", not "Scharni 1".
+        labels.extend(self.place.clone());
         let prefix = if labels.is_empty() {
             String::new()
         } else {
@@ -161,6 +169,21 @@ impl ScheduleSnapshot {
                     .as_ref()
                     .map(|p| &p.id == person_id)
                     .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// Who else cleans `a`'s place in the same turn (the other person at a
+    /// staircase), in slot order.
+    pub fn crew(&self, a: &AssignmentInstance) -> Vec<&AssignmentInstance> {
+        self.assignments
+            .iter()
+            .filter(|b| {
+                b.group_id == a.group_id
+                    && (b.iso_year, b.iso_week, b.shift) == (a.iso_year, a.iso_week, a.shift)
+                    && b.slot_index != a.slot_index
+                    && a.place.is_some()
+                    && b.place == a.place
             })
             .collect()
     }
@@ -290,6 +313,9 @@ pub fn build_schedule_from(state: &State, first: (i32, u32), weeks: usize) -> Sc
                     completion_time: completion.filter(|c| !c.skipped).map(|c| c.completed_at),
                     slot_id: slot.map(|s| s.id.clone()),
                     slot_name: slot.map(|s| s.name.clone()),
+                    place: slot.map(|s| s.place_name().to_owned()),
+                    house_wide: group.house_wide,
+                    load: group.duty_load(slot_index),
                     room_names: slot
                         .map_or_else(|| group.room_names.clone(), |s| s.room_names.clone()),
                     iso_year: turn.year,

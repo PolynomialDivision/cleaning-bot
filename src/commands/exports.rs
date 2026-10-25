@@ -1,4 +1,4 @@
-//! Plan exports: !plan [N], !plan pdf, !ical, !ical reset.
+//! Plan exports: `!plan [N]`, !plan pdf, !ical, !ical reset.
 
 use super::*;
 
