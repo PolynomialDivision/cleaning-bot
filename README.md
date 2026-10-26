@@ -435,7 +435,12 @@ else German (`src/lang.rs`).
   asks for the login only from outside the house, the plan is shown to a
   request without a login as to a guest: everything, but nobody is "you",
   and `/me` says to ask the bot (`!next`). The proxy must drop a client's own
-  `X-House-*` headers (Caddy does) and still send the secret.
+  `X-House-*` headers (Caddy does) and still send the secret. A guest's way
+  to log in is the link to `/login`: the proxy asks for the login there from
+  everywhere, and from then on for every request with the identity
+  provider's session cookie (house-infra: `forward_auth_login_path`), so
+  whoever logged in once sees their turns in the house too; `/login` itself
+  only sends them on to `/me`.
 - **Who you are:** your house account `@<login>:<the bot's server>` or one
   of the accounts in `X-House-Matrix-Ids`, the person the plan knows them
   by (see *Several Matrix accounts*). Someone the plan doesn't know sees

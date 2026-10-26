@@ -29,6 +29,7 @@ p { margin: 4px 0; }
 .meta { font-size: 14px; margin: 2px 0 10px; }
 .empty { padding: 16px 0; color: var(--h-muted); }
 .more { margin: 12px 0 0; }
+.h-note .login { font-weight: 600; }
 .crumb { margin: 0 0 4px; }
 main, .name, .g, .place-name { overflow-wrap: anywhere; }
 

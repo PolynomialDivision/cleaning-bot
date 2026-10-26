@@ -144,6 +144,7 @@ pub fn router(web: WebState) -> Router {
         .route("/g/:id", get(group_page))
         .route("/people", get(people_page))
         .route("/me", get(me_page))
+        .route("/login", get(login))
         .route("/style.css", get(|| async { asset("text/css", STYLE) }))
         .with_state(web)
 }
@@ -717,6 +718,32 @@ async fn me_page(
         ("/me", asked),
         StatusCode::OK,
         &body,
+    )
+}
+
+/// `/login`: the guests' way to log in in the house. The proxy asks for the login on this
+/// path from everywhere (and from then on for every request with the identity provider's
+/// session cookie); once back here, the visitor goes on to their turns. A guest who still
+/// arrives without a login (a proxy that lets this path through) lands there too.
+async fn login(
+    AxumState(web): AxumState<WebState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let visitor = match visitor(&headers, query.as_deref(), &web) {
+        Ok(v) => v,
+        Err(no) => return no.into_response(),
+    };
+    let to = visitor.frame.href("/me", None);
+    secure(
+        (
+            StatusCode::SEE_OTHER,
+            [(
+                header::LOCATION,
+                HeaderValue::from_str(&to).unwrap_or(HeaderValue::from_static("/me")),
+            )],
+        )
+            .into_response(),
     )
 }
 

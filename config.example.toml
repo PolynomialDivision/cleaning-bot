@@ -107,7 +107,8 @@ materialize_weeks = 26
 # public_url = "https://putzplan.example.org"
 # allowed_groups = ["residents"]   # X-House-Groups that may see it; [] = everyone logged in
 # Without a login, see the plan as a guest (no own turns): only for a proxy that asks for
-# the login just from outside the house, as Caddy's forward_auth_skip_internal does.
+# the login just from outside the house, as Caddy's forward_auth_skip_internal does. Its
+# "Log in" link goes to /login, where the proxy asks for the login from everywhere too.
 # guests = true
 # The house bar's link home ("⌂ Example"); unset: public_url's parent domain and its name.
 # home_url  = "https://example.org/"

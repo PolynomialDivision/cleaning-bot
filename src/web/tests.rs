@@ -298,15 +298,61 @@ async fn in_the_house_a_guest_sees_the_plan_without_logging_in() {
         !week.contains("class=\"you\"") && !week.contains("yours-title"),
         "nobody is you"
     );
+    assert!(week.contains("href=\"/login\""), "a way to log in: {week}");
     let (_, _, me) = site.send(guest("/me", SECRET)).await;
     assert!(me.contains("know who you are"), "{me}");
+    assert!(me.contains("href=\"/login\""), "{me}");
     // Still only through the proxy.
     let (status, ..) = site.send(guest("/", &"b".repeat(SECRET.len()))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     // With a login, as always: their turns are theirs.
     let (status, me) = site.get("/me", "alice").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!me.contains("know who you are"));
+    assert!(!me.contains("know who you are") && !me.contains("href=\"/login\""));
+    let (_, _, week) = site
+        .send(
+            Request::get("/")
+                .header(PROXY_SECRET_HEADER, SECRET)
+                .header(USER_HEADER, "alice")
+                .header(GROUPS_HEADER, "residents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        !week.contains("href=\"/login\""),
+        "logged in: no login link"
+    );
+}
+
+#[tokio::test]
+async fn back_from_the_login_the_visitor_goes_on_to_their_turns() {
+    let site = Site::configured(house(), Accounts::default(), true);
+    let login = |path: &str, user: Option<&str>| {
+        let mut req = Request::get(path).header(PROXY_SECRET_HEADER, SECRET);
+        if let Some(user) = user {
+            req = req
+                .header(USER_HEADER, user)
+                .header(GROUPS_HEADER, "residents");
+        }
+        req.body(Body::empty()).unwrap()
+    };
+    for (path, user, to) in [
+        ("/login", Some("alice"), "/me"),
+        ("/login?lang=uk", Some("alice"), "/me?lang=uk"),
+        // A proxy that let the guest through: still to their (guest) page, no loop.
+        ("/login", None, "/me"),
+    ] {
+        let (status, headers, _) = site.send(login(path, user)).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{path}");
+        assert_eq!(headers[header::LOCATION], to, "{path}");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    }
+    // Only through the proxy, like every page.
+    let (status, ..) = site
+        .send(Request::get("/login").body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

@@ -417,6 +417,13 @@ pub fn week_page(f: &Frame, plan: &Plan, ahead: usize) -> String {
         esc(&tf(lang, "week.today", &[&i18n::short_date(lang, plan.today)])),
     );
 
+    if plan.guest {
+        out.push_str(&format!(
+            "<p class=\"more\"><a href=\"{}\">{} →</a></p>",
+            esc(&f.href("/login", None)),
+            esc(t(lang, "week.signin"))
+        ));
+    }
     if plan.me.is_some() {
         let mine = plan.my_upcoming();
         out.push_str(&format!(
@@ -723,8 +730,10 @@ pub fn me_page(f: &Frame, plan: &Plan, weeks: usize) -> String {
     let mut out = format!("<h1>{}</h1>", esc(t(lang, "me.title")));
     if plan.guest {
         out.push_str(&format!(
-            "<div class=\"h-note\" role=\"note\"><p>{}</p></div>",
-            esc(t(lang, "me.guest"))
+            "<div class=\"h-note\" role=\"note\"><p>{}</p><p><a class=\"login\" href=\"{}\">{}</a></p></div>",
+            esc(t(lang, "me.guest")),
+            esc(&f.href("/login", None)),
+            esc(t(lang, "me.signin"))
         ));
     } else if plan.me.is_none() {
         out.push_str(&format!(

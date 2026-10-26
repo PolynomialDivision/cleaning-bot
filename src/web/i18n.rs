@@ -248,6 +248,12 @@ pub const TEXTS: &[(&str, &str, &str, &str)] = &[
         "У найближчі {} тиж. у тебе немає чергувань.",
     ),
     ("yours.all", "Alle deine Termine", "All your turns", "Усі твої чергування"),
+    (
+        "week.signin",
+        "Anmelden und deine Termine sehen",
+        "Log in to see your turns",
+        "Увійди, щоб бачити свої чергування",
+    ),
     ("status.open", "offen", "open", "відкрито"),
     ("status.done", "erledigt", "done", "готово"),
     ("status.done_by", "erledigt von {}", "done by {}", "зробив(-ла) {}"),
@@ -303,10 +309,11 @@ pub const TEXTS: &[(&str, &str, &str, &str)] = &[
     ("me.login", "Angemeldet als {}.", "Logged in as {}.", "Ти увійшов(-ла) як {}."),
     (
         "me.guest",
-        "Im Hausnetz siehst du den Plan ohne Anmeldung, aber wir wissen nicht, wer du bist. Deine eigenen Termine schickt dir der Putzbot auf !next.",
-        "In the house you see the plan without logging in, but we don't know who you are. The cleaning bot sends you your own turns on !next.",
-        "У мережі будинку ти бачиш графік без входу, але ми не знаємо, хто ти. Свої чергування отримаєш від бота прибирання на !next.",
+        "Im Hausnetz siehst du den Plan ohne Anmeldung, aber wir wissen nicht, wer du bist. Melde dich mit deinem Hauskonto an, dann stehen deine Termine hier, auch beim nächsten Mal. Ohne Konto schickt sie dir der Putzbot auf !next.",
+        "In the house you see the plan without logging in, but we don't know who you are. Log in with your house account and your turns show here, next time too. Without an account, the cleaning bot sends them to you on !next.",
+        "У мережі будинку ти бачиш графік без входу, але ми не знаємо, хто ти. Увійди з обліковим записом будинку, і твої чергування будуть тут, і наступного разу теж. Без облікового запису їх надішле бот прибирання на !next.",
     ),
+    ("me.signin", "Anmelden", "Log in", "Увійти"),
     ("me.with", "mit {}", "with {}", "разом із {}"),
     (
         "me.calendar",
