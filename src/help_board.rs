@@ -23,6 +23,7 @@ use mxbot_common::matrix_sdk::{
     },
     Client, Room,
 };
+use mxbot_common::reaction;
 
 use crate::{format, BotContext};
 
@@ -48,10 +49,9 @@ pub const BUTTONS: [(&str, Action); 5] = [
 /// The action of reaction `key`, with or without the emoji variation
 /// selector some clients leave out.
 pub fn action_for(key: &str) -> Option<Action> {
-    let bare = |s: &str| s.replace('\u{fe0f}', "");
     BUTTONS
         .iter()
-        .find(|(emoji, _)| bare(emoji) == bare(key))
+        .find(|(emoji, _)| reaction::is_one_of(key, &[emoji]))
         .map(|(_, action)| *action)
 }
 

@@ -43,7 +43,7 @@ pub struct WebConfig {
     /// Its address as people open it, e.g. `https://putzplan.example.org`.
     #[serde(default)]
     pub public_url: String,
-    /// Groups (X-House-Groups) that may see it; empty: everyone the login lets through.
+    /// Groups (X-House-Groups) that may see it; empty: nobody with a login.
     #[serde(default)]
     pub allowed_groups: Vec<String>,
     /// Requests through the proxy without a login see the plan as a guest (no "you", no

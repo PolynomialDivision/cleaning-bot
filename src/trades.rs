@@ -34,6 +34,7 @@ use mxbot_common::matrix_sdk::{
     },
     Room,
 };
+use mxbot_common::reaction;
 
 use crate::{
     analytics::DomainEvent,
@@ -54,12 +55,8 @@ pub const SWAP: &str = "🔄";
 /// ↩️ on a request or an early swap: withdraw, or undo.
 pub const UNDO: &str = "↩️";
 
-fn bare(key: &str) -> String {
-    key.replace('\u{fe0f}', "")
-}
-
 pub(crate) fn is_ask(key: &str) -> bool {
-    bare(key) == ASK
+    reaction::is_one_of(key, &[ASK])
 }
 
 /// 🙋 in any skin tone, 🙋‍♀️ and 🙋‍♂️ too.
@@ -68,11 +65,11 @@ fn is_take(key: &str) -> bool {
 }
 
 pub(crate) fn is_swap(key: &str) -> bool {
-    bare(key) == SWAP
+    reaction::is_one_of(key, &[SWAP])
 }
 
 fn is_undo(key: &str) -> bool {
-    bare(key) == bare(UNDO)
+    reaction::is_one_of(key, &[UNDO])
 }
 
 // ── Trades ────────────────────────────────────────────────────────────────────
@@ -1557,7 +1554,7 @@ mod tests {
 
     #[test]
     fn reaction_keys_are_recognised_in_their_variants() {
-        assert!(is_ask("🆘"));
+        assert!(is_ask("🆘") && is_ask("🆘\u{fe0f}"));
         assert!(is_take("🙋") && is_take("🙋🏽") && is_take("🙋\u{200d}♀\u{fe0f}"));
         assert!(is_swap("🔄") && is_swap("🔄\u{fe0f}"));
         assert!(is_undo("↩️") && is_undo("↩"));

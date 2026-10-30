@@ -418,7 +418,7 @@ many and their load, the rooms weighted as the rotation balances them) and
 **Mine** (`/me`: your turns of the next 12 weeks, with who shares the
 place). Your own turns are highlighted and say "you". German, English or
 Ukrainian: `?lang=`, the house-wide `house_lang` cookie, Accept-Language,
-else German (`src/lang.rs`).
+else German (`src/lang.rs`, with mxbot-common's `web::lang`).
 
 - **Read only, and always the plan of the room.** Every page is built from
   the same schedule snapshot as the plan, the PDF and the calendars, under the
@@ -429,8 +429,11 @@ else German (`src/lang.rs`).
   (`|`-separated), `X-House-Name`, `X-House-Matrix-Ids` and the secret header
   `X-Cleaning-Proxy-Secret`, whose value is the environment variable
   `CLEANING_PROXY_SECRET` (at least 32 characters; the bot refuses to start
-  without it while `[web]` is on). No or a wrong secret: 403; no login: 401;
-  not in `allowed_groups` (when set): 403.
+  without it while `[web]` is on). No or a wrong secret: 403 (compared in
+  constant time); no login: 401; not in `allowed_groups`: 403. An empty
+  `allowed_groups` lets nobody with a login in (until 2026-10-30: everyone).
+  The check is mxbot-common's `web::ForwardAuth`, the same as the deals
+  website's.
 - **In the house without a login** (`[web] guests = true`): for a proxy that
   asks for the login only from outside the house, the plan is shown to a
   request without a login as to a guest: everything, but nobody is "you",
@@ -441,7 +444,10 @@ else German (`src/lang.rs`).
   provider's session cookie (house-infra: `forward_auth_login_path`), so
   whoever logged in once sees their turns in the house too; `/login` itself
   only sends them on to `/me`.
-- **Who you are:** your house account `@<login>:<the bot's server>` or one
+- **Who you are:** your house account `@<login>:<the bot's server>`
+  (`mxbot_common::web::house_account`: a login that is no plain localpart has
+  none; Authentik's `matrix_localpart` is not in the headers, so a renamed
+  resident is their new login's account here) or one
   of the accounts in `X-House-Matrix-Ids`, the person the plan knows them
   by (see *Several Matrix accounts*). Someone the plan doesn't know sees
   everything, just without "you". Display names only, never Matrix IDs, and

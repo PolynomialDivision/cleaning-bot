@@ -5,37 +5,18 @@
 //! `?lang=`, the house's `house_lang` cookie, Accept-Language, else German.
 
 use chrono::{Datelike, NaiveDate, Weekday};
+use mxbot_common::web::lang;
 
 pub use crate::lang::Lang;
 
 /// The text for `key`; empty when there is none (a test checks every key used).
 pub fn t(lang: Lang, key: &str) -> &'static str {
-    match TEXTS.iter().find(|(k, ..)| *k == key) {
-        Some((_, de, en, uk)) => match lang {
-            Lang::De => de,
-            Lang::En => en,
-            Lang::Uk => uk,
-        },
-        None => {
-            debug_assert!(false, "no text for {key:?}");
-            ""
-        }
-    }
+    lang::text(TEXTS, lang, key)
 }
 
 /// `t` with each `{}` replaced by the next of `args`.
 pub fn tf(lang: Lang, key: &str, args: &[&str]) -> String {
-    let mut out = String::new();
-    let mut args = args.iter();
-    let mut parts = t(lang, key).split("{}");
-    if let Some(first) = parts.next() {
-        out.push_str(first);
-    }
-    for part in parts {
-        out.push_str(args.next().copied().unwrap_or(""));
-        out.push_str(part);
-    }
-    out
+    lang::fill(TEXTS, lang, key, args)
 }
 
 pub fn weekday(lang: Lang, day: Weekday) -> &'static str {
@@ -197,7 +178,7 @@ pub fn number(lang: Lang, value: f64) -> String {
 }
 
 /// (key, German, English, Ukrainian).
-pub const TEXTS: &[(&str, &str, &str, &str)] = &[
+pub const TEXTS: &lang::Texts = &[
     ("app.name", "Putzplan", "Cleaning plan", "Графік прибирання"),
     ("home.title", "Zur Startseite", "To the start page", "На головну сторінку"),
     ("lang.label", "Sprache", "Language", "Мова"),

@@ -1,77 +1,17 @@
 //! The language of the website's pages: German, English or Ukrainian, as
 //! the house's other pages choose it.
 
-use axum::http::{header, HeaderMap};
+#[cfg(test)]
+use axum::http::header;
+use axum::http::HeaderMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Lang {
-    De,
-    En,
-    Uk,
-}
-
-impl Lang {
-    fn parse(tag: &str) -> Option<Lang> {
-        let primary = tag.trim().split(['-', '_']).next()?.to_ascii_lowercase();
-        match primary.as_str() {
-            "de" => Some(Lang::De),
-            "en" => Some(Lang::En),
-            "uk" | "ua" => Some(Lang::Uk),
-            _ => None,
-        }
-    }
-
-    /// For `<html lang>` and `?lang=`.
-    pub fn code(self) -> &'static str {
-        match self {
-            Lang::De => "de",
-            Lang::En => "en",
-            Lang::Uk => "uk",
-        }
-    }
-}
+pub use mxbot_common::web::lang::Lang;
 
 /// A page's language: `?lang=` (the page's own switcher), the house-wide
 /// `house_lang` cookie the start page sets, the browser's Accept-Language,
-/// else German.
+/// else German (`mxbot_common::web::lang::pick`).
 pub fn language(headers: &HeaderMap, query: Option<&str>) -> Lang {
-    if let Some(lang) = query
-        .into_iter()
-        .flat_map(|q| q.split('&'))
-        .filter_map(|pair| pair.strip_prefix("lang="))
-        .find_map(Lang::parse)
-    {
-        return lang;
-    }
-    let cookie = headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|c| c.trim().strip_prefix("house_lang="))
-        .find_map(Lang::parse);
-    if let Some(lang) = cookie {
-        return lang;
-    }
-    let mut wanted: Vec<(f32, usize, Lang)> = headers
-        .get_all(header::ACCEPT_LANGUAGE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .enumerate()
-        .filter_map(|(i, item)| {
-            let mut parts = item.split(';');
-            let lang = Lang::parse(parts.next()?)?;
-            let q = parts
-                .filter_map(|p| p.trim().strip_prefix("q="))
-                .find_map(|q| q.trim().parse::<f32>().ok())
-                .unwrap_or(1.0);
-            (q > 0.0).then_some((q, i, lang))
-        })
-        .collect();
-    // Highest q first; the earlier one among equals.
-    wanted.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    wanted.first().map_or(Lang::De, |w| w.2)
+    mxbot_common::web::lang::pick(headers, query, Lang::De)
 }
 
 #[cfg(test)]

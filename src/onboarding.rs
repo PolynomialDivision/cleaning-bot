@@ -34,6 +34,7 @@ use mxbot_common::matrix_sdk::{
     },
     Room,
 };
+use mxbot_common::reaction;
 
 use crate::{
     analytics::DomainEvent,
@@ -330,8 +331,7 @@ fn toggle(
 /// Which number a reaction key is, with or without the emoji variation
 /// selector some clients leave out.
 pub fn number_index(key: &str) -> Option<usize> {
-    let bare = |s: &str| s.replace('\u{fe0f}', "");
-    NUMBERS.iter().position(|n| bare(n) == bare(key))
+    NUMBERS.iter().position(|n| reaction::is_one_of(key, &[n]))
 }
 
 /// Mark everyone as welcomed who has used the bot before welcomes were
@@ -606,5 +606,21 @@ pub async fn refresh_selectors(ctx: &BotContext, room: &Room) {
             }
             Err(e) => tracing::warn!("Failed to refresh group selector {id}: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_number_is_found_with_or_without_its_variation_selector() {
+        for (i, number) in NUMBERS.iter().enumerate() {
+            assert_eq!(number_index(number), Some(i));
+            assert_eq!(number_index(&number.replace('\u{fe0f}', "")), Some(i));
+        }
+        assert_eq!(number_index("1\u{fe0f}\u{fe0f}\u{20e3}"), Some(0));
+        assert_eq!(number_index("1"), None);
+        assert_eq!(number_index("✅"), None);
     }
 }

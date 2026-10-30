@@ -5,12 +5,15 @@
 //! identity provider and passes the person on as the neutral X-House-* headers, after
 //! dropping a client's own copies. On a shared Docker network other containers could send
 //! those headers too, so a request must also carry the proxy's secret in
-//! X-Cleaning-Proxy-Secret (CLEANING_PROXY_SECRET), which only the proxy knows.
+//! X-Cleaning-Proxy-Secret (CLEANING_PROXY_SECRET), which only the proxy knows. The check
+//! is mxbot-common's (`mxbot_common::web::ForwardAuth`): the secret in constant time, then
+//! the login, then `[web] allowed_groups` (empty: nobody).
 //!
-//! Who they are in the plan: their house account (`@<login>:<the bot's server>`) or one of
-//! the accounts an admin entered in the directory (X-House-Matrix-Ids), each resolved like
-//! a Matrix event from it (`directory::person_account`). Someone the plan doesn't know sees
-//! every page, just without "you".
+//! Who they are in the plan: their house account (`@<login>:<the bot's server>`,
+//! `mxbot_common::web::house_account`) or one of the accounts an admin entered in the
+//! directory (X-House-Matrix-Ids), each resolved like a Matrix event from it
+//! (`directory::person_account`). Someone the plan doesn't know sees every page, just
+//! without "you".
 //!
 //! Every page is built from one schedule snapshot (`schedule::build_schedule_from`), taken
 //! under the state lock that the Matrix side uses too, so the website always shows the
@@ -29,8 +32,10 @@ use axum::{
     Router,
 };
 use mxbot_common::{
+    config::AllowList,
     format::html_escape,
     matrix_sdk::ruma::{OwnedUserId, UserId},
+    web::{self as forward_auth, Access, ForwardAuth, ProxySecret, Refusal},
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -48,11 +53,11 @@ mod render;
 use i18n::{t, Lang};
 use render::{GroupInfo, Plan};
 
-pub const USER_HEADER: &str = "x-house-user";
-pub const GROUPS_HEADER: &str = "x-house-groups";
-pub const NAME_HEADER: &str = "x-house-name";
-/// A person's other Matrix accounts, comma-separated (set by an admin in the directory).
-pub const MATRIX_IDS_HEADER: &str = "x-house-matrix-ids";
+/// The proxy's headers (`mxbot_common::web`), for the tests' requests.
+#[cfg(test)]
+use forward_auth::{
+    house_account as matrix_id, GROUPS_HEADER, MATRIX_IDS_HEADER, NAME_HEADER, USER_HEADER,
+};
 pub const PROXY_SECRET_HEADER: &str = "x-cleaning-proxy-secret";
 /// The environment variable with the proxy's secret.
 pub const PROXY_SECRET_ENV: &str = "CLEANING_PROXY_SECRET";
@@ -63,6 +68,7 @@ const MAX_WEEKS: usize = 26;
 pub struct Settings {
     pub bind_addr: String,
     pub public_url: String,
+    /// Groups (X-House-Groups) that may see it; empty: nobody.
     pub allowed_groups: Vec<String>,
     /// Without a login (the proxy asks for it only from outside the house): a guest.
     pub guests: bool,
@@ -92,8 +98,8 @@ pub struct Web {
     /// Residents with more than one Matrix account (`BotContext::accounts`).
     accounts: Arc<RwLock<Accounts>>,
     settings: Settings,
-    /// The server part of the bot's own Matrix ID (people's house accounts).
-    server_name: String,
+    /// The proxy's headers: the secret, the login, the groups, the accounts.
+    auth: ForwardAuth,
     /// The house bar's link home: (address, name), or none (no parent domain to go to).
     home: Option<(String, String)>,
 }
@@ -102,12 +108,7 @@ type WebState = Arc<Web>;
 
 /// The proxy's secret from the environment: required, at least 32 characters.
 pub fn proxy_secret_from_env() -> Result<Vec<u8>> {
-    let secret = std::env::var(PROXY_SECRET_ENV)
-        .with_context(|| format!("[web] is on but {PROXY_SECRET_ENV} is not set"))?;
-    if secret.len() < 32 {
-        anyhow::bail!("{PROXY_SECRET_ENV}: at least 32 characters");
-    }
-    Ok(secret.into_bytes())
+    Ok(forward_auth::secret_from_env(PROXY_SECRET_ENV)?.into_bytes())
 }
 
 impl Web {
@@ -115,13 +116,23 @@ impl Web {
     pub fn new(
         state: Arc<Mutex<State>>,
         accounts: Arc<RwLock<Accounts>>,
-        settings: Settings,
+        mut settings: Settings,
         bot_user_id: &str,
     ) -> Result<Web> {
         let server_name = UserId::parse(bot_user_id)
             .with_context(|| format!("[matrix] user_id {bot_user_id:?}"))?
             .server_name()
             .to_string();
+        let secret = ProxySecret::new(
+            PROXY_SECRET_HEADER,
+            std::mem::take(&mut settings.proxy_secret),
+        )?;
+        let access = Access {
+            allowed_groups: AllowList::Only(settings.allowed_groups.iter().cloned().collect()),
+            admin_groups: Vec::new(),
+            guests: settings.guests,
+        };
+        let auth = ForwardAuth::new(secret, access, &server_name)?;
         let home = home_link(
             &settings.public_url,
             settings.home_url.as_deref(),
@@ -131,7 +142,7 @@ impl Web {
             state,
             accounts,
             settings,
-            server_name,
+            auth,
             home,
         })
     }
@@ -181,6 +192,16 @@ pub enum Refused {
     NotAllowed(Lang),
 }
 
+impl Refused {
+    fn of(refusal: Refusal, lang: Lang) -> Refused {
+        match refusal {
+            Refusal::Proxy => Refused::Proxy(lang),
+            Refusal::NoLogin => Refused::NoLogin(lang),
+            Refusal::NotAllowed => Refused::NotAllowed(lang),
+        }
+    }
+}
+
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
         let (status, lang, key) = match self {
@@ -199,94 +220,31 @@ impl IntoResponse for Refused {
     }
 }
 
-/// A header as UTF-8 (names and groups may be "Jürgen" or Cyrillic, which
-/// `HeaderValue::to_str` refuses), trimmed; "" when absent or not UTF-8.
-fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
-    headers
-        .get(name)
-        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
-        .map(str::trim)
-        .unwrap_or("")
-}
-
-/// Compared in constant time.
+/// Compared in constant time (`mxbot_common::web::secret_eq`).
+#[cfg(test)]
 fn proxy_secret_ok(headers: &HeaderMap, secret: &[u8]) -> bool {
-    let Some(sent) = headers.get(PROXY_SECRET_HEADER) else {
-        return false;
-    };
-    let sent = sent.as_bytes();
-    sent.len() == secret.len()
-        && sent
-            .iter()
-            .zip(secret)
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
-}
-
-/// A login name as a Matrix ID on `server`, lowercased; `None` where it can't be a localpart
-/// (such a login has no house account to find in the plan).
-pub fn matrix_id(login: &str, server: &str) -> Option<OwnedUserId> {
-    let lower = login.trim().to_lowercase();
-    let valid = (1..=64).contains(&lower.len())
-        && lower
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._=-/".contains(c));
-    valid
-        .then(|| UserId::parse(format!("@{lower}:{server}")).ok())
-        .flatten()
+    headers
+        .get(PROXY_SECRET_HEADER)
+        .is_some_and(|sent| forward_auth::secret_eq(sent.as_bytes(), secret))
 }
 
 fn visitor(headers: &HeaderMap, query: Option<&str>, web: &Web) -> Result<Visitor, Refused> {
     let frame = Frame::of(headers, query);
-    let lang = frame.lang;
-    if !proxy_secret_ok(headers, &web.settings.proxy_secret) {
-        return Err(Refused::Proxy(lang));
-    }
-    let login = header_text(headers, USER_HEADER);
-    if login.is_empty() && web.settings.guests {
-        // The proxy drops a client's own X-House-* headers and lets requests without a
-        // login through only from inside the house.
-        return Ok(Visitor {
+    match web.auth.identify(headers) {
+        Err(refusal) => Err(Refused::of(refusal, frame.lang)),
+        Ok(forward_auth::Visitor::Guest) => Ok(Visitor {
             accounts: Vec::new(),
             name: String::new(),
             guest: true,
             frame,
-        });
+        }),
+        Ok(forward_auth::Visitor::Person(person)) => Ok(Visitor {
+            accounts: person.accounts,
+            name: person.name,
+            guest: false,
+            frame,
+        }),
     }
-    if login.is_empty() || login.len() > 128 || login.chars().any(char::is_control) {
-        return Err(Refused::NoLogin(lang));
-    }
-    let groups: Vec<&str> = header_text(headers, GROUPS_HEADER)
-        .split('|')
-        .map(str::trim)
-        .filter(|g| !g.is_empty())
-        .collect();
-    let allowed = &web.settings.allowed_groups;
-    if !allowed.is_empty() && !allowed.iter().any(|w| groups.contains(&w.as_str())) {
-        return Err(Refused::NotAllowed(lang));
-    }
-    let mut accounts: Vec<OwnedUserId> = matrix_id(login, &web.server_name).into_iter().collect();
-    for id in header_text(headers, MATRIX_IDS_HEADER)
-        .split(',')
-        .filter_map(|s| UserId::parse(s.trim()).ok())
-    {
-        if accounts.len() < 11 && !accounts.contains(&id) {
-            accounts.push(id);
-        }
-    }
-    let name = Some(header_text(headers, NAME_HEADER))
-        .filter(|n| !n.is_empty())
-        .unwrap_or(login)
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect();
-    Ok(Visitor {
-        accounts,
-        name,
-        guest: false,
-        frame,
-    })
 }
 
 // ── The house bar ───────────────────────────────────────────────────────────

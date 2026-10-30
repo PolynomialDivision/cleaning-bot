@@ -719,3 +719,104 @@ fn logins_become_house_accounts_and_the_house_bar_finds_home() {
     assert_eq!(weeks_param(Some("weeks=40")), Some(26));
     assert_eq!(weeks_param(Some("weeks=")), None);
 }
+
+/// The website as `Site::configured`, with `allowed_groups` and `secret` as given.
+fn site_with(allowed_groups: &[&str], guests: bool, secret: &[u8]) -> Result<Site> {
+    let web = Web::new(
+        Arc::new(Mutex::new(house())),
+        Arc::new(RwLock::new(Accounts::default())),
+        Settings {
+            bind_addr: "127.0.0.1:0".into(),
+            public_url: "https://putzplan.example.org".into(),
+            allowed_groups: allowed_groups.iter().map(|g| g.to_string()).collect(),
+            guests,
+            proxy_secret: secret.to_vec(),
+            home_url: None,
+            home_name: None,
+        },
+        "@cleaningbot:example.org",
+    )?;
+    Ok(Site { web: Arc::new(web) })
+}
+
+#[test]
+fn without_a_secret_of_32_characters_the_website_does_not_start() {
+    assert!(site_with(&["residents"], false, b"").is_err());
+    assert!(site_with(&["residents"], false, &[b'x'; 31]).is_err());
+    assert!(site_with(&["residents"], false, &[b'x'; 32]).is_ok());
+    // From the environment: refused at the bot's start, unset or short.
+    std::env::remove_var(PROXY_SECRET_ENV);
+    let unset = proxy_secret_from_env().unwrap_err().to_string();
+    assert!(
+        unset.contains("CLEANING_PROXY_SECRET is not set"),
+        "{unset}"
+    );
+    std::env::set_var(PROXY_SECRET_ENV, "short");
+    let short = proxy_secret_from_env().unwrap_err().to_string();
+    assert!(short.contains("at least 32 characters"), "{short}");
+    std::env::set_var(PROXY_SECRET_ENV, SECRET);
+    assert_eq!(proxy_secret_from_env().unwrap(), SECRET.as_bytes());
+    std::env::remove_var(PROXY_SECRET_ENV);
+}
+
+#[tokio::test]
+async fn a_secret_close_to_the_right_one_is_still_wrong() {
+    let site = Site::new();
+    let mut last = SECRET.to_owned();
+    last.pop();
+    for sent in [
+        format!("{last}x"),
+        last.clone(),
+        format!("{SECRET}x"),
+        SECRET.to_uppercase(),
+        format!(" {SECRET}"),
+    ] {
+        let req = Request::get("/")
+            .header(PROXY_SECRET_HEADER, sent.as_str())
+            .header(USER_HEADER, "alice")
+            .header(GROUPS_HEADER, "residents")
+            .header(header::ACCEPT_LANGUAGE, "en")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = site.send(req).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{sent:?}");
+        assert!(body.contains("No access"), "{body}");
+    }
+    // The website's own header only.
+    let req = Request::get("/")
+        .header("x-deals-proxy-secret", SECRET)
+        .header(USER_HEADER, "alice")
+        .header(GROUPS_HEADER, "residents")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(site.send(req).await.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn no_allowed_groups_lets_nobody_with_a_login_in() {
+    let site = site_with(&[], true, SECRET.as_bytes()).unwrap();
+    for groups in ["residents", "", "house-admins|it-admins"] {
+        let req = Request::get("/")
+            .header(PROXY_SECRET_HEADER, SECRET)
+            .header(USER_HEADER, "alice")
+            .header(GROUPS_HEADER, groups)
+            .header(header::ACCEPT_LANGUAGE, "en")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = site.send(req).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{groups}");
+        assert!(
+            body.contains("may not see") && !body.contains("Alice"),
+            "{body}"
+        );
+    }
+    // A guest has no groups to check: in the house, as before.
+    let guest = Request::get("/")
+        .header(PROXY_SECRET_HEADER, SECRET)
+        .header(header::ACCEPT_LANGUAGE, "en")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, page) = site.send(guest).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("href=\"/login\"") && !page.contains("class=\"you\""));
+}
