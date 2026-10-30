@@ -32,3 +32,8 @@ tracing       = "0.1"
 wiremock = "0.6"
 # Requests against the website's router (src/web/tests.rs).
 tower    = { version = "0.5", features = ["util"] }
+
+# A panic anywhere ends the bot and Docker restarts it, as a supervised task
+# that ends does (mxbot_common::supervise).
+[profile.release]
+panic = "abort"

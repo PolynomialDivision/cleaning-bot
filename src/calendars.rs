@@ -30,6 +30,7 @@ use chrono::NaiveDate;
 use mxbot_common::{
     calendar::nextcloud::{self, Deleted, Nextcloud, Precondition, Share, Written},
     matrix_sdk::{ruma::OwnedUserId, Client},
+    supervise::Alive,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -518,12 +519,12 @@ pub async fn not_managed(ctx: &BotContext, client: &Client) {
     }
 }
 
-/// Keep the calendars in line with the plan, until the bot stops.
-pub async fn run(ctx: BotContext, client: Client, cfg: NextcloudConfig) {
+/// The bot's Nextcloud account for `cfg`; `None` (logged) when the calendars can't be kept,
+/// and then [`not_managed`] is due.
+pub fn connect(ctx: &BotContext, cfg: &NextcloudConfig) -> Option<Nextcloud> {
     if ctx.config.directory.is_none() {
         warn!("Calendars: [nextcloud] needs [directory] (who has a house account); no calendars");
-        not_managed(&ctx, &client).await;
-        return;
+        return None;
     }
     let password = std::env::var(&cfg.password_env)
         .ok()
@@ -534,17 +535,26 @@ pub async fn run(ctx: BotContext, client: Client, cfg: NextcloudConfig) {
             "Calendars: no app password in {}; no calendars, !ical sends files",
             cfg.password_env
         );
-        not_managed(&ctx, &client).await;
-        return;
+        return None;
     };
-    let nc = match Nextcloud::new(&cfg.account_url, &cfg.username, &password) {
-        Ok(nc) => nc,
+    match Nextcloud::new(&cfg.account_url, &cfg.username, &password) {
+        Ok(nc) => Some(nc),
         Err(e) => {
             warn!("Calendars: {e:#}; no calendars");
-            not_managed(&ctx, &client).await;
-            return;
+            None
         }
-    };
+    }
+}
+
+/// Keep the calendars in line with the plan, until the bot stops. `alive` ticks once per
+/// look at the plan.
+pub async fn run(
+    ctx: BotContext,
+    client: Client,
+    cfg: NextcloudConfig,
+    nc: Nextcloud,
+    alive: Alive,
+) {
     let weeks = cfg.weeks.clamp(1, 104) as usize;
     let web_url = cfg.web_url();
     let cache_path = ctx
@@ -561,6 +571,7 @@ pub async fn run(ctx: BotContext, client: Client, cfg: NextcloudConfig) {
     let mut next_full = tokio::time::Instant::now();
     let mut seen: Option<(String, NaiveDate, usize)> = None;
     loop {
+        alive.tick();
         let logins = ctx.logins.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(logins) = logins {
             let today = crate::state::today();

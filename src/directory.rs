@@ -20,6 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use mxbot_common::{
     directory::{Directory, DirectoryConfig},
     matrix_sdk::ruma::{OwnedUserId, UserId},
+    supervise::Alive,
 };
 use tracing::{info, warn};
 
@@ -159,21 +160,27 @@ pub fn logins(people: &[mxbot_common::directory::Person]) -> Logins {
     out
 }
 
-/// Read the directory now and every `refresh_minutes`, into `ctx.accounts` (and the logins
-/// into `ctx.logins`).
-pub async fn run(ctx: BotContext, cfg: DirectoryConfig) {
-    let directory = match UserId::parse(ctx.config.matrix.user_id.as_str())
+/// The reader for `cfg`; `None` (logged) when it can't be set up, and every Matrix account is
+/// a person of its own.
+pub fn open(ctx: &BotContext, cfg: &DirectoryConfig) -> Option<Directory> {
+    match UserId::parse(ctx.config.matrix.user_id.as_str())
         .map_err(anyhow::Error::from)
-        .and_then(|me| Directory::new(&cfg, &me))
+        .and_then(|me| Directory::new(cfg, &me))
     {
-        Ok(d) => d,
+        Ok(d) => Some(d),
         Err(e) => {
             warn!("Directory: {e:#}; every Matrix account is a person of its own");
-            return;
+            None
         }
-    };
+    }
+}
+
+/// Read the directory now and every `refresh_minutes`, into `ctx.accounts` (and the logins
+/// into `ctx.logins`). `alive` ticks once per read.
+pub async fn run(ctx: BotContext, directory: Directory, cfg: DirectoryConfig, alive: Alive) {
     let mut reported: Option<(Accounts, Vec<Vec<String>>)> = None;
     loop {
+        alive.tick();
         match directory.people().await {
             Ok(people) => {
                 *ctx.logins.write().unwrap_or_else(|e| e.into_inner()) =

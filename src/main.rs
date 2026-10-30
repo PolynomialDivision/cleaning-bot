@@ -1,7 +1,7 @@
 // Tests build fixtures by tweaking `Default` values field by field.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use mxbot_common::{
@@ -25,6 +25,7 @@ use mxbot_common::{
         },
         Client, Room, RoomState,
     },
+    supervise::{supervise, supervise_ticking},
     Bot,
 };
 use tokio::sync::Mutex;
@@ -241,11 +242,7 @@ async fn main() -> Result<()> {
             web::Settings::new(&config.web, secret),
             &config.matrix.user_id,
         )?;
-        tokio::spawn(async move {
-            if let Err(e) = web::serve(site).await {
-                error!("Website error: {e:#}");
-            }
-        });
+        supervise("website", web::serve(site));
     }
 
     let bot = Bot::builder("cleaning-bot", env!("CARGO_PKG_VERSION"))
@@ -266,8 +263,14 @@ async fn main() -> Result<()> {
         accounts,
         logins: Arc::default(),
     };
-    if let Some(directory) = config.directory.clone() {
-        tokio::spawn(directory::run(ctx.clone(), directory));
+    if let Some(cfg) = config.directory.clone() {
+        if let Some(directory) = directory::open(&ctx, &cfg) {
+            // Three missed reads (each gives up after 30 s) before the bot counts as stuck.
+            let within = (cfg.refresh() + Duration::from_secs(60)) * 3;
+            supervise_ticking("directory sync", within, |alive| {
+                directory::run(ctx.clone(), directory, cfg, alive)
+            });
+        }
     }
 
     // ── Message / command handler ─────────────────────────────────────────────
@@ -751,13 +754,25 @@ async fn main() -> Result<()> {
 
     // Every resident's turns in a calendar of their own in the cloud (`[nextcloud]`).
     // Without it, nobody is told their turns are there any more.
-    if let Some(nextcloud) = config.nextcloud.clone() {
-        tokio::spawn(calendars::run(ctx.clone(), client.clone(), nextcloud));
+    let nextcloud = config
+        .nextcloud
+        .clone()
+        .and_then(|cfg| calendars::connect(&ctx, &cfg).map(|nc| (cfg, nc)));
+    if let Some((cfg, nc)) = nextcloud {
+        // A look every 30 s; a complete comparison (every request up to 30 s) can take minutes.
+        supervise_ticking("calendar sync", Duration::from_secs(30 * 60), |alive| {
+            calendars::run(ctx.clone(), client.clone(), cfg, nc, alive)
+        });
     } else {
         calendars::not_managed(&ctx, &client).await;
     }
 
-    tokio::spawn(scheduler::run(ctx, client.clone()));
+    // A round every 30 minutes; two hours without one and the bot counts as stuck.
+    supervise_ticking(
+        "cleaning scheduler",
+        Duration::from_secs(2 * 60 * 60),
+        |alive| scheduler::run(ctx, client.clone(), alive),
+    );
 
     bot.run().await
 }

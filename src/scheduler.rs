@@ -14,7 +14,7 @@ use matrix_sdk::{
     },
     Client, Room,
 };
-use mxbot_common::matrix_sdk;
+use mxbot_common::{matrix_sdk, supervise::Alive};
 use std::collections::HashSet;
 use tracing::{error, info, warn};
 
@@ -50,9 +50,10 @@ async fn seed_buttons(room: &Room, event_id: &OwnedEventId) {
     }
 }
 
-pub async fn run(ctx: BotContext, client: Client) {
+pub async fn run(ctx: BotContext, client: Client, alive: Alive) {
     info!("Scheduler started");
     loop {
+        alive.tick();
         if let Err(e) = tick(&ctx, &client).await {
             error!("Scheduler error: {e}");
         }
