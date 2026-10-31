@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use super::{
     logins, person_account, recognised,
     reconcile::{confirm_held, held_digest, mass_limit, round, Round, Rules},
+    report_failed_read,
 };
 use crate::{
     analytics::DomainEvent,
@@ -1371,4 +1372,46 @@ fn admins_from_the_directory_groups_follow_them_and_lapse_with_an_old_read() {
     assert!(!ctx.is_admin(&id("@gina:house.org")));
     assert!(ctx.is_admin(&id("@admin:house.org")));
     let _ = std::fs::remove_file(path);
+}
+
+/// A directory that is down is an outage (unavailable, never unhealthy); one that refuses the
+/// token or answers what the bot cannot read is a failure.
+#[tokio::test]
+async fn only_a_directory_that_is_down_is_an_outage() {
+    use mxbot_common::supervise::{report, snapshot, Outcome};
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    let read = |status: u16| async move {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let e = client
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .map_err(anyhow::Error::from)
+            .unwrap_err();
+        e.context("reading the directory")
+    };
+    let alive = report("cleaning directory under test");
+    let last = || {
+        snapshot()
+            .into_iter()
+            .find(|t| t.name == "cleaning directory under test")
+            .unwrap()
+            .last_outcome
+    };
+    report_failed_read(&alive, &read(503).await);
+    assert_eq!(last(), Some(Outcome::Unavailable));
+    report_failed_read(&alive, &read(403).await);
+    assert_eq!(last(), Some(Outcome::Failed));
+    report_failed_read(
+        &alive,
+        &anyhow::anyhow!("the directory's answer has no groups"),
+    );
+    assert_eq!(last(), Some(Outcome::Failed));
 }

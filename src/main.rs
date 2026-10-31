@@ -277,8 +277,9 @@ async fn main() -> Result<()> {
     let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(cfg) = config.directory.clone() {
         if let Some(directory) = directory::open(&ctx, &cfg) {
-            // Three missed reads (each gives up after 30 s) before the bot counts as stuck;
-            // failing reads for that long count as unhealthy too.
+            // Three missed reads (each gives up after 30 s) before the bot counts as stuck. A
+            // directory that can't be read is Authentik's outage, not the bot's: the task is
+            // "unavailable" in the status file, never unhealthy, and nothing follows it.
             let within = (cfg.reader.refresh() + Duration::from_secs(60)) * 3;
             let synced = Arc::clone(&synced);
             let admin_groups = config.security.admin_groups.clone();

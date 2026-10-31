@@ -254,7 +254,12 @@ pub fn wanted_groups(state: &State, cfg: &DirectorySection) -> BTreeSet<String> 
 
 /// Read the directory now and every `refresh_minutes` into `ctx.directory` (and the logins
 /// into `ctx.logins`), and once the bot has synced (`synced`), follow it
-/// (`reconcile::run_round`). `alive`: ok after a good read, failed after a failed one.
+/// (`reconcile::run_round`). `alive`: ok after a good read; a directory that is down
+/// (unreachable, timing out, 5xx, 429: `directory::is_outage`) is another service's outage
+/// (`Alive::unavailable`: in the status file and its alerts, never unhealthy, no restart); one
+/// that refuses the token (401/403) or answers what the bot cannot read is failing (unhealthy
+/// after its time: the config or the bot needs fixing). Either way the last answer stays for
+/// recognising accounts.
 pub async fn run(
     ctx: BotContext,
     client: Client,
@@ -302,9 +307,20 @@ pub async fn run(
             }
             Err(e) => {
                 warn!("Directory: {e:#}; keeping the last answer, following nothing");
-                alive.failed(format!("{e:#}"));
+                report_failed_read(&alive, &e);
             }
         }
         tokio::time::sleep(cfg.reader.refresh()).await;
+    }
+}
+
+/// A read that failed, for the status file and the heartbeat: the directory down is another
+/// service's outage (`unavailable`, never unhealthy); a refusal or an answer the bot cannot
+/// read is a failure of this task (unhealthy after its time).
+fn report_failed_read(alive: &Alive, e: &anyhow::Error) {
+    if mxbot_common::directory::is_outage(e) {
+        alive.unavailable(format!("directory: {e:#}"));
+    } else {
+        alive.failed(format!("directory: {e:#}"));
     }
 }
