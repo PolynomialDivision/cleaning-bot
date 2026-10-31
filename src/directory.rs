@@ -4,8 +4,8 @@
 //!
 //! The plan keeps its own people (`domain::Person`) with one Matrix ID each, the address the
 //! bot writes to them at, and, once matched, the directory id (`Person::directory_id`). An
-//! event from any of a resident's recognised accounts (their house account, the links an
-//! admin entered, the links they proved, none in conflict) is handled as that person's
+//! event from any of a resident's recognised accounts (their house account, their links in
+//! `matrix_ids`, entered by an admin or proved, none in conflict) is handled as that person's
 //! (`person_account`); private chats with any of them count (`recognised`).
 //!
 //! Matching a person in the plan to the directory: by directory id first, else by one of the
@@ -242,13 +242,14 @@ pub fn open(ctx: &BotContext, cfg: &DirectorySection) -> Option<Directory> {
     }
 }
 
-/// The groups a read asks about: the residents' and every group's `directory_group`.
+/// The groups a read asks about: who lives here (`residents_group`, each of them) and every
+/// group's `directory_group`.
 pub fn wanted_groups(state: &State, cfg: &DirectorySection) -> BTreeSet<String> {
     state
         .cleaning_groups
         .iter()
         .filter_map(|g| g.directory_group.clone())
-        .chain(Some(cfg.residents_group.clone()).filter(|g| !g.is_empty()))
+        .chain(cfg.residents_groups.iter().cloned())
         .collect()
 }
 

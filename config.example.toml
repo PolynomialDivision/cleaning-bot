@@ -63,19 +63,24 @@ materialize_weeks = 26
 # groups) from the environment variable token_env. One resident, one person in the
 # plan, whichever of their accounts writes: their house account
 # @<login>:<server_name> (default: the bot's own server; or the localpart in
-# localpart_attribute), the Matrix IDs an admin put into matrix_ids_attribute and
-# the ones they proved (matrix_verified). Their chosen account (matrix_preferred)
+# localpart_attribute) and the Matrix IDs in matrix_ids_attribute (entered by an
+# admin or proved with a link code). Their chosen account (matrix_preferred)
 # becomes their address. Admins are [security] admin_users only, never another
 # account of theirs. An account two people claim counts for neither.
 #
-# residents_group: who leaves it (moved out, deactivated) leaves every cleaning
-# group, after two reads in a row. Off ("") unless set: switch it on once the
-# first reads have linked everyone. Kitchens follow a group with
-# !groups directory <group> kitchen-floor-1. More departures from one group at
-# once than max(2, 20 % of its people) wait for !directory confirm <digest>, and
-# so do all of the first ones after following began (or residents_group was
-# switched on). A read older than stale_after_minutes changes nothing. Without
-# this section every account is a person of its own.
+# residents_group: who lives here, one group or a list of groups: living here is
+# being in ANY of them (the full members, "residents", and people who live here
+# for a while, "subtenants", who have a kitchen of their own). Who is in none of
+# them (moved out, deactivated) leaves every cleaning group, after two reads in a
+# row; a kitchen takes in only its members who live here. Off ("" or []) unless
+# set: switch it on once the first reads have linked everyone. Every group named
+# must exist in the directory, and someone must be in one of them, or nobody
+# leaves. Kitchens follow a group with !groups directory <group> kitchen-floor-1.
+# More departures from one group at once than max(2, 20 % of its people) wait for
+# !directory confirm <digest>, and so do all of the first ones after following
+# began (or after residents_group was switched on or lost a group; adding a group
+# needs no new review). A read older than stale_after_minutes changes nothing.
+# Without this section every account is a person of its own.
 #
 # [directory]
 # provider    = "authentik"
@@ -86,7 +91,7 @@ materialize_weeks = 26
 # token_env       = "DIRECTORY_TOKEN"
 # refresh_minutes = 15
 # stale_after_minutes = 60
-# residents_group = "residents"
+# residents_group = ["residents", "subtenants"]   # or one name: "residents"
 
 # ── Calendars in Nextcloud (optional) ─────────────────────────────────────────
 # With this section and [directory], every resident with a house account (in the
@@ -117,6 +122,7 @@ materialize_weeks = 26
 # bind_addr  = "0.0.0.0:8081"
 # public_url = "https://putzplan.example.org"
 # allowed_groups = ["residents"]   # X-House-Groups that may see it; [] = nobody logged in
+#                                   (who lives here: e.g. ["residents", "subtenants"])
 # Without a login, see the plan as a guest (no own turns): only for a proxy that asks for
 # the login just from outside the house, as Caddy's forward_auth_skip_internal does. Its
 # "Log in" link goes to /login, where the proxy asks for the login from everywhere too.

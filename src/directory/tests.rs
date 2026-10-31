@@ -51,17 +51,14 @@ impl R {
             house: Some(house),
             links: Vec::new(),
             choice: Choice::None,
+            stay_until: None,
         })
     }
 
-    /// A link: an admin entered it, or (`verified`) the person proved it.
-    fn link(mut self, account: &str, verified: bool) -> R {
+    /// A link (`matrix_ids`: an admin entered it or the person proved it, the same).
+    fn link(mut self, account: &str) -> R {
         self.0.accounts.push(id(account));
-        self.0.links.push(Link {
-            id: id(account),
-            by_admin: !verified,
-            verified,
-        });
+        self.0.links.push(Link { id: id(account) });
         self
     }
 
@@ -91,13 +88,14 @@ fn people(residents: Vec<R>) -> People {
     People::new(residents.into_iter().map(|r| r.0).collect())
 }
 
-/// A read at `at` of `residents`; the groups that exist: residents, former-residents and the
-/// kitchens 1 and 3.
+/// A read at `at` of `residents`; the groups that exist: residents, subtenants,
+/// former-residents and the kitchens 1 and 3.
 fn snapshot(residents: Vec<R>, at: SystemTime) -> Snapshot {
     Snapshot {
         people: people(residents),
         groups: [
             "residents",
+            "subtenants",
             "former-residents",
             "kitchen-floor-1",
             "kitchen-floor-3",
@@ -110,10 +108,20 @@ fn snapshot(residents: Vec<R>, at: SystemTime) -> Snapshot {
 }
 
 fn rules() -> Rules {
+    rules_of(&["residents"])
+}
+
+/// Who lives here: in any of `groups`.
+fn rules_of(groups: &[&str]) -> Rules {
     Rules {
-        residents_group: "residents".into(),
+        residents_groups: groups.iter().map(|g| (*g).to_owned()).collect(),
         stale_after: 60 * MIN,
     }
+}
+
+/// The house's model: full members and subtenants live here.
+fn with_subtenants() -> Rules {
+    rules_of(&["residents", "subtenants"])
 }
 
 fn context(state: State) -> (BotContext, PathBuf) {
@@ -186,7 +194,7 @@ fn group(state: &mut State, name: &str, directory_group: Option<&str>) -> GroupI
 /// The departures were reviewed under `rules()` before (a bot that has followed the directory
 /// for a while): the limits alone hold them.
 fn reviewed(state: &mut State) {
-    state.directory.reviewed = Some(rules().residents_group);
+    state.directory.reviewed = Some(rules().key());
 }
 
 fn plan(state: &mut State) {
@@ -264,7 +272,7 @@ fn a_resident_with_a_house_and_an_external_account_is_one_person() {
     plan(&mut state);
     let (ctx, _) = context(State::default());
     let t0 = SystemTime::now();
-    let dir = || vec![R::new("u-anna", "anna").link("@anna:matrix.org", false)];
+    let dir = || vec![R::new("u-anna", "anna").link("@anna:matrix.org")];
     let read = snapshot(dir(), t0);
 
     // Before the link: the house account acts as the matrix.org one.
@@ -329,16 +337,16 @@ fn the_chosen_account_becomes_the_address_and_unchosen_or_invalid_stays() {
         vec![
             // A: chose her house account.
             R::new("u-anna", "anna")
-                .link("@anna:matrix.org", false)
+                .link("@anna:matrix.org")
                 .chose("@anna:house.org"),
-            // B: chose an account he proved.
+            // B: chose one of his links.
             R::new("u-ben", "ben")
-                .link("@ben:matrix.org", true)
+                .link("@ben:matrix.org")
                 .chose("@ben:matrix.org"),
-            // Invalid: an account only an admin entered is no address.
+            // Invalid: an account not linked to her is no address (a link would be).
             R::new("u-cleo", "cleo")
-                .link("@cleo:matrix.org", false)
-                .chose("@cleo:matrix.org"),
+                .link("@cleo:matrix.org")
+                .chose("@cleo:elsewhere.org"),
         ],
         t0,
     );
@@ -418,7 +426,7 @@ fn a_changed_choice_moves_the_address_and_old_chats_stay_theirs() {
     let t0 = SystemTime::now();
     let read = snapshot(
         vec![R::new("u-mia", "mia")
-            .link("@mia:matrix.org", true)
+            .link("@mia:matrix.org")
             .chose("@mia:matrix.org")],
         t0,
     );
@@ -530,7 +538,7 @@ fn a_kitchen_newcomer_is_added_by_directory_id_with_the_right_address() {
                 .groups(&["residents", "kitchen-floor-1"]),
             // Chosen: that account.
             R::new("u-ole", "ole")
-                .link("@ole:matrix.org", true)
+                .link("@ole:matrix.org")
                 .chose("@ole:matrix.org")
                 .groups(&["residents", "kitchen-floor-1"]),
             // In the kitchen but not a resident (a guest): not added.
@@ -664,6 +672,348 @@ fn people_without_a_directory_id_are_never_touched() {
     assert!(state.is_member(&kitchen, &mia));
 }
 
+// ── Subtenants: living here for a while, a kitchen of their own ─────────────
+
+/// Kitchen 3 follows kitchen-floor-3 with eve (a resident) in it; the plan doesn't know sub
+/// yet. Reviewed under `rules`.
+fn kitchen_with_eve(rules: &Rules) -> (State, GroupId, PersonId) {
+    let mut state = State::default();
+    state.created_at = Some(Utc::now());
+    let k3 = group(&mut state, "Kitchen 3", Some("kitchen-floor-3"));
+    let eve = add(&mut state, "@eve:house.org", Some("u-eve"), &[&k3]);
+    plan(&mut state);
+    state.directory.reviewed = Some(rules.key());
+    (state, k3, eve)
+}
+
+fn eve() -> R {
+    R::new("u-eve", "eve").groups(&["residents", "kitchen-floor-3"])
+}
+
+fn sub() -> R {
+    R::new("u-sub", "sub")
+        .named("Sam Sub")
+        .groups(&["subtenants", "kitchen-floor-3"])
+}
+
+#[test]
+fn a_subtenant_joins_their_kitchen_and_never_counts_as_moved_out() {
+    let rules = with_subtenants();
+    let (mut state, k3, eve_id) = kitchen_with_eve(&rules);
+    let (ctx, _) = context(State::default());
+    let t0 = SystemTime::now();
+    let out = round(
+        &ctx,
+        &mut state,
+        &snapshot(vec![eve(), sub()], t0),
+        &rules,
+        t0,
+    );
+    let sub_id = state
+        .persons
+        .iter()
+        .find(|p| p.directory_id.as_deref() == Some("u-sub"))
+        .map(|p| p.id.clone())
+        .expect("added by directory id");
+    assert_eq!(
+        person(&state, &sub_id).matrix_id.as_deref(),
+        Some("@sub:house.org")
+    );
+    assert!(state.is_member(&k3, &sub_id) && state.is_member(&k3, &eve_id));
+    assert_eq!(out.notices.len(), 1, "{out:?}");
+    assert!(
+        out.notices[0].contains("Sam Sub (sub) joined Kitchen 3"),
+        "{}",
+        out.notices[0]
+    );
+    // Many reads later: nobody leaves, nothing is held.
+    for i in 1..4 {
+        let at = t0 + i * 15 * MIN;
+        let out = round(
+            &ctx,
+            &mut state,
+            &snapshot(vec![eve(), sub()], at),
+            &rules,
+            at,
+        );
+        assert_eq!(out, Round::default());
+    }
+    assert!(state.is_member(&k3, &sub_id) && state.is_member(&k3, &eve_id));
+    assert!(state.directory.held.is_empty() && state.directory.missing.is_empty());
+
+    // The residents alone (a config before subtenants): the kitchen doesn't take them in, and
+    // one who is in it already counts as moved out.
+    let residents_only = rules_of(&["residents"]);
+    let (mut fresh, k3, _) = kitchen_with_eve(&residents_only);
+    round(
+        &ctx,
+        &mut fresh,
+        &snapshot(vec![eve(), sub()], t0),
+        &residents_only,
+        t0,
+    );
+    assert_eq!(fresh.persons.len(), 1, "sub is not added");
+    assert_eq!(
+        fresh
+            .cleaning_groups
+            .iter()
+            .find(|g| g.id == k3)
+            .unwrap()
+            .member_ids
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_subtenant_moving_out_leaves_their_kitchen_after_two_reads() {
+    let rules = with_subtenants();
+    let (mut state, k3, eve_id) = kitchen_with_eve(&rules);
+    let (ctx, _) = context(State::default());
+    let t0 = SystemTime::now();
+    round(
+        &ctx,
+        &mut state,
+        &snapshot(vec![eve(), sub()], t0),
+        &rules,
+        t0,
+    );
+    let sub_id = state
+        .persons
+        .iter()
+        .find(|p| p.directory_id.as_deref() == Some("u-sub"))
+        .map(|p| p.id.clone())
+        .unwrap();
+    // subtenants → former-residents, still in the kitchen's group in the directory
+    let gone = || {
+        vec![
+            eve(),
+            R::new("u-sub", "sub").groups(&["former-residents", "kitchen-floor-3"]),
+        ]
+    };
+    let t1 = t0 + 15 * MIN;
+    let out = round(&ctx, &mut state, &snapshot(gone(), t1), &rules, t1);
+    assert!(out.notices.is_empty(), "{out:?}");
+    assert!(state.is_member(&k3, &sub_id), "one read is not enough");
+    let t2 = t1 + 15 * MIN;
+    let out = round(&ctx, &mut state, &snapshot(gone(), t2), &rules, t2);
+    assert!(!state.is_member(&k3, &sub_id));
+    assert!(state.is_member(&k3, &eve_id), "the resident stays");
+    assert_eq!(out.notices.len(), 1, "{out:?}");
+    assert!(
+        out.notices[0].contains("is in none of «residents», «subtenants» any more (moved out)"),
+        "{}",
+        out.notices[0]
+    );
+    assert!(out.notices[0].contains("left Kitchen 3"));
+    // and isn't taken in again by the kitchen's group
+    let t3 = t2 + 15 * MIN;
+    round(&ctx, &mut state, &snapshot(gone(), t3), &rules, t3);
+    assert!(!state.is_member(&k3, &sub_id));
+}
+
+#[test]
+fn residents_moving_out_leave_the_same_way_with_subtenants_followed() {
+    // Mia (residents → former-residents) under the list: as with "residents" alone, and the
+    // subtenants group existing with nobody in it is no reason to stop.
+    let (mut state, mia, kitchen, stairs) = mia_and_neighbours();
+    state.directory.reviewed = Some(with_subtenants().key());
+    let (ctx, _) = context(State::default());
+    let t0 = SystemTime::now();
+    let mut dir = neighbours();
+    dir.push(R::new("u-mia", "mia"));
+    round(&ctx, &mut state, &snapshot(dir, t0), &with_subtenants(), t0);
+    let read = |at| {
+        let mut dir = neighbours();
+        dir.push(R::new("u-mia", "mia").groups(&["former-residents"]));
+        snapshot(dir, at)
+    };
+    for i in 1..3 {
+        let at = t0 + i * 15 * MIN;
+        round(&ctx, &mut state, &read(at), &with_subtenants(), at);
+    }
+    assert!(!state.is_member(&kitchen, &mia) && !state.is_member(&stairs, &mia));
+    assert_eq!(
+        state
+            .cleaning_groups
+            .iter()
+            .find(|g| g.id == kitchen)
+            .unwrap()
+            .member_ids
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn a_missing_residents_group_or_nobody_living_here_removes_nobody() {
+    let rules = with_subtenants();
+    let (ctx, _) = context(State::default());
+    let t0 = SystemTime::now();
+    // eve moved out, ana still lives here: eve would leave…
+    let moved = || {
+        vec![
+            R::new("u-eve", "eve").groups(&["former-residents", "kitchen-floor-3"]),
+            R::new("u-ana", "ana"),
+        ]
+    };
+    // …but the subtenants group is missing from the directory (not made yet, a typo)
+    let (mut state, k3, eve_id) = kitchen_with_eve(&rules);
+    for i in 0..3 {
+        let at = t0 + i * 15 * MIN;
+        let mut read = snapshot(moved(), at);
+        read.groups.remove("subtenants");
+        let out = round(&ctx, &mut state, &read, &rules, at);
+        assert!(out.notices.is_empty(), "{out:?}");
+    }
+    assert!(state.is_member(&k3, &eve_id));
+    assert!(state.directory.missing.is_empty() && state.directory.held.is_empty());
+    // with it, she goes
+    for i in 3..5 {
+        let at = t0 + i * 15 * MIN;
+        round(&ctx, &mut state, &snapshot(moved(), at), &rules, at);
+    }
+    assert!(!state.is_member(&k3, &eve_id));
+
+    // nobody in either group (a broken directory): nobody moves out
+    let (mut state, k3, eve_id) = kitchen_with_eve(&rules);
+    for i in 0..3 {
+        let at = t0 + i * 15 * MIN;
+        let read = snapshot(
+            vec![R::new("u-eve", "eve").groups(&["kitchen-floor-3"])],
+            at,
+        );
+        round(&ctx, &mut state, &read, &rules, at);
+    }
+    assert!(state.is_member(&k3, &eve_id));
+    assert!(state.directory.missing.is_empty());
+}
+
+/// Residents (with subtenants) switched on while the subtenants group is not made yet: the quiet
+/// reads then follow no residents rule (nobody could leave for it), so they are no review; once
+/// the group exists, the first departures still wait for an admin.
+#[test]
+fn switched_on_while_a_residents_group_is_missing_the_first_departures_are_still_held() {
+    let (mut state, mia, kitchen, stairs) = mia_and_neighbours();
+    // followed before with residents off
+    state.directory.reviewed = Some(String::new());
+    let rules = with_subtenants();
+    let (ctx, _) = context(State::default());
+    let t0 = SystemTime::now();
+    let read = |at, mia_groups: &[&str], with_subtenants: bool| {
+        let mut dir = neighbours();
+        dir.push(R::new("u-mia", "mia").groups(mia_groups));
+        let mut read = snapshot(dir, at);
+        if !with_subtenants {
+            read.groups.remove("subtenants");
+        }
+        read
+    };
+    // Mia lives here, then moves out; no subtenants group yet: quiet reads, not a review
+    round(
+        &ctx,
+        &mut state,
+        &read(t0, &["residents"], false),
+        &rules,
+        t0,
+    );
+    assert_eq!(person(&state, &mia).directory_id.as_deref(), Some("u-mia"));
+    for i in 1..4 {
+        let at = t0 + i * 15 * MIN;
+        let out = round(
+            &ctx,
+            &mut state,
+            &read(at, &["former-residents"], false),
+            &rules,
+            at,
+        );
+        assert!(out.notices.is_empty(), "{out:?}");
+    }
+    assert_eq!(state.directory.reviewed.as_deref(), Some(""));
+    assert!(state.directory.missing.is_empty());
+    // The group made: her departures are the first ones under these rules, held.
+    let mut notices = Vec::new();
+    for i in 4..6 {
+        let at = t0 + i * 15 * MIN;
+        let out = round(
+            &ctx,
+            &mut state,
+            &read(at, &["former-residents"], true),
+            &rules,
+            at,
+        );
+        notices.extend(out.notices);
+    }
+    assert!(state.is_member(&kitchen, &mia) && state.is_member(&stairs, &mia));
+    assert_eq!(state.directory.held.len(), 2);
+    assert!(
+        notices.iter().any(|n| n.contains("first departures")),
+        "{notices:?}"
+    );
+    assert_eq!(state.directory.reviewed.as_deref(), Some(""));
+}
+
+#[test]
+fn adding_a_residents_group_needs_no_new_review_dropping_one_does() {
+    let residents = rules_of(&["residents"]);
+    let both = with_subtenants();
+    assert!(both.reviewed_by(Some("residents")));
+    assert!(both.reviewed_by(Some("residents,subtenants")));
+    assert!(!residents.reviewed_by(Some("residents,subtenants")));
+    assert!(!residents.reviewed_by(Some("")), "switched on");
+    assert!(!residents.reviewed_by(None));
+    assert!(!rules_of(&["subtenants"]).reviewed_by(Some("residents")));
+    assert!(rules_of(&[]).reviewed_by(Some("")));
+    assert_eq!(both.key(), "residents,subtenants");
+    assert_eq!(residents.key(), "residents");
+
+    // Reviewed under "residents" (a bot before the list), now with subtenants: a resident's
+    // departures are not held, and the new key is remembered.
+    let (mut state, mia, kitchen, _) = mia_and_neighbours();
+    assert_eq!(state.directory.reviewed.as_deref(), Some("residents"));
+    let (ctx, _) = context(State::default());
+    let t0 = SystemTime::now();
+    let read = |at, mia_groups: &[&str]| {
+        let mut dir = neighbours();
+        dir.push(R::new("u-mia", "mia").groups(mia_groups));
+        snapshot(dir, at)
+    };
+    round(&ctx, &mut state, &read(t0, &["residents"]), &both, t0);
+    assert_eq!(
+        state.directory.reviewed.as_deref(),
+        Some("residents,subtenants")
+    );
+    for i in 1..3 {
+        let at = t0 + i * 15 * MIN;
+        round(
+            &ctx,
+            &mut state,
+            &read(at, &["former-residents"]),
+            &both,
+            at,
+        );
+    }
+    assert!(!state.is_member(&kitchen, &mia));
+    assert!(state.directory.held.is_empty());
+
+    // Subtenants dropped again: who would leave for it is held for an admin first.
+    let (mut state, _, kitchen, _) = mia_and_neighbours();
+    state.directory.reviewed = Some(both.key());
+    let sub_in_plan = add(&mut state, "@sub:house.org", Some("u-sub"), &[&kitchen]);
+    let dir = |at| {
+        let mut dir = neighbours();
+        dir.push(R::new("u-mia", "mia"));
+        dir.push(R::new("u-sub", "sub").groups(&["subtenants"]));
+        snapshot(dir, at)
+    };
+    for i in 0..3 {
+        let at = t0 + i * 15 * MIN;
+        round(&ctx, &mut state, &dir(at), &residents, at);
+    }
+    assert!(state.is_member(&kitchen, &sub_in_plan));
+    assert!(state.directory.held.iter().any(|(p, _)| p == &sub_in_plan));
+}
+
 // ── Conflicts and split people ──────────────────────────────────────────────
 
 #[test]
@@ -676,8 +1026,8 @@ fn an_account_two_residents_claim_counts_for_neither() {
     let t0 = SystemTime::now();
     let dir = || {
         vec![
-            R::new("u-a", "a").link("@shared:matrix.org", false),
-            R::new("u-b", "b").link("@shared:matrix.org", false),
+            R::new("u-a", "a").link("@shared:matrix.org"),
+            R::new("u-b", "b").link("@shared:matrix.org"),
         ]
     };
     let read = snapshot(dir(), t0);
@@ -706,7 +1056,7 @@ fn an_account_two_residents_claim_counts_for_neither() {
         told[0]
     );
     let at = t0 + 60 * MIN;
-    let gone = vec![R::new("u-a", "a").link("@shared:matrix.org", false)];
+    let gone = vec![R::new("u-a", "a").link("@shared:matrix.org")];
     assert!(round(&ctx, &mut state, &snapshot(gone, at), &rules(), at)
         .notices
         .is_empty());
@@ -724,7 +1074,7 @@ fn two_people_in_use_for_one_resident_are_not_merged_and_told_once() {
     let two = add(&mut state, "@nick:matrix.org", None, &[&kitchen]);
     let (ctx, _) = context(State::default());
     let t0 = SystemTime::now();
-    let dir = || vec![R::new("u-nick", "nick").link("@nick:matrix.org", false)];
+    let dir = || vec![R::new("u-nick", "nick").link("@nick:matrix.org")];
     let out = round(&ctx, &mut state, &snapshot(dir(), t0), &rules(), t0);
     assert_eq!(out.notices.len(), 1, "{out:?}");
     assert!(out.notices[0].contains("2 people in the plan"));
@@ -753,7 +1103,7 @@ async fn an_admins_linked_account_is_no_admin() {
     state.persons.push(Person::new_matrix("@admin:house.org"));
     let (ctx, _) = context(state);
     *ctx.directory.write().unwrap() = Some(Arc::new(snapshot(
-        vec![R::new("u-admin", "admin").link("@admin:matrix.org", true)],
+        vec![R::new("u-admin", "admin").link("@admin:matrix.org")],
         SystemTime::now(),
     )));
     // The linked account is the admin's person in the plan …
@@ -1110,10 +1460,7 @@ async fn the_first_departures_after_an_upgrade_are_held() {
     // A fresh upgrade where nothing needs to leave: reviewed after two quiet reads.
     let (mut quiet, mia, kitchen, _) = mia_and_neighbours();
     quiet.directory = Default::default();
-    let off = Rules {
-        residents_group: String::new(),
-        ..rules()
-    };
+    let off = rules_of(&[]);
     for i in 0..2 {
         let at = t0 + i * 15 * MIN;
         round(&ctx, &mut quiet, &snapshot(dir(true), at), &off, at);
@@ -1239,10 +1586,7 @@ fn an_empty_or_missing_residents_group_removes_nobody() {
     }
     assert!(ids.iter().all(|p| state.is_member(&kitchen, p)));
     // Not followed at all (`residents_group = ""`).
-    let off = Rules {
-        residents_group: String::new(),
-        ..rules()
-    };
+    let off = rules_of(&[]);
     for i in 6..9 {
         let at = t0 + i * 15 * MIN;
         round(&ctx, &mut state, &snapshot(six_residents(2), at), &off, at);
@@ -1320,7 +1664,7 @@ fn an_old_state_file_loads_unchanged() {
 #[test]
 fn logins_follow_the_directory_id_and_deactivated_people_have_none() {
     let read = people(vec![
-        R::new("u-ana", "ana").link("@ana:matrix.org", true),
+        R::new("u-ana", "ana").link("@ana:matrix.org"),
         R::new("u-bo", "bo").deactivated(),
     ]);
     let all = logins(&read);
@@ -1343,7 +1687,7 @@ fn admins_from_the_directory_groups_follow_them_and_lapse_with_an_old_read() {
     let reader = ctx.config.directory.as_ref().unwrap().reader.clone();
     let groups = ["it-admins".to_owned()];
     let now = SystemTime::now();
-    let gina = || R::new("g", "gina").link("@gina:matrix.org", true);
+    let gina = || R::new("g", "gina").link("@gina:matrix.org");
     ctx.admin_users.follow(
         &snapshot(vec![gina().groups(&["residents", "it-admins"])], now),
         &reader,

@@ -535,9 +535,11 @@ pub struct DirectoryMemory {
     /// once.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub told: BTreeSet<String>,
-    /// The `residents_group` ("" for none) under which the departures were reviewed: two
-    /// reads in a row with nothing to leave, or an admin's `!directory confirm`. Until then (a
-    /// fresh upgrade, residents switched on or changed) every departure is held for a confirm.
+    /// The `residents_group` groups ("" for none, one name, or the names joined by commas:
+    /// `reconcile::Rules::key`) under which the departures were reviewed: two reads in a row
+    /// with nothing to leave, or an admin's `!directory confirm`. Until then (a fresh upgrade,
+    /// residents switched on, a group dropped) every departure is held for a confirm; more
+    /// groups than reviewed need no new review (`Rules::reviewed_by`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed: Option<String>,
 }

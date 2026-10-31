@@ -6401,12 +6401,9 @@ async fn another_account_of_a_resident_acts_as_them_but_an_admins_is_no_admin() 
         accounts: vec![house.clone(), id(other)],
         groups: Default::default(),
         house: Some(house),
-        links: vec![Link {
-            id: id(other),
-            by_admin: true,
-            verified: false,
-        }],
+        links: vec![Link { id: id(other) }],
         choice: Choice::None,
+        stay_until: None,
     };
     let mut state = State::default();
     state.persons.push(Person::new_matrix("@anna:example.org"));

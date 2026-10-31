@@ -209,7 +209,7 @@ stay *nobody assigned*: visible in the plan, fillable with `!plan assign`.
 Some places are everyone's: the staircases. `!groups house <group> on` makes
 a group **house-wide**: every resident is in it, whatever floor or corridor
 they live on, and the bot keeps it so. A resident is anyone in at least one
-other group (a paused one too). Joining a first group puts them on the
+other group (a paused one too; a subtenant in their kitchen's group as well). Joining a first group puts them on the
 staircase as well, right away. Leaving their last one takes them off it
 within half an hour (their turns handed on), once a staircase turn of the
 running week is done or over: someone moving floors (out of one group, into
@@ -302,8 +302,8 @@ who lives here, their Matrix accounts and their groups; the plan keeps only
 its own history.
 
 **One person per resident.** A resident's recognised accounts are their house
-account (`@<login>:<server_name>`), the full Matrix IDs an admin entered
-(`matrix_ids`) and the ones they proved themselves (`matrix_verified`).
+account (`@<login>:<server_name>`) and their linked accounts (`matrix_ids`,
+full Matrix IDs an admin entered or they proved themselves with a link code).
 Commands, reactions and undos from any of them count as the same person in
 the plan: no second person, no second place in a rotation. The plan finds its
 person for a resident by the directory id (Authentik's `uuid`) once it has
@@ -314,15 +314,22 @@ looked up: their person is used if there is one.
 
 **The address.** Mentions, reminders and turn notices go to the person's
 address in the plan. Once the resident chooses an account for the house
-(`matrix_preferred`: their house account or one they proved), the address
+(`matrix_preferred`: their house account or one of their links), the address
 moves there (`person_matrix_linked` in the log); private chats the bot opened
 for an older account keep working, a chat with any recognised account counts
 (each account in one must itself be in the cleaning room, see Private chats).
 Not chosen, or a choice that can't be used: the address stays where it is.
 
-**Who leaves.** Someone in the plan the bot has linked who is no longer in
-`residents_group` (off unless named; in the house `residents`: moved out to
-`former-residents`, deactivated, or deleted) leaves every cleaning group once two good reads in a
+**Who lives here.** `residents_group` names the directory groups of everyone
+who lives here, one name or a list: in the house `["residents", "subtenants"]`
+(full members, and people who live here for a while with a kitchen of their
+own; house-infra docs/HOUSE-DIRECTORY.md). Living here is being in ANY of them.
+An older config with one name (`residents_group = "residents"`) still works;
+`""` or `[]` is off.
+
+**Who leaves.** Someone in the plan the bot has linked who is in none of the
+`residents_group` groups (off unless named; moved out to `former-residents`,
+deactivated, or deleted) leaves every cleaning group once two good reads in a
 row say so, the way `!member remove` does it: this week's turn stays, later
 ones are handed on, completions, statistics and the log stay. The admins get
 one message per person. Someone in the plan without a directory id (a name
@@ -331,8 +338,9 @@ Switch `residents_group` on once the first reads have linked everyone (and
 the first departures are held anyway, see Guards).
 
 **Kitchens.** `!groups directory <group> kitchen-floor-1` makes a group
-follow a group of the directory: its members (who are residents, when
-`residents_group` is named) join it the way `!member add` does, someone not in the plan yet is added with their
+follow a group of the directory: its members (who live here, when
+`residents_group` is named: a subtenant of kitchen 3 joins kitchen 3 like a
+resident) join it the way `!member add` does, someone not in the plan yet is added with their
 chosen account, or with their house account when they haven't chosen;
 someone no longer in it leaves after two reads, as above. Nobody joins or
 leaves such a group with `!join`, `!leave` or a selector (an admin's `!member
@@ -342,8 +350,10 @@ joins group 3 within 15 minutes, leaves group 1 15 minutes later.
 
 **Guards.** A read that failed, or a last good read older than the
 directory's `stale_after` (60 min), changes nothing (the health check shows
-the failing reads). A group the directory doesn't have (a typo, a rename) and
-an empty residents group remove nobody. More departures from one group in
+the failing reads). A group the directory doesn't have (a typo, a rename;
+also any one of the `residents_group` groups) and residents groups with nobody
+in any of them remove nobody (one of them may be empty: nobody subletting
+now). More departures from one group in
 one round than `max(2, 20 %)` of its people are held: nobody leaves that
 group (other groups' departures within their limits go; someone moving out
 counts in each group they leave), the admins are told once, with the held
@@ -351,9 +361,13 @@ departures' digest (8 hex digits), and `!directory confirm <digest>` lets
 exactly those go if the directory still says so, answering with who left
 what; another digest, or none, does nothing and shows what is held. The
 first departures after following began (nothing remembered yet: the
-upgrade, or `residents_group` switched on or changed) are all held that way,
+upgrade, or `residents_group` switched on or a group taken out of it; adding a
+group, such as `subtenants`, lets nobody more leave and needs no new review)
+are all held that way,
 however few, until an admin confirms them or two reads in a row ask for no
-departure at all. An account two residents claim counts for neither, and
+departure at all (reads while a residents group is missing or all of them are
+empty count for neither: they ask nobody to move out, so they say nothing
+about who has). An account two residents claim counts for neither, and
 the admins hear of it once. `!directory` shows what the bot follows and what
 is held. The memory between two reads is in `state.json`, so a restart in
 between neither forgets nor repeats a departure.
@@ -516,7 +530,7 @@ else German (`src/lang.rs`, with mxbot-common's `web::lang`).
 enabled        = true
 bind_addr      = "0.0.0.0:8081"
 public_url     = "https://putzplan.example.org"
-allowed_groups = ["residents"]
+allowed_groups = ["residents"]   # in the house: who lives here, ["residents", "subtenants"] (and the admins' groups)
 # home_url = "https://example.org/"  # the house bar's link home (default: public_url's parent domain)
 # home_name = "Example"
 ```

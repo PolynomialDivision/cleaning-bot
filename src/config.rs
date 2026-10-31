@@ -35,31 +35,69 @@ pub struct Config {
 #[derive(Clone, Debug)]
 pub struct DirectorySection {
     pub reader: DirectoryConfig,
-    /// Who lives here (`residents_group`, default "": off): a person in the plan who is no
-    /// longer in it leaves every cleaning group (src/directory/reconcile.rs). Empty: nobody
-    /// leaves for not living here; switched on by naming the group, once the first reads have
-    /// linked everyone (the first departures are held for an admin anyway).
-    pub residents_group: String,
+    /// Who lives here (`residents_group`: one group name or a list of them, default "": off):
+    /// a person in the plan who is in none of them leaves every cleaning group
+    /// (src/directory/reconcile.rs). Living here is being in ANY of them: full members
+    /// (`residents`) and people who live here for a while (`subtenants`) alike. Empty ("" or
+    /// []): nobody leaves for not living here; switched on by naming the groups, once the first
+    /// reads have linked everyone (the first departures are held for an admin anyway).
+    /// Trimmed, sorted, each once.
+    pub residents_groups: Vec<String>,
+}
+
+impl DirectorySection {
+    /// Whether `person` lives here by these rules: in one of the groups. True for everyone
+    /// when no group is named (nobody leaves for it, every kitchen member joins).
+    pub fn lives_here(groups: &[String], person: &mxbot_common::directory::Person) -> bool {
+        groups.is_empty() || groups.iter().any(|g| person.groups.contains(g))
+    }
+}
+
+/// `residents_group` as it is written: one name, or a list of them.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// The groups of `residents_group`: trimmed, empty names dropped, sorted, each once. A name with
+/// a comma is refused: the groups are remembered as one comma-separated key
+/// (`DirectoryMemory::reviewed`).
+fn residents_groups(value: toml::Value) -> Result<Vec<String>, String> {
+    const WHAT: &str = "[directory] residents_group: a group name or a list of group names";
+    let names = match OneOrMany::deserialize(value).map_err(|_| WHAT.to_owned())? {
+        OneOrMany::One(name) => vec![name],
+        OneOrMany::Many(names) => names,
+    };
+    let mut out: Vec<String> = names
+        .iter()
+        .map(|n| n.trim().to_owned())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if let Some(bad) = out.iter().find(|n| n.contains(',')) {
+        return Err(format!(
+            "[directory] residents_group: {bad:?} has a comma (one name per entry)"
+        ));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 impl<'de> Deserialize<'de> for DirectorySection {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let mut table = toml::Table::deserialize(d)?;
-        let residents_group = match table.remove("residents_group") {
-            None => String::new(),
-            Some(toml::Value::String(group)) => group.trim().to_owned(),
-            Some(_) => {
-                return Err(D::Error::custom(
-                    "[directory] residents_group: a group name",
-                ))
-            }
+        let residents_groups = match table.remove("residents_group") {
+            None => Vec::new(),
+            Some(value) => residents_groups(value).map_err(D::Error::custom)?,
         };
         let reader =
             DirectoryConfig::deserialize(toml::Value::Table(table)).map_err(D::Error::custom)?;
         Ok(DirectorySection {
             reader,
-            residents_group,
+            residents_groups,
         })
     }
 }
@@ -307,14 +345,14 @@ mod tests {
             .directory
             .unwrap();
         // Commented out in the example: off.
-        assert_eq!(section.residents_group, "");
+        assert!(section.residents_groups.is_empty());
         let with_residents = directory.replace("# residents_group =", "residents_group =");
         let residents = toml::from_str::<Config>(&with_residents)
             .unwrap()
             .directory
             .unwrap()
-            .residents_group;
-        assert_eq!(residents, "residents");
+            .residents_groups;
+        assert_eq!(residents, ["residents", "subtenants"]);
         let d = section.reader;
         assert_eq!(
             d.provider,
@@ -369,23 +407,31 @@ mod tests {
                 "provider = \"authentik\"\napi_url = \"https://login.example.org/api/v3\"\n{extra}"
             ))
         };
+        let groups = |extra: &str| section(extra).unwrap().residents_groups;
         // Off unless named: an upgrade starts no departures by itself.
-        assert_eq!(section("").unwrap().residents_group, "");
+        assert!(groups("").is_empty());
+        // One name, as before the list (an older config)
+        assert_eq!(groups("residents_group = \" bewohner \""), ["bewohner"]);
+        // A list: living here is being in any of them (sorted, each once, trimmed)
         assert_eq!(
-            section("residents_group = \"bewohner\"")
-                .unwrap()
-                .residents_group,
-            "bewohner"
+            groups("residents_group = [\"subtenants\", \" residents\", \"residents\", \"\"]"),
+            ["residents", "subtenants"]
         );
         // Empty: nobody leaves because of the directory.
-        assert_eq!(
-            section("residents_group = \"\"").unwrap().residents_group,
-            ""
-        );
+        assert!(groups("residents_group = \"\"").is_empty());
+        assert!(groups("residents_group = []").is_empty());
+        assert!(groups("residents_group = [\" \"]").is_empty());
         let s = section("residents_group = \"r\"\nrefresh_minutes = 5").unwrap();
         assert_eq!(s.reader.refresh_minutes, 5);
-        assert!(section("residents_group = 3").is_err());
-        assert!(section("residents_grup = \"r\"").is_err());
+        for bad in [
+            "residents_group = 3",
+            "residents_group = [\"r\", 3]",
+            "residents_group = { name = \"r\" }",
+            "residents_group = \"residents,subtenants\"",
+            "residents_grup = \"r\"",
+        ] {
+            assert!(section(bad).is_err(), "{bad}");
+        }
     }
 
     fn schedule(extra: &str) -> Result<ScheduleConfig, toml::de::Error> {

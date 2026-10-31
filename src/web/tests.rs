@@ -498,10 +498,9 @@ async fn other_accounts_find_the_person_too() {
         house: Some(UserId::parse("@carol:example.org").unwrap()),
         links: vec![mxbot_common::directory::Link {
             id: UserId::parse("@carol:matrix.org").unwrap(),
-            by_admin: true,
-            verified: false,
         }],
         choice: mxbot_common::directory::Choice::None,
+        stay_until: None,
     };
     let directory = Snapshot {
         people: mxbot_common::directory::People::new(vec![carol]),

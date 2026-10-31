@@ -10,8 +10,8 @@
 //! the login, then `[web] allowed_groups` (empty: nobody).
 //!
 //! Who they are in the plan: their house account (`@<login>:<the bot's server>`,
-//! `mxbot_common::web::house_account`) or one of the accounts an admin entered in the
-//! directory (X-House-Matrix-Ids), each resolved like a Matrix event from it with the bot's
+//! `mxbot_common::web::house_account`) or one of their linked accounts in the directory
+//! (`matrix_ids`, X-House-Matrix-Ids), each resolved like a Matrix event from it with the bot's
 //! last read of the directory (`directory::person_account`: their person by directory id,
 //! else by a recognised account). Someone the plan doesn't know sees every page, just
 //! without "you".

@@ -8,11 +8,13 @@
 //!    the person's Matrix ID moves to it (`PersonMatrixLinked`), unless another person in the
 //!    plan has it (the admins are told once). Not chosen, or chosen wrongly: it stays.
 //! 3. **Join**: a group with a `directory_group` (a kitchen) takes in that group's members
-//!    (who are residents too, when `residents_group` is set), the way an admin's
+//!    (who live here too, when `residents_group` is set: in one of its groups, full members
+//!    and subtenants alike), the way an admin's
 //!    `!member add` does. Someone not in the plan yet is added by directory id with their
 //!    chosen account, else their house account, as the address.
-//! 4. **Leave**: a linked person who is no longer a resident (moved out, deactivated, gone
-//!    from the directory) leaves every group; one no longer in a group's `directory_group`
+//! 4. **Leave**: a linked person who no longer lives here (in none of `residents_group`'s
+//!    groups: moved out, deactivated, gone from the directory) leaves every group; one no
+//!    longer in a group's `directory_group`
 //!    leaves that group. Only after two good reads in a row ask for it, the way an admin's
 //!    `!member remove` does (`apply_group_departure`): this week's turn stays, later ones are
 //!    handed on, completions and statistics are kept. One admin notice per person.
@@ -22,14 +24,16 @@
 //!
 //! Guards: a read older than the directory's `stale_after` changes nothing, a failed read
 //! changes nothing (it never gets here), a group the directory doesn't have is left alone,
-//! an empty residents group removes nobody, and more departures from one group in one round
+//! residents groups of which one is missing, or that have nobody in any of them, remove nobody
+//! (one of them may be empty: nobody subletting now), and more departures from one group in one round
 //! than `max(2, 20 % of its people)` ([`mass_limit`]) hold that group's departures (a
 //! resident moving out counts in each group they leave): they don't leave, the admins are
 //! told once, and `!directory confirm <digest>` lets exactly the held ones go if the
 //! directory still says so (the digest is in the notice and in `!directory`). The first
 //! departures after following began (a fresh upgrade, or `residents_group` switched on or
-//! changed: `DirectoryMemory::reviewed`) are all held that way, however few. People in the
-//! plan without a directory id are never touched.
+//! changed so that someone more may leave: `DirectoryMemory::reviewed`, [`Rules::reviewed_by`])
+//! are all held that way, however few. People in the plan without a directory id are never
+//! touched.
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime},
@@ -59,8 +63,9 @@ use crate::{
 /// What a round follows.
 #[derive(Clone, Debug)]
 pub struct Rules {
-    /// Empty: nobody leaves for not being a resident.
-    pub residents_group: String,
+    /// Who lives here: in any of these (sorted, each once). Empty: nobody leaves for not
+    /// living here.
+    pub residents_groups: Vec<String>,
     /// A read older than this changes nothing.
     pub stale_after: Duration,
 }
@@ -68,10 +73,48 @@ pub struct Rules {
 impl Rules {
     pub fn of(cfg: &DirectorySection) -> Rules {
         Rules {
-            residents_group: cfg.residents_group.clone(),
+            residents_groups: cfg.residents_groups.clone(),
             stale_after: cfg.reader.stale_after(),
         }
     }
+
+    /// The rules as `DirectoryMemory::reviewed` keeps them: the groups joined by commas ("" for
+    /// none; one group is just its name, as before the list).
+    pub fn key(&self) -> String {
+        self.residents_groups.join(",")
+    }
+
+    /// Whether the departures were reviewed under `reviewed` (a [`Rules::key`]) for these rules:
+    /// the same groups, or more of them. Adding a group (subtenants) lets nobody more leave,
+    /// so it needs no new review; dropping one, or switching it on (from none), does.
+    pub fn reviewed_by(&self, reviewed: Option<&str>) -> bool {
+        let Some(reviewed) = reviewed else {
+            return false;
+        };
+        if reviewed == self.key() {
+            return true;
+        }
+        let before: Vec<&str> = reviewed.split(',').filter(|g| !g.is_empty()).collect();
+        !before.is_empty()
+            && before
+                .iter()
+                .all(|g| self.residents_groups.iter().any(|now| now == g))
+    }
+
+    /// Whether `resident` lives here by these rules (any of the groups; anyone without groups
+    /// named).
+    pub fn lives_here(&self, resident: &Resident) -> bool {
+        DirectorySection::lives_here(&self.residents_groups, resident)
+    }
+}
+
+/// The groups as the admins read them: «residents» or «residents», «subtenants».
+fn quoted(groups: &[String]) -> String {
+    groups
+        .iter()
+        .map(|g| format!("«{g}»"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Why someone leaves a group.
@@ -79,8 +122,8 @@ impl Rules {
 pub enum Why {
     Gone,
     Deactivated,
-    /// No longer in the residents group (moved out).
-    NotResident(String),
+    /// In none of the residents groups any more (moved out).
+    NotResident(Vec<String>),
     /// No longer in the group's `directory_group` (another kitchen).
     NotInGroup(String),
 }
@@ -90,7 +133,12 @@ impl Why {
         match self {
             Why::Gone => "is no longer in the directory".into(),
             Why::Deactivated => "was deactivated in the directory".into(),
-            Why::NotResident(group) => format!("is no longer in «{group}» (moved out)"),
+            Why::NotResident(groups) if groups.len() == 1 => {
+                format!("is no longer in {} (moved out)", quoted(groups))
+            }
+            Why::NotResident(groups) => {
+                format!("is in none of {} any more (moved out)", quoted(groups))
+            }
             Why::NotInGroup(group) => format!("is no longer in «{group}»"),
         }
     }
@@ -147,39 +195,72 @@ fn is_in(resident: Option<&Resident>, group: &str) -> bool {
     resident.is_some_and(|r| r.active && r.groups.contains(group))
 }
 
-/// Every departure the directory asks for now, with why: a linked person who is no longer a
-/// resident leaves every group they are in; one no longer in a group's `directory_group`
-/// leaves that group.
+/// Whether the residents groups may be followed in `snapshot`: named, every one of them known
+/// to the directory (a missing one is a typo or a broken directory, and its people would look
+/// moved out), and someone in one of them (a directory that has nobody living here is broken).
+/// One of them may be empty: nobody subletting now is normal.
+fn follow_residents(snapshot: &Snapshot, rules: &Rules) -> bool {
+    let groups = &rules.residents_groups;
+    if groups.is_empty() {
+        return false;
+    }
+    let missing: Vec<&String> = groups.iter().filter(|g| !snapshot.has_group(g)).collect();
+    if !missing.is_empty() {
+        warn!(
+            groups = %quoted(groups),
+            missing = %missing.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", "),
+            "Directory: a residents group is missing; nobody leaves for it"
+        );
+        return false;
+    }
+    if !groups
+        .iter()
+        .any(|g| snapshot.people.members(g).next().is_some())
+    {
+        warn!(groups = %quoted(groups), "Directory: nobody is in the residents groups; nobody leaves for them");
+        return false;
+    }
+    true
+}
+
+/// Every departure the directory asks for now, with why: a linked person who no longer lives
+/// here (in none of the residents groups) leaves every group they are in; one no longer in a
+/// group's `directory_group` leaves that group.
 pub fn wanted_departures(
     state: &State,
     snapshot: &Snapshot,
     rules: &Rules,
 ) -> BTreeMap<DirectoryDeparture, Why> {
+    departures(state, snapshot, rules).0
+}
+
+/// [`wanted_departures`], and whether they are all these rules ask for: false while the
+/// residents groups are named but cannot be followed ([`follow_residents`]: one missing, or
+/// nobody in them), so nobody leaves for not living here yet. Departures asked for that way
+/// are no review of these rules (`DirectoryMemory::reviewed`): the first ones once the groups
+/// can be followed still wait for an admin.
+fn departures(
+    state: &State,
+    snapshot: &Snapshot,
+    rules: &Rules,
+) -> (BTreeMap<DirectoryDeparture, Why>, bool) {
     let people = &snapshot.people;
     let mut out = BTreeMap::new();
-    let residents = rules.residents_group.as_str();
-    let follow_residents = !residents.is_empty()
-        && snapshot.has_group(residents)
-        && people.members(residents).next().is_some();
-    if !residents.is_empty() && !follow_residents {
-        warn!(
-            group = residents,
-            "Directory: the residents group is missing or empty; nobody leaves for it"
-        );
-    }
-    if follow_residents {
+    let follow = follow_residents(snapshot, rules);
+    let complete = follow || rules.residents_groups.is_empty();
+    if follow {
         for person in state.persons.iter().filter(|p| p.active) {
             let Some(id) = person.directory_id.as_deref() else {
                 continue;
             };
             let resident = people.by_id(id);
-            if is_in(resident, residents) {
+            if resident.is_some_and(|r| r.active && rules.lives_here(r)) {
                 continue;
             }
             let why = match resident {
                 None => Why::Gone,
                 Some(r) if !r.active => Why::Deactivated,
-                Some(_) => Why::NotResident(residents.to_owned()),
+                Some(_) => Why::NotResident(rules.residents_groups.clone()),
             };
             for group in state
                 .cleaning_groups
@@ -211,7 +292,7 @@ pub fn wanted_departures(
             }
         }
     }
-    out
+    (out, complete)
 }
 
 /// The people `departures` concern.
@@ -240,7 +321,7 @@ pub fn round(
     joins(ctx, state, snapshot, rules, &mut out);
 
     // Departures: what two good reads in a row ask for.
-    let wanted = wanted_departures(state, snapshot, rules);
+    let (wanted, complete) = departures(state, snapshot, rules);
     let now_missing: BTreeSet<DirectoryDeparture> = wanted.keys().cloned().collect();
     let read_at = DateTime::<Utc>::from(snapshot.read_at);
     let in_a_row = state.directory.missing_at.is_some_and(|before| {
@@ -260,12 +341,15 @@ pub fn round(
     state.directory.missing = now_missing;
     state.directory.missing_at = Some(read_at);
 
-    // Not reviewed yet under these rules (a fresh upgrade, residents switched on): every
-    // departure waits for an admin. A read in a row with the one before that asks for no
-    // departure at all (the plan and the directory agree): reviewed.
-    let first = state.directory.reviewed.as_deref() != Some(rules.residents_group.as_str());
-    if first && in_a_row && wanted.is_empty() {
-        state.directory.reviewed = Some(rules.residents_group.clone());
+    // Not reviewed yet under these rules (a fresh upgrade, residents switched on, a group
+    // dropped): every departure waits for an admin. A read in a row with the one before that
+    // asks for no departure at all (the plan and the directory agree): reviewed, but only when
+    // the residents rule was followed in it (`complete`; a residents group missing or empty
+    // asks for nobody's departure, which says nothing about who has moved out). Reviewed under
+    // fewer groups: still reviewed, and remembered under these.
+    let first = !rules.reviewed_by(state.directory.reviewed.as_deref());
+    if (first && in_a_row && wanted.is_empty() && complete) || !first {
+        state.directory.reviewed = Some(rules.key());
     }
     let over = over_limit(state, &confirmed);
     let held: BTreeSet<DirectoryDeparture> = confirmed
@@ -421,7 +505,6 @@ fn addresses(state: &mut State, people: &People, told: &mut BTreeSet<String>, ou
 /// Step 3: the members of each followed directory group join its cleaning group.
 fn joins(ctx: &BotContext, state: &mut State, snapshot: &Snapshot, rules: &Rules, out: &mut Round) {
     let people = &snapshot.people;
-    let residents = rules.residents_group.as_str();
     let followed: Vec<(GroupId, String)> = state
         .cleaning_groups
         .iter()
@@ -432,7 +515,7 @@ fn joins(ctx: &BotContext, state: &mut State, snapshot: &Snapshot, rules: &Rules
     for (group_id, wanted) in followed {
         let members: Vec<&Resident> = people
             .members(&wanted)
-            .filter(|r| residents.is_empty() || r.groups.contains(residents))
+            .filter(|r| rules.lives_here(r))
             .collect();
         for resident in members {
             let Some(person_id) = person_for(state, people, resident) else {
@@ -648,7 +731,7 @@ fn held_notice(
     )
 }
 
-/// One line per departure: "• Mia (@mia:…): Kitchen 1 (is no longer in «residents»)".
+/// One line per departure: "• Mia (@mia:…): Kitchen 1 (is no longer in «residents» (moved out))".
 fn describe(
     state: &State,
     departures: &BTreeSet<DirectoryDeparture>,
@@ -787,12 +870,16 @@ async fn status(ctx: &BotContext, cfg: &DirectorySection, snapshot: Option<&Snap
         ),
         None => "📇 The directory hasn't been read yet.".into(),
     }];
-    lines.push(if cfg.residents_group.is_empty() {
-        "Residents: not followed.".into()
-    } else {
-        format!("Who leaves «{}» leaves every group.", cfg.residents_group)
+    let rules = Rules::of(cfg);
+    lines.push(match rules.residents_groups.as_slice() {
+        [] => "Residents: not followed.".into(),
+        [one] => format!("Who leaves «{one}» leaves every group."),
+        groups => format!(
+            "Who lives here: anyone in {}. Who is in none of them leaves every group.",
+            quoted(groups)
+        ),
     });
-    if state.directory.reviewed.as_deref() != Some(cfg.residents_group.as_str()) {
+    if !rules.reviewed_by(state.directory.reviewed.as_deref()) {
         lines.push("The first departures wait for !directory confirm.".into());
     }
     for g in state.cleaning_groups.iter() {
@@ -854,7 +941,7 @@ pub async fn confirm_held(
             "⏳ The last read of the directory is too old. Try again after the next one.".into(),
         );
     }
-    let wanted = wanted_departures(&state, snapshot, rules);
+    let (wanted, complete) = departures(&state, snapshot, rules);
     let held = state.directory.held.clone();
     if !held.iter().all(|d| wanted.contains_key(d)) {
         return Ok(
@@ -868,8 +955,11 @@ pub async fn confirm_held(
         state.directory.missing.remove(d);
     }
     state.directory.held.clear();
-    // An admin looked at the first departures: from now on the limits alone hold them.
-    state.directory.reviewed = Some(rules.residents_group.clone());
+    // An admin looked at the first departures: from now on the limits alone hold them. Not
+    // while the residents groups cannot be followed: who moved out was not among them.
+    if complete {
+        state.directory.reviewed = Some(rules.key());
+    }
     state.save(&ctx.state_path).await?;
     Ok(if notices.is_empty() {
         format!("✅ Confirmed {held_now}; they had left already:\n{listed}")
