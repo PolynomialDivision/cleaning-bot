@@ -107,9 +107,10 @@ pub struct Wanted {
     pub events: BTreeMap<String, Event>,
 }
 
-/// Every resident's calendar as it should be, by login: every active person in the plan with a
-/// Matrix account the directory knows (`logins`) and something to do with the plan (a group,
-/// a turn, a completion), with their turns of the next `weeks` weeks that end `today` or later.
+/// Every resident's calendar as it should be, by login: every active person in the plan the
+/// directory knows (`logins`: by directory id, else by a recognised account; deactivated people
+/// and accounts in conflict have none) and something to do with the plan (a group, a turn, a
+/// completion), with their turns of the next `weeks` weeks that end `today` or later.
 pub fn wanted(
     state: &State,
     logins: &Logins,
@@ -119,12 +120,7 @@ pub fn wanted(
     let snapshot = build_schedule(state, weeks);
     let mut out: BTreeMap<String, Wanted> = BTreeMap::new();
     for person in state.persons.iter().filter(|p| p.active) {
-        let Some(login) = person
-            .matrix_id
-            .as_deref()
-            .and_then(|m| OwnedUserId::try_from(m).ok())
-            .and_then(|m| logins.get(&m))
-        else {
+        let Some(login) = logins.of(person) else {
             continue;
         };
         if !crate::commands::person_has_activity(state, &person.id) {
@@ -570,6 +566,8 @@ pub async fn run(
         });
     let mut next_full = tokio::time::Instant::now();
     let mut seen: Option<(String, NaiveDate, usize)> = None;
+    // a look every TICK; ten minutes without a healthy one is late
+    alive.expect_every(std::time::Duration::from_secs(10 * 60));
     loop {
         alive.tick();
         let logins = ctx.logins.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -598,6 +596,14 @@ pub async fn run(
                 if let Err(e) = mxbot_common::persist::save_json_atomic(&cache_path, &cache).await {
                     warn!("Calendars: saving {}: {e:#}", cache_path.display());
                 }
+                // a count only: the errors name residents
+                if !outcome.errors.is_empty() {
+                    alive.failed(format!("{} calendar step(s) failed", outcome.errors.len()));
+                } else if outcome.written + outcome.deleted > 0 || !outcome.removed.is_empty() {
+                    alive.ok();
+                } else {
+                    alive.idle();
+                }
                 if outcome.errors.is_empty() {
                     seen = Some(key);
                     if full {
@@ -611,7 +617,11 @@ pub async fn run(
                 if let Err(e) = mxbot_common::persist::save_json_atomic(&cache_path, &cache).await {
                     warn!("Calendars: saving {}: {e:#}", cache_path.display());
                 }
+            } else {
+                alive.idle();
             }
+        } else {
+            alive.idle();
         }
         tokio::time::sleep(TICK).await;
     }
@@ -1155,7 +1165,7 @@ mod tests {
             .insert("personal".into(), Default::default());
 
         // ben is gone from the directory: a quick round deletes nothing
-        logins.retain(|_, l| l != "ben");
+        logins.retain(|l| l != "ben");
         let want = wanted(&state, &logins, 6, today);
         let outcome = reconcile(&nc, &mut cache, &want, false, NOW).await;
         assert!(outcome.removed.is_empty());

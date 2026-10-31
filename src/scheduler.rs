@@ -52,10 +52,15 @@ async fn seed_buttons(room: &Room, event_id: &OwnedEventId) {
 
 pub async fn run(ctx: BotContext, client: Client, alive: Alive) {
     info!("Scheduler started");
+    alive.expect_every(std::time::Duration::from_secs(30 * 60));
     loop {
         alive.tick();
-        if let Err(e) = tick(&ctx, &client).await {
-            error!("Scheduler error: {e}");
+        match tick(&ctx, &client).await {
+            Ok(()) => alive.ok(),
+            Err(e) => {
+                error!("Scheduler error: {e}");
+                alive.failed("scheduler round failed");
+            }
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
     }
@@ -691,6 +696,7 @@ pub(crate) fn reminder_text(
                 display_name: person.name.clone(),
                 active: true,
                 matrix_id: person.mxid.clone(),
+                directory_id: None,
             });
             done.push(format!("{link} ({})", what(a)));
         } else {

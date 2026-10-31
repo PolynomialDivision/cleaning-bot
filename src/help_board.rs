@@ -191,16 +191,22 @@ fn answer_content(board: &OwnedEventId, user: &UserId, text: &str) -> RoomMessag
 /// The verified private chat with `user`, if there is one: one the bot
 /// opened for them, or another direct chat: either only if it passes the
 /// `private` check right now.
+/// One the bot opened for another account of theirs counts too (their address moved to the
+/// account they chose, `directory`): it stays theirs.
 pub async fn private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId) -> Option<Room> {
-    let known = ctx
-        .state
-        .lock()
-        .await
-        .private_chats
-        .get(user.as_str())
-        .and_then(|chat| OwnedRoomId::try_from(chat.room_id.as_str()).ok())
-        .and_then(|id| client.get_room(&id));
-    for room in known.into_iter().chain(client.get_dm_rooms(user)) {
+    let mut accounts = vec![user.clone()];
+    accounts.extend(ctx.recognised(user).into_iter().filter(|a| a != user));
+    let known: Vec<Room> = {
+        let state = ctx.state.lock().await;
+        accounts
+            .iter()
+            .filter_map(|a| state.private_chats.get(a.as_str()))
+            .filter_map(|chat| OwnedRoomId::try_from(chat.room_id.as_str()).ok())
+            .filter_map(|id| client.get_room(&id))
+            .collect()
+    };
+    let direct = accounts.iter().flat_map(|a| client.get_dm_rooms(a));
+    for room in known.into_iter().chain(direct) {
         if crate::private::authorized(ctx, &room, user).await {
             return Some(room);
         }

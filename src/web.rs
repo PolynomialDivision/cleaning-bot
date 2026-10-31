@@ -11,8 +11,9 @@
 //!
 //! Who they are in the plan: their house account (`@<login>:<the bot's server>`,
 //! `mxbot_common::web::house_account`) or one of the accounts an admin entered in the
-//! directory (X-House-Matrix-Ids), each resolved like a Matrix event from it
-//! (`directory::person_account`). Someone the plan doesn't know sees every page, just
+//! directory (X-House-Matrix-Ids), each resolved like a Matrix event from it with the bot's
+//! last read of the directory (`directory::person_account`: their person by directory id,
+//! else by a recognised account). Someone the plan doesn't know sees every page, just
 //! without "you".
 //!
 //! Every page is built from one schedule snapshot (`schedule::build_schedule_from`), taken
@@ -21,7 +22,7 @@
 //! be changed here: ✅, !sos and swaps stay in Matrix. Pages are never cached or indexed,
 //! load nothing from elsewhere and need no script; names are escaped.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -43,7 +44,7 @@ use tracing::info;
 
 use crate::{
     config::WebConfig,
-    directory::{self, Accounts},
+    directory::{self, Shared},
     schedule::build_schedule_from,
     state::{self, State},
 };
@@ -95,8 +96,8 @@ impl Settings {
 
 pub struct Web {
     state: Arc<Mutex<State>>,
-    /// Residents with more than one Matrix account (`BotContext::accounts`).
-    accounts: Arc<RwLock<Accounts>>,
+    /// The bot's last read of the house's directory (`BotContext::directory`).
+    directory: Shared,
     settings: Settings,
     /// The proxy's headers: the secret, the login, the groups, the accounts.
     auth: ForwardAuth,
@@ -115,7 +116,7 @@ impl Web {
     /// `bot_user_id`: the bot's own Matrix ID, whose server the house accounts are on.
     pub fn new(
         state: Arc<Mutex<State>>,
-        accounts: Arc<RwLock<Accounts>>,
+        directory: Shared,
         mut settings: Settings,
         bot_user_id: &str,
     ) -> Result<Web> {
@@ -140,7 +141,7 @@ impl Web {
         );
         Ok(Web {
             state,
-            accounts,
+            directory,
             settings,
             auth,
             home,
@@ -479,16 +480,13 @@ impl Web {
     /// The plan of `weeks` weeks from this one, for `visitor`. The snapshot, the groups and
     /// who the visitor is are all taken under one lock of the state; rendering comes after.
     async fn plan(&self, visitor: &Visitor, weeks: usize) -> Plan {
-        let accounts = self
-            .accounts
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let snapshot = directory::read(&self.directory);
+        let people = snapshot.as_deref().map(|s| &s.people);
         let state = self.state.lock().await;
         let today = state::today();
         let week = state::current_iso_week();
         let me = visitor.accounts.iter().find_map(|account| {
-            let known = directory::person_account(&accounts, &state, account);
+            let known = directory::person_account(people, &state, account);
             state
                 .person_by_matrix_id(known.as_str())
                 .filter(|p| p.active)

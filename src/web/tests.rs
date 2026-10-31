@@ -13,6 +13,7 @@ use crate::{
     rhythm::Rhythm,
     schedule::AssignmentInstance,
 };
+use mxbot_common::directory::Snapshot;
 
 const SECRET: &str = "a-test-proxy-secret-of-at-least-32-chars";
 const EVE: &str = "<b>&\"";
@@ -107,18 +108,18 @@ struct Site {
 
 impl Site {
     fn new() -> Site {
-        Site::with(house(), Accounts::default())
+        Site::with(house(), None)
     }
 
-    fn with(state: State, accounts: Accounts) -> Site {
-        Site::configured(state, accounts, false)
+    fn with(state: State, directory: Option<Snapshot>) -> Site {
+        Site::configured(state, directory, false)
     }
 
     /// `guests`: the proxy asks for the login only from outside the house.
-    fn configured(state: State, accounts: Accounts, guests: bool) -> Site {
+    fn configured(state: State, directory: Option<Snapshot>, guests: bool) -> Site {
         let web = Web::new(
             Arc::new(Mutex::new(state)),
-            Arc::new(RwLock::new(accounts)),
+            Arc::new(std::sync::RwLock::new(directory.map(Arc::new))),
             Settings {
                 bind_addr: "127.0.0.1:0".into(),
                 public_url: "https://putzplan.example.org".into(),
@@ -287,7 +288,7 @@ async fn in_the_house_a_guest_sees_the_plan_without_logging_in() {
     let (status, ..) = Site::new().send(guest("/", SECRET)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let site = Site::configured(house(), Accounts::default(), true);
+    let site = Site::configured(house(), None, true);
     let (status, _, week) = site.send(guest("/", SECRET)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
@@ -327,7 +328,7 @@ async fn in_the_house_a_guest_sees_the_plan_without_logging_in() {
 
 #[tokio::test]
 async fn back_from_the_login_the_visitor_goes_on_to_their_turns() {
-    let site = Site::configured(house(), Accounts::default(), true);
+    let site = Site::configured(house(), None, true);
     let login = |path: &str, user: Option<&str>| {
         let mut req = Request::get(path).header(PROXY_SECRET_HEADER, SECRET);
         if let Some(user) = user {
@@ -484,11 +485,30 @@ async fn other_accounts_find_the_person_too() {
     assert!(!page.contains("can&#39;t find you"), "{page}");
     assert!(page.contains("class=\"h-card duty-card mine\""));
     // Carol's house account is linked to her plan account (`directory::person_account`).
-    let (accounts, _) = Accounts::new(vec![vec![
-        UserId::parse("@carol:example.org").unwrap(),
-        UserId::parse("@carol:matrix.org").unwrap(),
-    ]]);
-    let site = Site::with(house(), accounts);
+    let carol = mxbot_common::directory::Person {
+        id: "u-carol".into(),
+        username: "carol".into(),
+        name: String::new(),
+        active: true,
+        accounts: vec![
+            UserId::parse("@carol:example.org").unwrap(),
+            UserId::parse("@carol:matrix.org").unwrap(),
+        ],
+        groups: ["residents".to_owned()].into(),
+        house: Some(UserId::parse("@carol:example.org").unwrap()),
+        links: vec![mxbot_common::directory::Link {
+            id: UserId::parse("@carol:matrix.org").unwrap(),
+            by_admin: true,
+            verified: false,
+        }],
+        choice: mxbot_common::directory::Choice::None,
+    };
+    let directory = Snapshot {
+        people: mxbot_common::directory::People::new(vec![carol]),
+        groups: Default::default(),
+        read_at: std::time::SystemTime::now(),
+    };
+    let site = Site::with(house(), Some(directory));
     let (_, page) = site.get("/people", "Carol").await;
     assert!(
         page.contains("<h2>carol <span class=\"you\">you</span></h2>"),
@@ -529,7 +549,7 @@ async fn names_are_escaped_and_no_matrix_id_or_calendar_link_shows() {
     // A display name with markup is plain text in every language too.
     let mut state = house();
     state.persons[0].display_name = "<script>x</script>".into();
-    let site = Site::with(state, Accounts::default());
+    let site = Site::with(state, None);
     let (_, page) = site.get("/people", "dan").await;
     assert!(page.contains("&lt;script&gt;x&lt;/script&gt;") && !page.contains("<script>"));
 }
@@ -724,7 +744,7 @@ fn logins_become_house_accounts_and_the_house_bar_finds_home() {
 fn site_with(allowed_groups: &[&str], guests: bool, secret: &[u8]) -> Result<Site> {
     let web = Web::new(
         Arc::new(Mutex::new(house())),
-        Arc::new(RwLock::new(Accounts::default())),
+        Arc::new(std::sync::RwLock::new(None)),
         Settings {
             bind_addr: "127.0.0.1:0".into(),
             public_url: "https://putzplan.example.org".into(),

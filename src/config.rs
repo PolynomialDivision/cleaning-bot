@@ -18,14 +18,50 @@ pub struct Config {
     #[serde(default)]
     pub security: SecurityConfig,
     pub schedule: ScheduleConfig,
-    /// If set, one resident's Matrix accounts count as one person (src/directory.rs).
-    pub directory: Option<DirectoryConfig>,
+    /// If set, the house's directory says who is who (src/directory.rs): one resident's
+    /// Matrix accounts are one person, and the plan follows who lives here.
+    pub directory: Option<DirectorySection>,
     /// If set (with `[directory]`), every resident with a house account gets their turns in a
     /// Nextcloud calendar of their own (src/calendars.rs).
     pub nextcloud: Option<NextcloudConfig>,
     /// The residents' website (src/web.rs), off unless enabled.
     #[serde(default)]
     pub web: WebConfig,
+}
+
+/// `[directory]`: mxbot-common's reader of the house's directory, plus what this bot follows
+/// in it. Its own keys are taken out before the rest goes to the reader, which refuses keys
+/// it doesn't know.
+#[derive(Clone, Debug)]
+pub struct DirectorySection {
+    pub reader: DirectoryConfig,
+    /// Who lives here (`residents_group`, default "": off): a person in the plan who is no
+    /// longer in it leaves every cleaning group (src/directory/reconcile.rs). Empty: nobody
+    /// leaves for not living here; switched on by naming the group, once the first reads have
+    /// linked everyone (the first departures are held for an admin anyway).
+    pub residents_group: String,
+}
+
+impl<'de> Deserialize<'de> for DirectorySection {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut table = toml::Table::deserialize(d)?;
+        let residents_group = match table.remove("residents_group") {
+            None => String::new(),
+            Some(toml::Value::String(group)) => group.trim().to_owned(),
+            Some(_) => {
+                return Err(D::Error::custom(
+                    "[directory] residents_group: a group name",
+                ))
+            }
+        };
+        let reader =
+            DirectoryConfig::deserialize(toml::Value::Table(table)).map_err(D::Error::custom)?;
+        Ok(DirectorySection {
+            reader,
+            residents_group,
+        })
+    }
 }
 
 /// The website (src/web.rs): the plan in a browser, read only, off unless enabled. It sits
@@ -266,10 +302,20 @@ mod tests {
             .replace("# provider", "provider")
             .replace("# api_url", "api_url")
             .replace("# server_name", "server_name");
-        let d = toml::from_str::<Config>(&directory)
+        let section = toml::from_str::<Config>(&directory)
             .unwrap()
             .directory
             .unwrap();
+        // Commented out in the example: off.
+        assert_eq!(section.residents_group, "");
+        let with_residents = directory.replace("# residents_group =", "residents_group =");
+        let residents = toml::from_str::<Config>(&with_residents)
+            .unwrap()
+            .directory
+            .unwrap()
+            .residents_group;
+        assert_eq!(residents, "residents");
+        let d = section.reader;
         assert_eq!(
             d.provider,
             mxbot_common::directory::DirectoryProvider::Authentik
@@ -314,6 +360,32 @@ mod tests {
         assert_eq!(n.password_env, "CALDAV_PASSWORD");
         assert!(n.account_url.ends_with("/calendars/cleaning-bot/"));
         config.security.validate().unwrap();
+    }
+
+    #[test]
+    fn the_directory_section_takes_the_residents_group_and_refuses_typos() {
+        let section = |extra: &str| {
+            toml::from_str::<DirectorySection>(&format!(
+                "provider = \"authentik\"\napi_url = \"https://login.example.org/api/v3\"\n{extra}"
+            ))
+        };
+        // Off unless named: an upgrade starts no departures by itself.
+        assert_eq!(section("").unwrap().residents_group, "");
+        assert_eq!(
+            section("residents_group = \"bewohner\"")
+                .unwrap()
+                .residents_group,
+            "bewohner"
+        );
+        // Empty: nobody leaves because of the directory.
+        assert_eq!(
+            section("residents_group = \"\"").unwrap().residents_group,
+            ""
+        );
+        let s = section("residents_group = \"r\"\nrefresh_minutes = 5").unwrap();
+        assert_eq!(s.reader.refresh_minutes, 5);
+        assert!(section("residents_group = 3").is_err());
+        assert!(section("residents_grup = \"r\"").is_err());
     }
 
     fn schedule(extra: &str) -> Result<ScheduleConfig, toml::de::Error> {

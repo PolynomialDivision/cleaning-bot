@@ -21,6 +21,12 @@ pub(crate) async fn add_matrix_participant(
     if let Err(message) = validate_matrix_user_id(mxid) {
         return Ok(Some(message));
     }
+    // Another account of someone in the plan is them (`directory`): never a second person.
+    let mxid = &ctx
+        .person_account(&OwnedUserId::try_from(mxid)?)
+        .await
+        .to_string();
+    let mxid = mxid.as_str();
 
     // The lock intentionally covers validation, mutation, rescheduling and save.
     let mut state = ctx.state.lock().await;
@@ -79,6 +85,11 @@ pub(crate) async fn remove_matrix_participant(
     if let Err(message) = validate_matrix_user_id(mxid) {
         return Ok(Some(message));
     }
+    let mxid = &ctx
+        .person_account(&OwnedUserId::try_from(mxid)?)
+        .await
+        .to_string();
+    let mxid = mxid.as_str();
 
     let mut state = ctx.state.lock().await;
     let person_id = match state.person_by_matrix_id(mxid) {

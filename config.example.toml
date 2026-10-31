@@ -57,16 +57,25 @@ materialize_weeks = 26
 # Only "round_robin" is implemented (the default).
 # fill_strategy = "round_robin"
 
-# ── Linked Matrix accounts (optional) ─────────────────────────────────────────
-# One resident, one person in the plan, whichever of their Matrix accounts writes:
-# the bot reads the house's directory (Authentik) every refresh_minutes with a
-# read-only token (view users), from the environment variable token_env. A
-# resident's accounts: their house account @<login>:<server_name> (default: the
-# bot's own server; or the
-# localpart in localpart_attribute) and the full Matrix IDs an admin put into
-# the user attribute matrix_ids_attribute, e.g. matrix_ids: ["@me:matrix.org"].
-# An account listed for two people counts for neither. Without this section,
-# or while the directory can't be read, every account is a person of its own.
+# ── The house directory (optional) ────────────────────────────────────────────
+# Who lives here, their Matrix accounts and groups, from the house's directory
+# (Authentik), read every refresh_minutes with a read-only token (view users and
+# groups) from the environment variable token_env. One resident, one person in the
+# plan, whichever of their accounts writes: their house account
+# @<login>:<server_name> (default: the bot's own server; or the localpart in
+# localpart_attribute), the Matrix IDs an admin put into matrix_ids_attribute and
+# the ones they proved (matrix_verified). Their chosen account (matrix_preferred)
+# becomes their address. Admins are [security] admin_users only, never another
+# account of theirs. An account two people claim counts for neither.
+#
+# residents_group: who leaves it (moved out, deactivated) leaves every cleaning
+# group, after two reads in a row. Off ("") unless set: switch it on once the
+# first reads have linked everyone. Kitchens follow a group with
+# !groups directory <group> kitchen-floor-1. More departures from one group at
+# once than max(2, 20 % of its people) wait for !directory confirm <digest>, and
+# so do all of the first ones after following began (or residents_group was
+# switched on). A read older than stale_after_minutes changes nothing. Without
+# this section every account is a person of its own.
 #
 # [directory]
 # provider    = "authentik"
@@ -76,6 +85,8 @@ materialize_weeks = 26
 # matrix_ids_attribute = "matrix_ids"
 # token_env       = "DIRECTORY_TOKEN"
 # refresh_minutes = 15
+# stale_after_minutes = 60
+# residents_group = "residents"
 
 # ── Calendars in Nextcloud (optional) ─────────────────────────────────────────
 # With this section and [directory], every resident with a house account (in the

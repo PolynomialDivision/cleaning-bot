@@ -807,6 +807,13 @@ pub(crate) async fn cmd_groups_house(
     let Some(group) = state.group_by_name(group_name).cloned() else {
         return Ok(Some(group_not_found(group_name)));
     };
+    if on && group.directory_group.is_some() {
+        return Ok(Some(format!(
+            "📇 «{}» follows the house directory; it can't be for the whole house too \
+             (!groups directory {} off first).",
+            group.name, group.name
+        )));
+    }
     if group.house_wide == on {
         return Ok(Some(format!(
             "«{}» is {} house-wide. No changes made.",

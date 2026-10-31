@@ -99,6 +99,7 @@ impl AssignmentInstance {
                         display_name: p.name.clone(),
                         active: true,
                         matrix_id: p.mxid.clone(),
+                        directory_id: None,
                     })
                 }
             })

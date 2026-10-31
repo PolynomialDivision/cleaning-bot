@@ -1,7 +1,7 @@
 // Tests build fixtures by tweaking `Default` values field by field.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use mxbot_common::{
@@ -95,40 +95,49 @@ pub struct BotContext {
     pub operations: Arc<Mutex<()>>,
     pub state_path: PathBuf,
     pub config: Arc<Config>,
-    pub admin_users: HashSet<OwnedUserId>,
+    /// `[security] admin_users` and, while the directory read is fresh, the house accounts
+    /// of `admin_groups` (never a linked account).
+    pub admin_users: mxbot_common::admin::Admins,
     pub room_id: OwnedRoomId,
-    /// Residents with more than one Matrix account (`[directory]`).
-    pub accounts: Arc<std::sync::RwLock<directory::Accounts>>,
-    /// Every resident's directory login by Matrix account (`[directory]`); `None` until the
-    /// directory was read once.
+    /// The last good read of the house's directory (`[directory]`); `None` until the first.
+    pub directory: directory::Shared,
+    /// Every resident's directory login (`[directory]`); `None` until the directory was read
+    /// once.
     pub logins: Arc<std::sync::RwLock<Option<Arc<directory::Logins>>>>,
+    /// The Matrix account that sent the event being handled (`acting_as`), whichever person
+    /// in the plan it counts as: admin rights are its own, never another account's.
+    pub acting: Option<OwnedUserId>,
 }
 
 impl BotContext {
     /// The account the plan knows `user`'s resident by (`directory`).
     pub async fn person_account(&self, user: &OwnedUserId) -> OwnedUserId {
+        let snapshot = directory::read(&self.directory);
         let state = self.state.lock().await;
-        directory::person_account(&self.linked_accounts(), &state, user)
+        directory::person_account(snapshot.as_deref().map(|s| &s.people), &state, user)
     }
 
-    /// The directory's answer as it is now.
-    pub fn linked_accounts(&self) -> directory::Accounts {
-        self.accounts
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    /// Every account of `user`'s resident the directory recognises, `user` among them; empty
+    /// when it doesn't know `user` (`directory::recognised`).
+    pub fn recognised(&self, user: &UserId) -> Vec<OwnedUserId> {
+        let snapshot = directory::read(&self.directory);
+        directory::recognised(snapshot.as_deref().map(|s| &s.people), user)
     }
 
-    /// An admin: one of `[security] admin_users`, or another account of theirs.
+    /// This context for an event `account` sent (see `acting`).
+    pub fn acting_as(&self, account: &UserId) -> BotContext {
+        BotContext {
+            acting: Some(account.to_owned()),
+            ..self.clone()
+        }
+    }
+
+    /// An admin: one of `[security] admin_users`, as the account that wrote. The person
+    /// `user` stands for in the plan (their address) never makes another of their accounts
+    /// an admin: rights never come from a link.
     pub fn is_admin(&self, user: &UserId) -> bool {
-        self.admin_users.contains(user)
-            || self
-                .accounts
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .linked(user)
-                .iter()
-                .any(|a| self.admin_users.contains(a))
+        self.admin_users
+            .contains(self.acting.as_deref().unwrap_or(user))
     }
 }
 
@@ -232,13 +241,13 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(Mutex::new(st));
     // Filled by `directory::run` once the bot is up; the website reads it too.
-    let accounts: Arc<std::sync::RwLock<directory::Accounts>> = Arc::default();
+    let directory_read: directory::Shared = Arc::default();
 
     // ── Optional website (its own listener, behind the house login) ─────────────
     if let Some(secret) = web_secret {
         let site = web::Web::new(
             state.clone(),
-            accounts.clone(),
+            directory_read.clone(),
             web::Settings::new(&config.web, secret),
             &config.matrix.user_id,
         )?;
@@ -258,17 +267,31 @@ async fn main() -> Result<()> {
         state: state.clone(),
         state_path,
         config: Arc::clone(&config),
-        admin_users: bot.admins().clone(),
+        admin_users: bot.admin.admin_list().clone(),
         room_id: room_id.clone(),
-        accounts,
+        directory: directory_read,
         logins: Arc::default(),
+        acting: None,
     };
+    // The plan follows the directory once the first sync is done (the rooms are known).
+    let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(cfg) = config.directory.clone() {
         if let Some(directory) = directory::open(&ctx, &cfg) {
-            // Three missed reads (each gives up after 30 s) before the bot counts as stuck.
-            let within = (cfg.refresh() + Duration::from_secs(60)) * 3;
+            // Three missed reads (each gives up after 30 s) before the bot counts as stuck;
+            // failing reads for that long count as unhealthy too.
+            let within = (cfg.reader.refresh() + Duration::from_secs(60)) * 3;
+            let synced = Arc::clone(&synced);
+            let admin_groups = config.security.admin_groups.clone();
             supervise_ticking("directory sync", within, |alive| {
-                directory::run(ctx.clone(), directory, cfg, alive)
+                directory::run(
+                    ctx.clone(),
+                    client.clone(),
+                    directory,
+                    cfg,
+                    admin_groups,
+                    alive,
+                    synced,
+                )
             });
         }
     }
@@ -301,7 +324,9 @@ async fn main() -> Result<()> {
                     return;
                 }
                 // The resident, whichever of their accounts wrote (`directory`).
-                // `ev.sender` stays the account, for the private-chat checks.
+                // `ev.sender` stays the account, for the private-chat checks and for
+                // admin rights (`BotContext::acting`).
+                let ctx = ctx.acting_as(&ev.sender);
                 let sender = ctx.person_account(&ev.sender).await;
                 if let MessageType::Image(ref image) = ev.content.msgtype {
                     if let Err(e) = paper::image(&ctx, &room, &sender, &ev.event_id, image).await {
@@ -427,6 +452,7 @@ async fn main() -> Result<()> {
                     return;
                 }
                 let _operation = ctx.operations.lock().await;
+                let ctx = ctx.acting_as(&ev.sender);
                 let sender = ctx.person_account(&ev.sender).await;
 
                 if ctx
@@ -658,6 +684,7 @@ async fn main() -> Result<()> {
                     return;
                 }
                 let _operation = ctx.operations.lock().await;
+                let ctx = ctx.acting_as(&ev.sender);
                 let sender = ctx.person_account(&ev.sender).await;
 
                 let redacted_id = match ev.content.redacts.as_ref().or(ev.redacts.as_ref()) {
@@ -733,6 +760,7 @@ async fn main() -> Result<()> {
     // ── Initial sync ──────────────────────────────────────────────────────────
     bot.initial_sync().await;
     info!("Initial sync complete");
+    synced.store(true, std::sync::atomic::Ordering::Release);
 
     // Show real Matrix display names in !status/!groups right away instead
     // of Matrix usernames until each person sends their first command:

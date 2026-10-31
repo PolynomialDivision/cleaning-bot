@@ -23,13 +23,12 @@ pub async fn authorized(ctx: &BotContext, room: &Room, sender: &OwnedUserId) -> 
         return false;
     }
     // `sender`, or another account of their resident (`directory`): the one in this chat.
-    let linked = ctx.linked_accounts();
-    let accounts = linked.linked(sender);
+    let accounts = ctx.recognised(sender);
     if accounts.is_empty() {
         return private::is_private_chat_of_member(&client, room.room_id(), &ctx.room_id, sender)
             .await;
     }
-    for account in accounts {
+    for account in &accounts {
         if private::is_private_chat_of_member(&client, room.room_id(), &ctx.room_id, account).await
         {
             return true;

@@ -152,6 +152,12 @@ pub enum DomainEvent {
         person_id: PersonId,
         matrix_id: String,
     },
+    /// The person is this person in the house's directory (`directory`):
+    /// matched by one of their accounts, once.
+    PersonDirectoryLinked {
+        person_id: PersonId,
+        directory_id: String,
+    },
     /// A group's cleaning rhythm changed (how often, how the week is split).
     RhythmSet {
         group_id: GroupId,
@@ -160,6 +166,13 @@ pub enum DomainEvent {
     GroupWeightSet {
         group_id: GroupId,
         weight: f64,
+    },
+    /// The directory group a group follows (`CleaningGroup::directory_group`);
+    /// `None` again: members choose themselves.
+    GroupDirectorySet {
+        group_id: GroupId,
+        #[serde(default)]
+        directory_group: Option<String>,
     },
     RoomWeightSet {
         group_id: GroupId,
@@ -249,6 +262,14 @@ pub enum DomainEvent {
     AbsenceCancelled {
         person_id: PersonId,
     },
+
+    // ── From another version ──────────────────────────────────────────────────
+    /// An event this version does not know (written by a newer one, read after a rollback),
+    /// or one of a known kind it cannot read: kept as it was written, so saving writes it back
+    /// unchanged, and ignored by everything else (no state change, no statistics). Only ever
+    /// read from `state.json`, never made or applied.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1141,5 +1162,48 @@ mod tests {
             }
             _ => panic!("expected SlotAssigned"),
         }
+    }
+
+    /// A log written by a newer version (an event kind this one does not know) still loads
+    /// after a rollback, is ignored by the statistics, and is written back as it was.
+    #[test]
+    fn an_unknown_event_kind_loads_and_round_trips() {
+        let unknown = serde_json::json!({
+            "kind": "something_added_later",
+            "person_id": "p1",
+            "detail": {"nested": [1, 2, 3]}
+        });
+        let json = serde_json::json!({
+            "persons": [{"id": "p1", "display_name": "Mia", "active": true,
+                         "matrix_id": "@mia:house.org"}],
+            "cleaning_groups": [{"id": "g1", "name": "Kitchen", "member_ids": ["p1"]}],
+            "event_log": [
+                {"id": "e1", "timestamp": "2026-01-05T10:00:00Z",
+                 "event": {"kind": "person_matrix_linked", "person_id": "p1",
+                           "matrix_id": "@mia:house.org"}},
+                {"id": "e2", "timestamp": "2026-01-06T10:00:00Z", "event": unknown.clone()}
+            ],
+            "created_at": null
+        });
+        let mut state: State = serde_json::from_value(json).expect("an unknown kind loads");
+        assert_eq!(state.event_log.len(), 2);
+        assert!(matches!(
+            state.event_log[0].event,
+            DomainEvent::PersonMatrixLinked { .. }
+        ));
+        assert!(matches!(&state.event_log[1].event, DomainEvent::Unknown(v) if *v == unknown));
+        // ignored by the statistics, never applied
+        let _ = workload_report(&state);
+        let _ = person_stats(&state, &"p1".to_owned());
+        assert!(state
+            .apply_event(DomainEvent::Unknown(unknown.clone()))
+            .is_err());
+        assert_eq!(state.event_log.len(), 2);
+        // written back verbatim
+        let again = serde_json::to_value(&state).unwrap();
+        assert_eq!(again["event_log"][1]["event"], unknown);
+        assert_eq!(again["event_log"][1]["id"], "e2");
+        let back: State = serde_json::from_value(again).unwrap();
+        assert!(matches!(&back.event_log[1].event, DomainEvent::Unknown(v) if *v == unknown));
     }
 }

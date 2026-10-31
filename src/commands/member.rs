@@ -398,7 +398,9 @@ pub(crate) fn join_group(
     if !state.group_by_id(group_id).is_some_and(|g| g.is_active) {
         return Ok(Err("⚠️ This group is paused.".into()));
     }
-    if let Some(why) = house_wide_refusal(state, group_id) {
+    if let Some(why) =
+        house_wide_refusal(state, group_id).or_else(|| directory_refusal(state, group_id))
+    {
         return Ok(Err(why));
     }
     // PersonCreated is idempotent: safe even if this Matrix user already exists.
@@ -437,7 +439,9 @@ pub(crate) fn leave_group(
     group_id: &GroupId,
 ) -> Result<std::result::Result<String, String>> {
     let group_name = group_name_of(state, group_id);
-    if let Some(why) = house_wide_refusal(state, group_id) {
+    if let Some(why) =
+        house_wide_refusal(state, group_id).or_else(|| directory_refusal(state, group_id))
+    {
         return Ok(Err(why));
     }
     let Some(person_id) = state
@@ -461,6 +465,18 @@ pub(crate) fn leave_group(
     })?;
     let departure = apply_group_departure(ctx, state, &person_id, group_id)?;
     Ok(Ok(departure_summary(state, group_id, &departure)))
+}
+
+/// Why nobody joins or leaves a group that follows the house directory on their own: it is
+/// who is in that group there (a kitchen, `directory::reconcile`).
+fn directory_refusal(state: &crate::state::State, group_id: &GroupId) -> Option<String> {
+    let group = state.group_by_id(group_id)?;
+    let wanted = group.directory_group.as_deref()?;
+    Some(format!(
+        "📇 «{}» is whoever is in «{wanted}» in the house directory. Moved? The admins change \
+         it there, and the plan follows.",
+        group.name
+    ))
 }
 
 /// Why nobody joins or leaves a house-wide group on their own: everyone

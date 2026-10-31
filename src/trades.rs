@@ -1217,7 +1217,12 @@ pub async fn tidy(ctx: &BotContext, room: &Room, nudge: bool) {
     for id in stale {
         update_request(ctx, room, &id).await;
     }
-    let mut admins: Vec<String> = ctx.admin_users.iter().map(|u| u.to_string()).collect();
+    let mut admins: Vec<String> = ctx
+        .admin_users
+        .current()
+        .iter()
+        .map(|u| u.to_string())
+        .collect();
     admins.sort();
     if nudges.is_empty() || admins.is_empty() {
         return;

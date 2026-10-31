@@ -294,31 +294,85 @@ the inviter is allowed by `security.allowed_inviters`, so residents who
 should use it privately need to be listed there (or `"all"`). Changes made
 from a private chat update the plan in the cleaning room.
 
-### Several Matrix accounts
+### The house directory: who lives here (`[directory]`)
 
-A resident with more than one Matrix account (the house's and one on
-matrix.org, say) is one person in the plan when `[directory]` is set: the bot
-reads the house's directory (Authentik, a read-only token) at startup and
-every 15 minutes. A resident's accounts are their house account
-(`@<login>:<server_name>`) and the full Matrix IDs an admin entered in their
-user attribute `matrix_ids`. Commands, reactions and undos from any of them
-count as that person's, the one the plan met first: no second person, no
-second place in a rotation. Mentions and reminders go to that account.
+With `[directory]` the bot reads the house's directory (Authentik, a
+read-only token) at startup and every 15 minutes. It is the one source of
+who lives here, their Matrix accounts and their groups; the plan keeps only
+its own history.
 
-- Private chats stay per account: each account in one must itself be in the
-  cleaning room (see Private chats).
-- An admin's other accounts are admins too (the directory's admins decide
-  who is who; only they can set the attribute).
+**One person per resident.** A resident's recognised accounts are their house
+account (`@<login>:<server_name>`), the full Matrix IDs an admin entered
+(`matrix_ids`) and the ones they proved themselves (`matrix_verified`).
+Commands, reactions and undos from any of them count as the same person in
+the plan: no second person, no second place in a rotation. The plan finds its
+person for a resident by the directory id (Authentik's `uuid`) once it has
+stored it, else by one of their accounts, and then stores the id (the event
+log says `person_directory_linked`). Before the bot makes a new person for an
+account (a welcome, `!join`, `!member add @…`), the account's resident is
+looked up: their person is used if there is one.
+
+**The address.** Mentions, reminders and turn notices go to the person's
+address in the plan. Once the resident chooses an account for the house
+(`matrix_preferred`: their house account or one they proved), the address
+moves there (`person_matrix_linked` in the log); private chats the bot opened
+for an older account keep working, a chat with any recognised account counts
+(each account in one must itself be in the cleaning room, see Private chats).
+Not chosen, or a choice that can't be used: the address stays where it is.
+
+**Who leaves.** Someone in the plan the bot has linked who is no longer in
+`residents_group` (off unless named; in the house `residents`: moved out to
+`former-residents`, deactivated, or deleted) leaves every cleaning group once two good reads in a
+row say so, the way `!member remove` does it: this week's turn stays, later
+ones are handed on, completions, statistics and the log stay. The admins get
+one message per person. Someone in the plan without a directory id (a name
+without Matrix, an account the directory doesn't know) is never touched.
+Switch `residents_group` on once the first reads have linked everyone (and
+the first departures are held anyway, see Guards).
+
+**Kitchens.** `!groups directory <group> kitchen-floor-1` makes a group
+follow a group of the directory: its members (who are residents, when
+`residents_group` is named) join it the way `!member add` does, someone not in the plan yet is added with their
+chosen account, or with their house account when they haven't chosen;
+someone no longer in it leaves after two reads, as above. Nobody joins or
+leaves such a group with `!join`, `!leave` or a selector (an admin's `!member
+remove` is undone by the next read: change the directory instead).
+`!groups directory <group> off` ends it. A move from kitchen 1 to kitchen 3:
+joins group 3 within 15 minutes, leaves group 1 15 minutes later.
+
+**Guards.** A read that failed, or a last good read older than the
+directory's `stale_after` (60 min), changes nothing (the health check shows
+the failing reads). A group the directory doesn't have (a typo, a rename) and
+an empty residents group remove nobody. More departures from one group in
+one round than `max(2, 20 %)` of its people are held: nobody leaves that
+group (other groups' departures within their limits go; someone moving out
+counts in each group they leave), the admins are told once, with the held
+departures' digest (8 hex digits), and `!directory confirm <digest>` lets
+exactly those go if the directory still says so, answering with who left
+what; another digest, or none, does nothing and shows what is held. The
+first departures after following began (nothing remembered yet: the
+upgrade, or `residents_group` switched on or changed) are all held that way,
+however few, until an admin confirms them or two reads in a row ask for no
+departure at all. An account two residents claim counts for neither, and
+the admins hear of it once. `!directory` shows what the bot follows and what
+is held. The memory between two reads is in `state.json`, so a restart in
+between neither forgets nor repeats a departure.
+
+**Rights never come from a link.** An admin is an account in `[security]
+admin_users`, the account that wrote: another account of an admin, linked in
+the directory, is them in the plan but no admin. (Until 2026-10 a linked
+account of an admin was an admin too.)
+
 - Nothing is merged. When two accounts of one resident already are two
-  people in the plan (a welcome makes one for every newcomer), the one in a
-  group, with a turn or a completion is the person. When both are, both stay
-  so and the log says `one resident, several people in the plan`: an admin
+  people in the plan, the one in a group, with a turn or a completion is the
+  person. When both are, both stay so and the admins are told once: an admin
   takes the extra one out of its groups (`!member remove`) and its turns.
-  An account listed for two residents counts for neither.
-- While the directory can't be read, the last answer stays; before the first
-  one (or without `[directory]`), every account is a person of its own.
+- An account two residents claim counts for neither.
+- While the directory can't be read, the last answer stays for recognising
+  accounts and nothing follows it; before the first one (or without
+  `[directory]`), every account is a person of its own.
 
-All of this lives in `src/directory.rs`.
+All of this lives in `src/directory.rs` and `src/directory/reconcile.rs`.
 
 ### Names
 
@@ -449,7 +503,7 @@ else German (`src/lang.rs`, with mxbot-common's `web::lang`).
   none; Authentik's `matrix_localpart` is not in the headers, so a renamed
   resident is their new login's account here) or one
   of the accounts in `X-House-Matrix-Ids`, the person the plan knows them
-  by (see *Several Matrix accounts*). Someone the plan doesn't know sees
+  by (see *The house directory*). Someone the plan doesn't know sees
   everything, just without "you". Display names only, never Matrix IDs, and
   never anything to subscribe to (`/me` points to `!ical`).
 - **Its own listener** (`bind_addr`, default `0.0.0.0:8080`).
@@ -503,7 +557,14 @@ All new state fields have defaults, so an existing `state.json` loads as is:
   state with its next save); selectors lose their link with the first
   refresh after the start;
 - selectors without a room belong to the cleaning room;
-- bookkeeping for commands, redactions and welcomes starts empty.
+- bookkeeping for commands, redactions and welcomes starts empty;
+- people gain a directory id and groups a directory group, both unset: with
+  `[directory]`, the first good read links everyone it can find by account
+  (one `person_directory_linked` per person), and from the second read on,
+  linked people who no longer live here leave their groups (once
+  `residents_group` is named) and kitchens following a directory group lose
+  who is no longer in it. The first departures are all held for
+  `!directory confirm <digest>`, however few.
 
 On the first start, plans made before the start of a split week took turns are
 re-seated once, from next week on: within each week, the two people may trade
@@ -515,7 +576,13 @@ event UIDs are unchanged, so subscriptions just update.
 
 **Rolling back** to an older version is not safe once rhythms were changed:
 it ignores the new fields and would treat `2x` windows as Mon–Wed/Thu–Sun and
-forget earlier rhythm versions.
+forget earlier rhythm versions. A version from before the house directory fails
+on a `state.json` whose event log holds `person_directory_linked` or
+`group_directory_set` events: **take a copy of `state.json` before upgrading**,
+and roll back with that copy (what happened since is lost). From this version on
+the event log is tolerant: an event kind it does not know (written by a newer
+version) is kept as written, saved back unchanged and ignored by the plan and the
+statistics, so later additions no longer break a rollback.
 
 `cargo run --bin state_debug -- state.json` prints a quick report of a state
 file, but its schedule is a simple guess that ignores rhythms and slot

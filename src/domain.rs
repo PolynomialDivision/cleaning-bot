@@ -19,9 +19,16 @@ pub struct Person {
     pub id: PersonId,
     pub display_name: String,
     pub active: bool,
-    /// If set, this person has a Matrix account and can send commands.
+    /// If set, this person has a Matrix account and can send commands. With
+    /// `[directory]`, the account the bot writes to them at: their chosen one
+    /// once they chose (`directory::reconcile`).
     #[serde(default)]
     pub matrix_id: Option<String>,
+    /// Who this person is in the house's directory (the identity provider's
+    /// id of them, Authentik's `uuid`), once the bot matched them
+    /// (`directory`). `None`: never followed automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_id: Option<String>,
 }
 
 impl Person {
@@ -39,6 +46,7 @@ impl Person {
             display_name,
             active: true,
             matrix_id: Some(mxid.to_owned()),
+            directory_id: None,
         }
     }
     pub fn new_named(name: &str) -> Self {
@@ -47,6 +55,7 @@ impl Person {
             display_name: name.to_owned(),
             active: true,
             matrix_id: None,
+            directory_id: None,
         }
     }
     /// True when `s` matches this person's MXID or display name (case-insensitive).
@@ -157,6 +166,11 @@ pub struct CleaningGroup {
     /// turns (see `rhythm`).
     #[serde(default)]
     pub rhythm: crate::rhythm::Rhythm,
+    /// The directory group (`kitchen-floor-1`) this group follows
+    /// (`directory::reconcile`): its members join, who leaves it leaves.
+    /// `None`: members choose themselves (`!join`, the selector).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_group: Option<String>,
     /// A house-wide group (the staircase): every resident is a member,
     /// whatever their floor groups, and the bot keeps `member_ids` so
     /// (`house::sync`): a resident is everyone active in another active
@@ -199,6 +213,7 @@ impl CleaningGroup {
             weight: 1.0,
             is_active: true,
             rhythm: crate::rhythm::Rhythm::weekly(),
+            directory_group: None,
             house_wide: false,
             house_excused: Vec::new(),
             house_added: Vec::new(),

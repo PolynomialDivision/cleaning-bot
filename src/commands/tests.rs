@@ -170,10 +170,11 @@ fn test_context(state: State) -> (BotContext, PathBuf, OwnedUserId) {
         state: Arc::new(Mutex::new(state)),
         state_path: path.clone(),
         config: Arc::new(config),
-        admin_users: HashSet::from([admin.clone()]),
+        admin_users: HashSet::from([admin.clone()]).into(),
         room_id: OwnedRoomId::try_from("!room:example.org").unwrap(),
-        accounts: Default::default(),
+        directory: Default::default(),
         logins: Default::default(),
+        acting: None,
     };
     (ctx, path, admin)
 }
@@ -210,10 +211,11 @@ pub(super) fn test_context_with_horizon(
         state: Arc::new(Mutex::new(state)),
         state_path: path.clone(),
         config: Arc::new(config),
-        admin_users: HashSet::from([admin.clone()]),
+        admin_users: HashSet::from([admin.clone()]).into(),
         room_id: OwnedRoomId::try_from("!room:example.org").unwrap(),
-        accounts: Default::default(),
+        directory: Default::default(),
         logins: Default::default(),
+        acting: None,
     };
     (ctx, path, admin)
 }
@@ -6388,16 +6390,35 @@ async fn each_group_can_have_its_own_printable_plan() {
 }
 
 #[tokio::test]
-async fn another_account_of_a_resident_acts_as_them_and_an_admins_is_an_admin() {
+async fn another_account_of_a_resident_acts_as_them_but_an_admins_is_no_admin() {
+    use mxbot_common::directory::{Choice, Link, People, Person as Resident, Snapshot};
     let id = |s: &str| OwnedUserId::try_from(s).unwrap();
+    let resident = |login: &str, house: OwnedUserId, other: &str| Resident {
+        id: format!("u-{login}"),
+        username: login.into(),
+        name: String::new(),
+        active: true,
+        accounts: vec![house.clone(), id(other)],
+        groups: Default::default(),
+        house: Some(house),
+        links: vec![Link {
+            id: id(other),
+            by_admin: true,
+            verified: false,
+        }],
+        choice: Choice::None,
+    };
     let mut state = State::default();
     state.persons.push(Person::new_matrix("@anna:example.org"));
     let (ctx, _path, admin) = test_context(state);
-    let (accounts, _) = crate::directory::Accounts::new(vec![
-        vec![id("@anna:example.org"), id("@anna:matrix.org")],
-        vec![admin.clone(), id("@admin:matrix.org")],
-    ]);
-    *ctx.accounts.write().unwrap() = accounts;
+    *ctx.directory.write().unwrap() = Some(Arc::new(Snapshot {
+        people: People::new(vec![
+            resident("anna", id("@anna:example.org"), "@anna:matrix.org"),
+            resident("admin", admin.clone(), "@admin:matrix.org"),
+        ]),
+        groups: Default::default(),
+        read_at: std::time::SystemTime::now(),
+    }));
     assert_eq!(
         ctx.person_account(&id("@anna:matrix.org")).await,
         id("@anna:example.org")
@@ -6407,11 +6428,15 @@ async fn another_account_of_a_resident_acts_as_them_and_an_admins_is_an_admin() 
         ctx.person_account(&id("@admin:matrix.org")).await,
         id("@admin:matrix.org")
     );
-    assert!(ctx.is_admin(&id("@admin:matrix.org")));
-    assert!(helpers::require_admin(&ctx, &id("@admin:matrix.org")).is_ok());
-    assert!(!ctx.is_admin(&id("@anna:matrix.org")));
-    let refused = helpers::require_admin(&ctx, &id("@anna:matrix.org")).unwrap_err();
+    // Rights never come from a link: only the listed account is an admin.
+    assert!(!ctx.is_admin(&id("@admin:matrix.org")));
+    let refused = helpers::require_admin(&ctx, &id("@admin:matrix.org")).unwrap_err();
     assert!(refused.is::<mxbot_common::admin::NotAdmin>());
+    assert!(ctx.is_admin(&admin));
+    // Also not when the linked account writes and stands for the admin's address.
+    assert!(!ctx.acting_as(&id("@admin:matrix.org")).is_admin(&admin));
+    assert!(ctx.acting_as(&admin).is_admin(&admin));
+    assert!(!ctx.is_admin(&id("@anna:matrix.org")));
 }
 
 // ── Calendar links only in private chats ─────────────────────────────────────

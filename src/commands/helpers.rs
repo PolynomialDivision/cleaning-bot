@@ -25,6 +25,7 @@ pub(crate) fn command_may_change_current_plan(cmd: &str, sub: Option<&str>) -> b
         ),
         "!member" => matches!(sub, Some("add" | "remove" | "away" | "back")),
         "!join" | "!leave" => true,
+        "!directory" => sub == Some("confirm"),
         _ => false,
     }
 }

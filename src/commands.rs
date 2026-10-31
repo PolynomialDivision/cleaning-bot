@@ -46,6 +46,8 @@ use maintenance::*;
 use member::*;
 pub(crate) use member::{join_group, leave_group};
 use overview::*;
+#[cfg(test)]
+pub(crate) use rotation::add_matrix_participant;
 use rotation::*;
 pub(crate) use setup::person_has_activity;
 use setup::*;
@@ -237,6 +239,10 @@ pub async fn handle(
         ("!groups", Some("room")) => cmd_groups_room(ctx, sender, rest).await,
         ("!groups", Some("rhythm")) => cmd_groups_rhythm(ctx, sender, rest).await,
         ("!groups", Some("house")) => cmd_groups_house(ctx, sender, rest).await,
+        ("!groups", Some("directory")) => {
+            crate::directory::reconcile::cmd_groups_directory(ctx, sender, rest).await
+        }
+        ("!directory", _) => crate::directory::reconcile::cmd_directory(ctx, sender, &args).await,
         ("!groups", Some(_)) => cmd_groups(ctx, Some(&args.join(" "))).await,
         ("!validate", _) => cmd_validate(ctx, sender).await,
 
@@ -342,7 +348,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
         },
         ("!groups", Some("add" | "enable" | "disable")) => with_sub(args[0], joined(rest)),
         ("!groups", Some("rhythm")) => with_sub(args[0], group_first(state, rest, 0)),
-        ("!groups", Some("house")) => with_sub(args[0], group_first(state, rest, 1)),
+        ("!groups", Some("house" | "directory")) => with_sub(args[0], group_first(state, rest, 1)),
         ("!groups", Some("slot" | "room")) if !rest.is_empty() => {
             let mut out = vec![args[0].to_owned(), rest[0].to_owned()];
             let tail = group_first(state, &rest[1..], 1);
@@ -482,10 +488,15 @@ fn admin_help_text() -> String {
 !groups add|enable|disable <group>
 !groups remove <group> [confirm] · deletes it with its history
 !groups house <group> on|off · everyone living here is in it (the staircase)
+!groups directory <group> <directory group | off> · its members are who is in that group of the house directory (a kitchen)
 !groups slot add <group> <slot> [x2] · x2: two people clean it together
 !groups slot remove <group> <slot>
 !groups room add|remove <group> [slot] <room>
 !groups weight <group> [room] <factor>
+
+**Directory**
+!directory · what the plan follows in the house directory, and what is held
+!directory confirm <digest> · let exactly the held departures go (the digest is in the notice and in !directory)
 
 **Other**
 !ical · where your calendar is (or a file)

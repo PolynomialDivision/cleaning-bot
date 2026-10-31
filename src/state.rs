@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     sync::OnceLock,
 };
@@ -507,6 +507,45 @@ pub struct State {
     /// (`calendars`): person ID → the calendar's name. Their selectors and `!ical` point there.
     #[serde(default)]
     pub nextcloud_calendars: std::collections::BTreeMap<PersonId, String>,
+    /// What following the house's directory remembers between its reads
+    /// (`directory::reconcile`).
+    #[serde(default, skip_serializing_if = "DirectoryMemory::is_empty")]
+    pub directory: DirectoryMemory,
+}
+
+/// A person leaving a group because of the directory: (person, group).
+pub type DirectoryDeparture = (PersonId, GroupId);
+
+/// What following the directory remembers between two reads (`directory::reconcile`),
+/// saved so a restart in between neither forgets nor repeats anything.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct DirectoryMemory {
+    /// The departures the last good read asked for: one read asks, the next applies them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub missing: BTreeSet<DirectoryDeparture>,
+    /// When that read was; a read longer ago than the directory's `stale_after` doesn't count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_at: Option<DateTime<Utc>>,
+    /// Departures held back as too many at once, until an admin confirms
+    /// (`!directory confirm`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub held: BTreeSet<DirectoryDeparture>,
+    /// What the admins were told about and is still so (a resident with two people in the
+    /// plan, an address that can't move, an account two residents claim), so they are told
+    /// once.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub told: BTreeSet<String>,
+    /// The `residents_group` ("" for none) under which the departures were reviewed: two
+    /// reads in a row with nothing to leave, or an admin's `!directory confirm`. Until then (a
+    /// fresh upgrade, residents switched on or changed) every departure is held for a confirm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<String>,
+}
+
+impl DirectoryMemory {
+    pub fn is_empty(&self) -> bool {
+        *self == DirectoryMemory::default()
+    }
 }
 
 // ── Load / Save ───────────────────────────────────────────────────────────────
@@ -923,6 +962,43 @@ impl State {
                 p.matrix_id = Some(matrix_id.clone());
                 true
             }
+            E::PersonDirectoryLinked {
+                person_id,
+                directory_id,
+            } => {
+                if self
+                    .persons
+                    .iter()
+                    .any(|p| p.directory_id.as_deref() == Some(directory_id) && &p.id != person_id)
+                {
+                    anyhow::bail!("{directory_id} is already another person's");
+                }
+                let p = self
+                    .persons
+                    .iter_mut()
+                    .find(|p| &p.id == person_id)
+                    .ok_or_else(|| anyhow::anyhow!("Person not found: {person_id}"))?;
+                if p.directory_id.as_deref() == Some(directory_id) {
+                    return Ok(());
+                }
+                p.directory_id = Some(directory_id.clone());
+                true
+            }
+            E::GroupDirectorySet {
+                group_id,
+                directory_group,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if &g.directory_group == directory_group {
+                    return Ok(());
+                }
+                g.directory_group = directory_group.clone();
+                true
+            }
 
             // ── Cleaning ──────────────────────────────────────────────────────
             E::CleaningCompleted {
@@ -1128,6 +1204,8 @@ impl State {
                 self.absences.retain(|a| &a.person_id != person_id);
                 self.absences.len() < before
             }
+            // Only ever read from a newer version's log, never applied.
+            E::Unknown(_) => anyhow::bail!("an event of an unknown kind cannot be applied"),
         };
 
         if changed {
