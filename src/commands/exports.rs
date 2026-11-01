@@ -387,7 +387,7 @@ pub(crate) async fn cmd_ical(
     let ical_data = {
         let state = ctx.state.lock().await;
         let snapshot = build_schedule(&state, weeks);
-        crate::ical::render_ics(&snapshot, &person_id)
+        crate::ical::render_ics(&snapshot, &person_id, ctx.config.web.me_url().as_deref())
     };
     let mime: mime::Mime = "text/calendar".parse().expect("valid mime");
     room.send_attachment(

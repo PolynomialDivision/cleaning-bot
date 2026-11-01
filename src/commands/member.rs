@@ -124,7 +124,7 @@ pub(crate) async fn mark_done(
             [g] if g.is_multi_slot() => {
                 return Ok((
                     Some(format!(
-                "You have no open slot in «{}» this week. (!takeover {} <slot> to take one over.)",
+                "You have no open slot in «{}» this week. (!take {} <slot> to take one over.)",
                 g.name, g.name
             )),
                     None,

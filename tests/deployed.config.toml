@@ -30,7 +30,7 @@ receive_broadcasts = false
 [schedule]
 room_id = "!KqWZYqkKa3EH8HI6ws7qL8Kk9lUT3IZ0HgTJwoL7iRc"   # its own room (make matrix-rooms)
 interval_weeks = 1
-final_reminder_weekday = 6    # Sunday
+final_reminder_weekday = 5    # Saturday: a weekend day left
 reminder_time = "09:00"
 timezone = "Europe/Berlin"
 

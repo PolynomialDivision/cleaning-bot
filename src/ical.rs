@@ -15,7 +15,12 @@ use crate::{
 /// Returns only the events where `person_id` is the assigned person.
 /// Each event uses the assignment's pre-computed deterministic UID.
 /// DTSTAMP is the snapshot's `state_timestamp` (stable for unchanged state).
-pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
+/// `me_link`: the web plan's personal page, a line in every event's description.
+pub fn render_ics(
+    snapshot: &ScheduleSnapshot,
+    person_id: &PersonId,
+    me_link: Option<&str>,
+) -> String {
     let assignments = snapshot.for_person(person_id);
 
     let dtstamp = snapshot
@@ -31,7 +36,7 @@ pub fn render_ics(snapshot: &ScheduleSnapshot, person_id: &PersonId) -> String {
 
     let mut events = String::new();
     for a in &assignments {
-        push_event(&mut events, snapshot, a, person_id, &dtstamp);
+        push_event(&mut events, snapshot, a, person_id, &dtstamp, me_link);
     }
 
     let mut out = String::new();
@@ -57,6 +62,7 @@ fn push_event(
     a: &AssignmentInstance,
     person_id: &PersonId,
     dtstamp: &str,
+    me_link: Option<&str>,
 ) {
     let dtstart = a.start.format("%Y%m%d").to_string();
     let dtend = (a.end + chrono::Duration::days(1))
@@ -115,6 +121,9 @@ fn push_event(
             desc_parts.push("✓ Done".to_owned());
         }
     }
+    if let Some(link) = me_link {
+        desc_parts.push(format!("Your turns: {link}"));
+    }
     let description = ical_text(&desc_parts.join("\n"));
 
     events.push_str("BEGIN:VEVENT\r\n");
@@ -145,13 +154,14 @@ pub fn render_event(
     a: &AssignmentInstance,
     person_id: &PersonId,
     dtstamp: &str,
+    me_link: Option<&str>,
 ) -> String {
     let mut out = String::new();
     out.push_str("BEGIN:VCALENDAR\r\n");
     prop(&mut out, "VERSION", "2.0");
     prop(&mut out, "PRODID", "-//Cleaning Bot//EN");
     prop(&mut out, "CALSCALE", "GREGORIAN");
-    push_event(&mut out, snapshot, a, person_id, dtstamp);
+    push_event(&mut out, snapshot, a, person_id, dtstamp, me_link);
     out.push_str("END:VCALENDAR\r\n");
     out
 }
@@ -225,7 +235,7 @@ mod tests {
         let sn1 = build_schedule(&st, 4);
         let sn2 = build_schedule(&st, 4);
         let id = &st.persons[0].id;
-        assert_eq!(render_ics(&sn1, id), render_ics(&sn2, id));
+        assert_eq!(render_ics(&sn1, id, None), render_ics(&sn2, id, None));
     }
 
     #[test]
@@ -234,8 +244,8 @@ mod tests {
         let sn1 = build_schedule(&st, 2);
         let sn2 = build_schedule(&st, 2);
         let id = &st.persons[0].id;
-        let body1 = render_ics(&sn1, id);
-        let body2 = render_ics(&sn2, id);
+        let body1 = render_ics(&sn1, id, None);
+        let body2 = render_ics(&sn2, id, None);
         // Extract all UID lines and compare.
         let uids1: Vec<&str> = body1.lines().filter(|l| l.starts_with("UID:")).collect();
         let uids2: Vec<&str> = body2.lines().filter(|l| l.starts_with("UID:")).collect();
@@ -247,10 +257,38 @@ mod tests {
     fn ics_empty_for_unknown_person() {
         let st = make_state();
         let sn = build_schedule(&st, 4);
-        let ics = render_ics(&sn, &"not-a-real-uuid".to_owned());
+        let ics = render_ics(&sn, &"not-a-real-uuid".to_owned(), None);
         assert!(
             !ics.contains("BEGIN:VEVENT"),
             "no events for unknown person"
+        );
+    }
+
+    #[test]
+    fn every_event_links_the_web_plan_when_there_is_one() {
+        let st = make_state();
+        let sn = build_schedule(&st, 2);
+        let id = &st.persons[0].id;
+        let link = "https://putzplan.example.org/me";
+        let unfold = |ics: String| ics.replace("\r\n ", "");
+        let with = unfold(render_ics(&sn, id, Some(link)));
+        let events = with.matches("BEGIN:VEVENT").count();
+        assert!(events > 0);
+        assert_eq!(
+            with.lines()
+                .filter(|l| l.starts_with("DESCRIPTION:")
+                    && l.ends_with("\\nYour turns: https://putzplan.example.org/me"))
+                .count(),
+            events,
+            "{with}"
+        );
+        // The same every time; without the website no line at all.
+        assert_eq!(with, unfold(render_ics(&sn, id, Some(link))));
+        assert!(!render_ics(&sn, id, None).contains("Your turns"));
+        let one = &sn.for_person(id)[0];
+        assert!(
+            unfold(render_event(&sn, one, id, "20260101T000000Z", Some(link)))
+                .contains("Your turns: https://putzplan.example.org/me")
         );
     }
 

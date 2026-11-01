@@ -111,11 +111,13 @@ pub struct Wanted {
 /// directory knows (`logins`: by directory id, else by a recognised account; deactivated people
 /// and accounts in conflict have none) and something to do with the plan (a group, a turn, a
 /// completion), with their turns of the next `weeks` weeks that end `today` or later.
+/// `me_link`: the web plan's personal page, linked in every event.
 pub fn wanted(
     state: &State,
     logins: &Logins,
     weeks: usize,
     today: NaiveDate,
+    me_link: Option<&str>,
 ) -> BTreeMap<String, Wanted> {
     let snapshot = build_schedule(state, weeks);
     let mut out: BTreeMap<String, Wanted> = BTreeMap::new();
@@ -138,7 +140,7 @@ pub fn wanted(
             .into_iter()
             .filter(|a| a.end >= today)
         {
-            let ics = crate::ical::render_event(&snapshot, a, &person.id, STAMP);
+            let ics = crate::ical::render_event(&snapshot, a, &person.id, STAMP, me_link);
             entry.events.insert(a.uid.clone(), Event::new(ics));
         }
     }
@@ -553,6 +555,7 @@ pub async fn run(
 ) {
     let weeks = cfg.weeks.clamp(1, 104) as usize;
     let web_url = cfg.web_url();
+    let me_link = ctx.config.web.me_url();
     let cache_path = ctx
         .state_path
         .parent()
@@ -578,7 +581,13 @@ pub async fn run(
             let full = tokio::time::Instant::now() >= next_full;
             // the plan is only rendered when something may have changed
             if full || seen.as_ref() != Some(&key) {
-                let want = wanted(&*ctx.state.lock().await, &logins, weeks, today);
+                let want = wanted(
+                    &*ctx.state.lock().await,
+                    &logins,
+                    weeks,
+                    today,
+                    me_link.as_deref(),
+                );
                 let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
                 let outcome = reconcile(&nc, &mut cache, &want, full, &now).await;
                 if outcome.written + outcome.deleted > 0 || !outcome.removed.is_empty() {
@@ -999,7 +1008,7 @@ mod tests {
         let (server, fake) = FakeCalDav::start(&["anna", "ben"]).await;
         let nc = nc(&server);
         let today = crate::state::today();
-        let want = wanted(&state, &logins, 6, today);
+        let want = wanted(&state, &logins, 6, today, None);
         assert_eq!(
             want.keys().collect::<Vec<_>>(),
             ["anna", "ben"],
@@ -1050,11 +1059,11 @@ mod tests {
         let (state, logins) = house();
         let (server, fake) = FakeCalDav::start(&["anna", "ben"]).await;
         let nc = nc(&server);
-        let want = wanted(&state, &logins, 6, crate::state::today());
+        let want = wanted(&state, &logins, 6, crate::state::today(), None);
         let mut cache = Cache::default();
         reconcile(&nc, &mut cache, &want, true, NOW).await;
         fake.take_writes();
-        let again = wanted(&state, &logins, 6, crate::state::today());
+        let again = wanted(&state, &logins, 6, crate::state::today(), None);
         assert_eq!(again, want, "the same plan renders the same events");
         let outcome = reconcile(&nc, &mut cache, &again, false, NOW).await;
         assert_eq!(outcome, Outcome::default());
@@ -1073,7 +1082,7 @@ mod tests {
         reconcile(
             &nc,
             &mut cache,
-            &wanted(&state, &logins, 6, today),
+            &wanted(&state, &logins, 6, today, None),
             true,
             NOW,
         )
@@ -1098,7 +1107,7 @@ mod tests {
         state.slot_assignments[first_anna].person_id = Some(ben.clone());
         state.slot_assignments[first_ben].person_id = Some(anna.clone());
         fake.take_writes();
-        let want = wanted(&state, &logins, 6, today);
+        let want = wanted(&state, &logins, 6, today, None);
         let outcome = reconcile(&nc, &mut cache, &want, false, NOW).await;
         assert!(outcome.errors.is_empty(), "{outcome:?}");
         assert_eq!((outcome.written, outcome.deleted), (2, 2), "{outcome:?}");
@@ -1125,14 +1134,14 @@ mod tests {
         reconcile(
             &nc,
             &mut cache,
-            &wanted(&state, &logins, 6, today),
+            &wanted(&state, &logins, 6, today, None),
             true,
             NOW,
         )
         .await;
         let all = uids(&fake, "cleaning-anna");
         state.persons[0].display_name = "Anna K.".into();
-        let later = wanted(&state, &logins, 6, today + chrono::Duration::days(15));
+        let later = wanted(&state, &logins, 6, today + chrono::Duration::days(15), None);
         let outcome = reconcile(&nc, &mut cache, &later, false, NOW).await;
         assert!(outcome.errors.is_empty(), "{outcome:?}");
         assert!(outcome.deleted > 0);
@@ -1154,7 +1163,7 @@ mod tests {
         reconcile(
             &nc,
             &mut cache,
-            &wanted(&state, &logins, 6, today),
+            &wanted(&state, &logins, 6, today, None),
             true,
             NOW,
         )
@@ -1166,7 +1175,7 @@ mod tests {
 
         // ben is gone from the directory: a quick round deletes nothing
         logins.retain(|l| l != "ben");
-        let want = wanted(&state, &logins, 6, today);
+        let want = wanted(&state, &logins, 6, today, None);
         let outcome = reconcile(&nc, &mut cache, &want, false, NOW).await;
         assert!(outcome.removed.is_empty());
         assert!(fake.world().calendars.contains_key("cleaning-ben"));
@@ -1199,7 +1208,7 @@ mod tests {
         let (state, logins) = house();
         let (server, fake) = FakeCalDav::start(&["anna"]).await; // ben never logged in there
         let nc = nc(&server);
-        let want = wanted(&state, &logins, 6, crate::state::today());
+        let want = wanted(&state, &logins, 6, crate::state::today(), None);
         let mut cache = Cache::default();
         let outcome = reconcile(&nc, &mut cache, &want, true, NOW).await;
         assert!(outcome.errors.is_empty(), "{outcome:?}");
@@ -1218,7 +1227,7 @@ mod tests {
         let (state, logins) = house();
         let (server, fake) = FakeCalDav::start(&["anna", "ben"]).await;
         let nc = nc(&server);
-        let want = wanted(&state, &logins, 6, crate::state::today());
+        let want = wanted(&state, &logins, 6, crate::state::today(), None);
         let mut cache = Cache::default();
         reconcile(&nc, &mut cache, &want, true, NOW).await;
         {
@@ -1245,7 +1254,7 @@ mod tests {
         let (state, logins) = house();
         let (server, fake) = FakeCalDav::start(&["anna", "ben"]).await;
         let nc = nc(&server);
-        let want = wanted(&state, &logins, 6, crate::state::today());
+        let want = wanted(&state, &logins, 6, crate::state::today(), None);
         let mut cache = Cache::default();
         reconcile(&nc, &mut cache, &want, true, NOW).await;
         // three more residents' calendars from before, none of them wanted now: 3 of 5 at once
@@ -1289,18 +1298,18 @@ mod tests {
         // "a b" and "a-b" both make cleaning-a-b
         let clash = logins(&[("@anna:house.org", "a b"), ("@ben:house.org", "a-b")]);
         assert_eq!(slug("a b"), slug("a-b"));
-        assert!(wanted(&state, &clash, 6, today).is_empty());
+        assert!(wanted(&state, &clash, 6, today, None).is_empty());
         // so do Ben and ben, on a server that ignores case; carol keeps hers
         let clash = logins(&[
             ("@anna:house.org", "Ben"),
             ("@ben:house.org", "ben"),
             ("@carol:matrix.org", "carol"),
         ]);
-        let want = wanted(&state, &clash, 6, today);
+        let want = wanted(&state, &clash, 6, today, None);
         assert_eq!(want.keys().collect::<Vec<_>>(), ["carol"]);
         // one resident's two accounts with the same login share theirs, as before
         let (_, house_logins) = house();
-        assert_eq!(wanted(&state, &house_logins, 6, today).len(), 2);
+        assert_eq!(wanted(&state, &house_logins, 6, today, None).len(), 2);
     }
 
     #[tokio::test]
@@ -1308,7 +1317,7 @@ mod tests {
         let (state, logins) = house();
         let (server, _fake) = FakeCalDav::start(&["anna", "ben"]).await;
         let nc = nc(&server);
-        let want = wanted(&state, &logins, 6, crate::state::today());
+        let want = wanted(&state, &logins, 6, crate::state::today(), None);
         let mut cache = Cache::default();
         reconcile(&nc, &mut cache, &want, true, NOW).await;
         let told = |cache: &Cache| {

@@ -225,7 +225,7 @@ async fn two_people_per_staircase_share_a_place_in_the_plan() {
         .find(|a| a.group_id == stairs.id)
         .unwrap();
     let partner = &snapshot.crew(first)[0];
-    let ics = crate::ical::render_ics(&snapshot, &first.assignee.as_ref().unwrap().id);
+    let ics = crate::ical::render_ics(&snapshot, &first.assignee.as_ref().unwrap().id, None);
     let ics = ics.replace("\r\n ", "");
     assert!(ics.contains("Task: Scharni"), "{ics}");
     assert!(

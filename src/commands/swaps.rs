@@ -281,11 +281,14 @@ pub(crate) async fn cmd_acceptswap(
         iso_year,
         iso_week,
         shift: turn.shift,
-        person_id: Some(replacement_id),
+        person_id: Some(replacement_id.clone()),
         source: AssignmentSource::Swap,
         actor_id: Some(sender_mxid.to_owned()),
         previous_person_id: current_holder_id,
     })?;
+    // They accepted it, the one who asked is named in the answer: no
+    // change notice on top.
+    state.mark_told(&group_id, slot_index, turn, Some(&replacement_id));
     state.save(&ctx.state_path).await?;
 
     let what = group
@@ -435,7 +438,7 @@ pub(crate) async fn cmd_sos(
     // In the cleaning room the request speaks for itself.
     Ok((room.room_id() != ctx.room_id).then(|| {
         format!(
-            "🆘 Asked in the cleaning room who steps in for {} (week {}).\n\
+            "🆘 Asked the group who takes over {} (week {}).\n\
              🔔 You'll be pinged there when someone does.",
             duty.label(),
             duty.turn.week

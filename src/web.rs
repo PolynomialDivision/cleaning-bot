@@ -78,11 +78,23 @@ pub struct Settings {
     pub home_url: Option<String>,
     /// Its name in the house bar; None: from its address ("example.org": "Example").
     pub home_name: Option<String>,
+    /// The cleaning room, where turns are swapped and taken over: its ID, and a
+    /// server that surely knows it (the bot's), for links to it.
+    pub room_id: Option<String>,
+    pub via: Option<String>,
 }
 
 impl Settings {
-    pub fn new(cfg: &WebConfig, proxy_secret: Vec<u8>) -> Settings {
+    /// `room_id`: the cleaning room's; `bot_user_id`: the bot's Matrix ID.
+    pub fn new(
+        cfg: &WebConfig,
+        proxy_secret: Vec<u8>,
+        room_id: &str,
+        bot_user_id: &str,
+    ) -> Settings {
         Settings {
+            room_id: Some(room_id.to_owned()),
+            via: bot_user_id.split_once(':').map(|(_, s)| s.to_owned()),
             bind_addr: cfg.bind_addr.clone(),
             public_url: cfg.public_url.clone(),
             allowed_groups: cfg.allowed_groups.clone(),
@@ -106,6 +118,25 @@ pub struct Web {
 }
 
 type WebState = Arc<Web>;
+
+impl Web {
+    /// This week's plan in the cleaning room (else the room), as a link.
+    async fn plan_link(&self) -> Option<String> {
+        let room = self.settings.room_id.as_deref()?;
+        let via = self.settings.via.as_deref();
+        let (year, week) = crate::state::current_iso_week();
+        let state = self.state.lock().await;
+        Some(
+            match state
+                .weekly_plan_canonical
+                .get(&format!("{year}-W{week:02}"))
+            {
+                Some(event) => crate::scheduler::permalink(room, event, via),
+                None => crate::scheduler::room_link(room, via),
+            },
+        )
+    }
+}
 
 /// The proxy's secret from the environment: required, at least 32 characters.
 pub fn proxy_secret_from_env() -> Result<Vec<u8>> {
@@ -666,7 +697,8 @@ async fn me_page(
     let weeks = asked.unwrap_or(12);
     let plan = web.plan(&visitor, weeks).await;
     let f = visitor.frame;
-    let body = render::me_page(&f, &plan, weeks);
+    let plan_link = web.plan_link().await;
+    let body = render::me_page(&f, &plan, weeks, plan_link.as_deref());
     web.page(
         &f,
         Tab::Me,

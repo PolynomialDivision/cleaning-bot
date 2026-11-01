@@ -207,9 +207,9 @@ pub const TEXTS: &lang::Texts = &[
     ),
     (
         "page.footer",
-        "Nur zum Ansehen: derselbe Plan wie im Putzraum auf Matrix. Ändern geht dort: ✅ wenn erledigt, !sos wenn du nicht kannst, Tauschen.",
-        "View only: the same plan as in the cleaning room on Matrix. Changes happen there: ✅ when done, !sos if you can't make it, swaps.",
-        "Лише для перегляду: той самий графік, що й у кімнаті прибирання в Matrix. Зміни там: ✅ коли готово, !sos якщо не можеш, обміни.",
+        "Nur zum Ansehen: derselbe Plan wie im Putzraum auf Matrix. Ändern geht dort unter dem Plan: ✅ erledigt · 🆘 abgeben · 🔄 tauschen · 🙋 übernehmen",
+        "View only: the same plan as in the cleaning room on Matrix. Change it there, under the plan: ✅ done · 🆘 give away · 🔄 swap · 🙋 take over",
+        "Лише для перегляду: той самий графік, що й у кімнаті прибирання в Matrix. Змінити можна там, під графіком: ✅ готово · 🆘 віддати · 🔄 помінятися · 🙋 взяти",
     ),
     ("week.label", "KW {}", "Week {}", "Тиждень {}"),
     ("week.this", "Diese Woche", "This week", "Цей тиждень"),
@@ -300,13 +300,19 @@ pub const TEXTS: &lang::Texts = &[
         "me.calendar",
         "Deine Termine stehen in deinem eigenen Kalender in der Hauscloud (App „Kalender“, auf dem Handy DAVx⁵). Wo genau, sagt dir der Putzbot auf !ical.",
         "Your turns are in your own calendar in the house cloud (its Calendar app, or DAVx⁵ on your phone). Send !ical to the cleaning bot to see which.",
-        "Твої чергування — у твоєму власному календарі в хмарі будинку (застосунок «Календар» або DAVx⁵ на телефоні). Який саме, підкаже бот прибирання на !ical.",
+        "Твої чергування є у твоєму власному календарі в хмарі будинку (застосунок «Календар» або DAVx⁵ на телефоні). Який саме, підкаже бот прибирання на !ical.",
+    ),
+    (
+        "me.room",
+        "💬 Zum Plan",
+        "💬 Open the plan",
+        "💬 Відкрити графік",
     ),
     (
         "me.change",
-        "Tauschen oder Hilfe holen: !next oder 🆘 im Putzraum.",
-        "To swap or ask for cover: !next or 🆘 in the cleaning room.",
-        "Помінятися або попросити заміну: !next або 🆘 у кімнаті прибирання.",
+        "Ändern geht unter dem Plan im Putzraum: 🆘 abgeben · 🔄 tauschen · 🙋 übernehmen",
+        "Change it under the plan in the cleaning room: 🆘 give away · 🔄 swap · 🙋 take over",
+        "Змінити можна під графіком у кімнаті прибирання: 🆘 віддати · 🔄 помінятися · 🙋 взяти",
     ),
 ];
 

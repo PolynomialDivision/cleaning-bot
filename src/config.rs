@@ -152,6 +152,12 @@ impl Default for WebConfig {
 }
 
 impl WebConfig {
+    /// The web plan's personal page ("<public_url>/me"), when the website is on.
+    pub fn me_url(&self) -> Option<String> {
+        let base = self.public_url.trim().trim_end_matches('/');
+        (self.enabled && !base.is_empty()).then(|| format!("{base}/me"))
+    }
+
     /// Checked at startup when enabled: the addresses and names.
     pub fn validate(&self) -> anyhow::Result<()> {
         if !self.enabled {
@@ -249,8 +255,9 @@ pub struct ScheduleConfig {
     /// Weekday to send the initial reminder (0 = Mon … 6 = Sun).
     #[serde(default = "default_reminder_weekday")]
     pub reminder_weekday: u8,
-    /// Weekday to send the final "not done yet" reminder for whole-week
-    /// turns (shifts get theirs on their last day).
+    /// Weekday to send the last "still open" reminder for whole-week turns
+    /// (shifts get theirs on their last day). Default Saturday, so a weekend
+    /// day is left.
     #[serde(default = "default_final_reminder_weekday")]
     pub final_reminder_weekday: u8,
     /// Local time (HH:MM) at or after which reminders are allowed to fire.
@@ -283,8 +290,8 @@ fn default_reminder_weekday() -> u8 {
     0
 } // Monday
 fn default_final_reminder_weekday() -> u8 {
-    6
-} // Sunday
+    5
+} // Saturday: a weekend day left
 fn default_reminder_time() -> TimeOfDay {
     TimeOfDay::new(9, 0)
 }
@@ -391,7 +398,7 @@ mod tests {
         let s = &config.schedule;
         assert_eq!(s.timezone, chrono_tz::Europe::Berlin);
         assert_eq!(s.reminder_time, TimeOfDay::new(9, 0));
-        assert_eq!(s.final_reminder_weekday, 6);
+        assert_eq!(s.final_reminder_weekday, 5);
         assert!(config.directory.is_some() && config.web.enabled && config.web.guests);
         config.web.validate().unwrap();
         let n = config.nextcloud.as_ref().unwrap();

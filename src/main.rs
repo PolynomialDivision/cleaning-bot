@@ -43,6 +43,7 @@ mod house;
 mod ical;
 mod lang;
 mod names;
+mod notices;
 mod onboarding;
 mod paper;
 mod pdf;
@@ -248,7 +249,12 @@ async fn main() -> Result<()> {
         let site = web::Web::new(
             state.clone(),
             directory_read.clone(),
-            web::Settings::new(&config.web, secret),
+            web::Settings::new(
+                &config.web,
+                secret,
+                &config.schedule.room_id,
+                &config.matrix.user_id,
+            ),
             &config.matrix.user_id,
         )?;
         supervise("website", web::serve(site));

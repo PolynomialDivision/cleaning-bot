@@ -7,11 +7,12 @@ keeps track of who actually cleaned.
 ## Using it (for housemates)
 
 ```
-📅 !next · your turns: swap one or 🆘 from there
+📅 !next · your turns: swap or give one away
+🙋 !take · take over a turn
 📋 !plan · see the plan
 👥 !mygroups · join or leave groups
 ✅ !done · done! (or ✅ on the plan)
-🆘 !sos · can't make it? find cover (or 🆘 on the plan)
+🆘 !sos · give a turn away (or 🆘 on the plan)
 🗓 !ical · where your calendar is
 📄 !plan pdf · printable plan
 ```
@@ -20,7 +21,7 @@ The bot answers a command as a reply to it, in the thread, if you wrote
 it in one.
 
 **The help board.** An admin can post a friendly overview with `!help post`.
-Its reactions are buttons: 📅 your next turns (as the menu below), 📋 the
+Its reactions are buttons: 📅 your next turns (as the menu below), 🙋 turns to take over, 📋 the
 plan, 👥 your groups, 📄 a PDF, 💬 a private chat: the bot answers privately if you
 have a private chat with it, else as a reply to the board, addressed to
 you, and then takes the reaction away so the button stays clean. 💬 makes
@@ -28,30 +29,78 @@ the bot invite you to a new encrypted chat (no invite allowlist needed for
 that); once you join, it greets you there with your groups and calendar
 link.
 
-`!help more` lists the rest (`!status`, `!undo`, `!takeover`, `!swap`,
+`!help more` lists the rest (`!status`, `!undo`, `!take`, `!swap`,
 `!join`, `!leave`, `!groups`, `!stats`, `!plan pdf history`).
 
 **The weekly plan** is posted and pinned on the configured weekday (later
-that week if the bot was down then). React ✅ on it when your part is done;
-take the ✅ back to undo. It is edited in place as things change; an edit
-only notifies people who are new on it (after a takeover, say).
+that week if the bot was down then). Its buttons: ✅ done, 🆘 give away, 🔄 swap,
+🙋 take over. Take the ✅ back to undo. A ✅ on it only counts for its
+own week. It is edited in place as things change, without pinging: whoever
+gets or loses a turn hears it from the message about that change (below).
+
+Below the week, the plan gives a heads-up of next week's turns, so everyone
+hears of their turn about a week ahead (someone on both weeks gets one
+ping). Turns already cleaned show as done:
+
+```
+👀 **Next week** · 13 – 19 Oct
+Kitchen: @alice
+Bath · Thu–Sun: @bob
+```
+
+A week without cleaning still gets a plan when next week has some.
 
 Of the bot's own messages only the newest plan stays pinned: posting a plan
 unpins every earlier plan or reminder, of any age, and so does every start
 of the bot. Messages pinned by people stay pinned.
 
-**Reminders** are short and only ping who is still open:
+**Reminders** are short and only ping who is still open. The last one
+comes on a shift's last day, and for a whole-week turn on
+`final_reminder_weekday` (Saturday by default, so a weekend day is left;
+missed then, the next day). It says when each turn ends:
 
 ```
-⏰ Still open, ends today: @bob (Bath · Thu–Fri) · Dan (Kitchen)
+⏰ Still open, ends today: @bob (Bath · Thu–Sat)
+⏰ Still open until tomorrow: Dan (Kitchen)
 ✅ alice (2nd Floor)
-React ✅ here or on the plan when it's done · 🆘 if you can't make it.
+✅ here or on the plan when done · 🆘 give away
 ```
 
 A ✅ on the reminder counts the same as one on the plan. The reminder is
 edited as people finish (without pinging anyone again), until it reads
 "✨ All done. Thanks!". A shift starting mid-week gets a "🔔 Your turn
 starts today" one; `!plan remind` (admin) sends a "Still open this week".
+
+**Plan changes.** When who holds a turn of the next two weeks changes (an
+admin's assignment, someone moving out, a swap, a new rhythm, a new slot),
+one message tells the new holder and the previous one (someone who moved
+out is named, not pinged):
+
+```
+🔀 **Plan changed**
+🧹 Kitchen · 13 – 19 Oct: @alice ➡️ @bob
+```
+
+Changes found at the same time share one message. None go out before
+`reminder_time` or after 21:00; they wait for the morning. The bot
+remembers who it told about each turn (the plan, swap and takeover messages
+count), so nobody hears of the same change twice, and turns that just came
+into view or were there before this feature are recorded without a message.
+Calendars in the cloud stay an overview without alarms: the reminders are
+the room's messages.
+
+**Three ways to hand a turn around**, all by tapping, none needs a command:
+
+| | What it does | Where |
+|---|---|---|
+| 🆘 **give away** | asks the group who takes your turn; it stays yours until someone does | 🆘 on the plan, or 📅 your turns |
+| 🔄 **swap** | asks the group who swaps: they take yours, you take their next one of that group | 📅 your turns |
+| 🙋 **take over** | takes someone's turn (or nobody's), nobody has to agree | 🙋 on the plan or the help board, `!take` |
+
+Nothing changes hands by accident: every change needs the ✅ of the one
+who takes a turn, under a line that says exactly what they get. Whoever
+loses or gets a turn is pinged; the plan, the menus, the reminders and the
+calendars follow by themselves.
 
 **Your turns, as a menu.** `!next` (or `!next N`, up to 10) and 📅 on the
 help board show your next turns as a menu to tap, in a private chat with
@@ -64,57 +113,92 @@ the bot if you have one, else in the cleaning room:
 3️⃣ 2nd Floor · Mon–Wed (20 – 22 Oct) · in 2 weeks · 🆘 asked
 
 👉 Kitchen · 13 – 19 Oct
-🔄 swap it · 🆘 I can't make it
+🔄 swap · 🆘 give away
 ```
 
-Tap a number to pick a turn, then 🔄 to ask the room who swaps with you
-(only 🔄 counts on that request: whoever takes it gives you their next turn
-of the group), or 🆘 if you can't make it (the request below: 🙋 or 🔄).
-Only your own taps count; the menu is edited in place and your tap taken
-back, so the same buttons work again. It keeps showing what became of each
-turn: done, asked, or someone else's now. Only your latest menu is live.
-`!next <person>` and `!next 11`+ give the plain list.
+Tap a number to pick a turn, then 🔄 or 🆘: either posts a request in the
+cleaning room (below). Only your own taps count; the menu is edited in
+place and your tap taken back, so the same buttons work again. It keeps
+showing what became of each turn: done, asked, or someone else's now. Only
+your latest menu is live. `!next <person>` and `!next 11`+ give the plain
+list. 🆘 on the plan asks for your one open turn of this or next week; with
+several, it shows this menu to pick one.
 
-**Swapping without commands.** Two ways, both by reaction:
+**Requests.** A 🆘 or 🔄 request pings the group's other members:
 
-- *Cleaning early.* ✅ (or `!done`) while your own shift of the week is
-  still to come (Thu–Sun, say) and the running shift of the same slot is
-  still open: you did that one, so you swap. You get the running shift,
-  marked done; its holder gets your later one and is told:
+```
+🆘 Who takes over? bob can't make it:
+2nd Floor · Thu–Sun (8 – 11 Oct)
+🙋 I'll do it
+🔄 swap: you take it, bob takes your next one
+bob: ↩️ if you can after all
+@alice @carol
+```
 
-  ```
-  🔄 @alice, bob already cleaned **2nd Floor · Mon–Wed** for you, so you two swapped: you're on **Thu–Sun (8 – 11 Oct)** now.
-  Doesn't suit you? React ↩️ and I'll swap you back.
-  ```
+🙋 or 🔄 on it asks the one who tapped, as a reply, before anything
+changes:
 
-  ↩️ there (by either of you) swaps back until the later shift starts; the
-  cleaning stays recorded. Taking the ✅ back undoes both.
-- *🆘 Who steps in?* 🆘 on the plan or a reminder asks the room to cover
-  your open turns of that week; `!sos [group] [slot] [week N] [on <day>]`
-  does it for your next or any later turn (also from a private chat). The
-  request pings the group's other members:
+```
+🔄 alice, swap with bob?
+➡️ You do 2nd Floor · Thu–Sun (8 – 11 Oct)
+⬅️ bob does your 2nd Floor · Mon–Wed (20 – 22 Oct)
+Tap ✅ to swap.
+```
 
-  ```
-  🆘 Who can step in? bob can't make it:
-  2nd Floor · Thu–Sun (8 – 11 Oct) · week 41
-  🙋 I'll do it
-  🔄 swap: you take it, bob takes your next turn
-  (bob: ↩️ if you can make it after all)
-  @alice @carol
-  ```
+Only their ✅ counts. The first ✅ wins; the others' questions then read
+"⌛ alice was quicker". The request is edited to "✅ Sorted!" or
+"✅ Swapped!", which pings the asker. ↩️ by either of them undoes it until
+its turns start, and the request is open again; ↩️ by the asker on an open
+request (or taking the 🆘 back) withdraws it. A request closes by itself
+once the turn is done, over, or reassigned otherwise. If nobody has stepped
+in when the turn starts, the bot replies to it pinging the admins. 🔄 gives
+the asker the helper's next turn of that group (not yet started, not one
+where the asker already cleans); without one, the bot says so.
 
-  🙋 (anyone in the room) takes the turn over. 🔄 takes it and hands the
-  helper's next turn of that group (not yet started, not one where the asker
-  already cleans) to the asker; without such a turn, the bot says so and 🙋
-  still works. The request is edited to "✅ Sorted!" / "✅ Swapped!", which
-  pings the asker. ↩️ by either of them undoes it until its turns start, and
-  the request is open again; ↩️ by the asker on an open request (or taking
-  the 🆘 back) withdraws it. A request closes by itself once the turn is
-  done, over, or reassigned otherwise. If nobody has stepped in when the
-  turn starts, the bot replies to it pinging the admins.
+**Taking a turn over.** 🙋 on the plan or the help board (or `!take`)
+lists the other people's open turns of your groups for the next three
+weeks:
 
-`!swap @user` (ask one person, who accepts with `!swap accept <id>`) and
-`!takeover` still work.
+```
+🙋 Take over a turn
+1️⃣ Kitchen · 13 – 19 Oct · alice · 🆘 asked
+2️⃣ 👉 Staircase / Scharni · 20 – 26 Oct · carol
+
+👉 Staircase / Scharni · 20 – 26 Oct from carol
+Tap ✅ to take it.
+```
+
+Tap a number, then ✅: it's yours. If it changed hands between the two
+taps, nothing happens and the menu says who has it now (one more ✅ takes
+it from them). The one who had it is told in the cleaning room, with ↩️ to
+keep it (until it's done or over; the one who took it can ↩️ give it back
+the same way):
+
+```
+🙋 dan takes over Staircase / Scharni · 20 – 26 Oct from @carol. Thanks! 💛
+carol: ↩️ to keep it
+```
+
+A turn with an open 🆘 request is taken through that request (it reads
+"✅ Sorted!"). `!take <group> [<slot>] [week N] [on <day>]` opens the menu
+with that one turn picked, also for a group you're not in.
+
+**Cleaning early swaps.** ✅ (or `!done`) while your own shift of the week
+is still to come (Thu–Sun, say) and the running shift of the same slot is
+still open: you did that one, so you swap. You get the running shift,
+marked done; its holder gets your later one and is told:
+
+```
+🔄 @alice, bob cleaned **2nd Floor · Mon–Wed** for you.
+You do **Thu–Sun (8 – 11 Oct)** instead.
+↩️ swaps back
+```
+
+↩️ there (by either of you) swaps back until the later shift starts; the
+cleaning stays recorded. Taking the ✅ back undoes both.
+
+`!swap @user` (ask one person, who accepts with `!swap accept <id>`) still
+works.
 
 **Welcome and groups.** Everyone gets one welcome, ever, when they join the
 room, or with their first command or reaction there, also if an admin added
@@ -224,7 +308,7 @@ Staircase Scharni x2` makes the slots "Scharni 1" and "Scharni 2" at the
 place "Scharni". Each of the two has their own turn (reminder, ✅, 🆘, swap);
 the plan, reminders and calendars name the place, and a room, weight or
 `!groups slot remove` given for the place applies to all of its slots.
-Commands that take a slot (`!sos`, `!takeover`, `!plan assign`) take the
+Commands that take a slot (`!sos`, `!take`, `!plan assign`) take the
 place's name too. Calendar events say who you clean it with.
 
 Our house: the staircases Scharni and Colbe, every two weeks, two people
@@ -407,7 +491,10 @@ house cloud (below), kept up to date. Without one (no house account, or
 before your first login in the cloud), it sends your next turns (26 weeks,
 or `weeks`) as a `.ics` file, which does not follow changes. Events carry
 `STATUS:CONFIRMED` (or `CANCELLED` for a skipped turn), the task and who
-you clean it with, the completion, and `LAST-MODIFIED`.
+you clean it with, the completion, and `LAST-MODIFIED`. With the website on
+(`[web]`), each event's description links your page there
+(`<public_url>/me`). Events have no alarms (`VALARM`): a file keeps ringing
+after a swap, and Nextcloud drops alarms from shared calendars anyway.
 
 There are no subscription links (feeds) anymore: `!ical reset` and `!ical
 revoke` only say so, and links handed out before stopped working.
@@ -544,7 +631,7 @@ All of this lives in `src/web.rs` and `src/web/`.
   as run with its first saved change, so one that failed before changing
   anything may run again. Replies are sent after saving; a crash in between
   loses the reply, not the change.
-- **The weekly plan, reminders and welcomes** are sent with fixed Matrix
+- **The weekly plan, reminders, change notices and welcomes** are sent with fixed Matrix
   transaction IDs, so a retry after a crash returns the message already sent
   instead of posting it twice. That holds only while the homeserver remembers
   the transaction for the same device; after a new login or restoring an old

@@ -42,7 +42,10 @@ use crate::{
     domain::{AssignmentSource, CleaningGroup, GroupId, PersonId},
     format,
     rhythm::{date_range, Turn},
-    state::{EarlySwap, HelpRequest, HelpStatus, Reassignment, State, Trade},
+    state::{
+        CardStatus, ConfirmCard, EarlySwap, HelpRequest, HelpStatus, MenuTurn, Reassignment, State,
+        Trade,
+    },
     view, BotContext,
 };
 
@@ -70,6 +73,11 @@ pub(crate) fn is_swap(key: &str) -> bool {
 
 fn is_undo(key: &str) -> bool {
     reaction::is_one_of(key, &[UNDO])
+}
+
+/// ✅ on a "Take it over?" question: yes.
+fn is_confirm(key: &str) -> bool {
+    reaction::is_one_of(key, &["✅"])
 }
 
 // ── Trades ────────────────────────────────────────────────────────────────────
@@ -125,6 +133,9 @@ fn apply(state: &mut State, trade: &Trade, source: AssignmentSource, actor: &str
             actor_id: Some(actor.to_owned()),
             previous_person_id: c.from.clone(),
         })?;
+        // Whoever gets a turn here knows: they did it, or the message about
+        // it tells them (`notices` doesn't tell them again).
+        state.mark_told(&c.group_id, c.slot_index, c.turn(), c.to.as_ref());
     }
     Ok(())
 }
@@ -146,11 +157,32 @@ pub fn undoable(state: &State, trade: &Trade, today: NaiveDate) -> bool {
         })
 }
 
+/// Whether a turn taken over unasked can still go back: still the taker's,
+/// not done, not over. (Started is fine: its holder may have planned the
+/// weekend for it.)
+pub fn keepable(state: &State, trade: &Trade, today: NaiveDate) -> bool {
+    !trade.undone
+        && trade.changes.iter().all(|c| {
+            let Some(group) = state.group_by_id(&c.group_id) else {
+                return false;
+            };
+            let turn = c.turn();
+            holder(state, group, c.slot_index, turn) == c.to
+                && turn.dates(&group.rhythm).1 >= today
+                && !state.is_turn_slot_done(group, c.slot_index, turn)
+        })
+}
+
 /// Hand everything back, if `undoable`. Returns whether it did.
 fn undo(state: &mut State, trade: &mut Trade, actor: &str, today: NaiveDate) -> Result<bool> {
     if !undoable(state, trade, today) {
         return Ok(false);
     }
+    hand_back(state, trade, actor)
+}
+
+/// Hand everything back, whether or not `undoable`. Returns `true`.
+fn hand_back(state: &mut State, trade: &mut Trade, actor: &str) -> Result<bool> {
     for c in &trade.changes {
         state.apply_event(DomainEvent::SlotAssigned {
             group_id: c.group_id.clone(),
@@ -163,6 +195,13 @@ fn undo(state: &mut State, trade: &mut Trade, actor: &str, today: NaiveDate) -> 
             actor_id: Some(actor.to_owned()),
             previous_person_id: c.to.clone(),
         })?;
+    }
+    // Who took their turn back knows; anyone else gets a change notice.
+    let actor_id = state.person_by_matrix_id(actor).map(|p| p.id.clone());
+    for c in &trade.changes {
+        if actor_id.is_some() && c.from == actor_id {
+            state.mark_told(&c.group_id, c.slot_index, c.turn(), c.from.as_ref());
+        }
     }
     trade.undone = true;
     Ok(true)
@@ -341,15 +380,14 @@ pub fn early_text(state: &State, swap: &EarlySwap) -> String {
             )
         } else {
             format!(
-                "🔄 {moved}, {cleaner} already cleaned **{}** for you, so you two swapped: \
-                 you're on **{}** now.",
+                "🔄 {moved}, {cleaner} cleaned **{}** for you.\nYou do **{}** instead.",
                 done.label(),
                 when(&theirs)
             )
         });
     }
     if !swap.trade.undone {
-        lines.push("🤔 Doesn't suit you? React ↩️ and I'll swap you back.".to_owned());
+        lines.push("↩️ swaps back".to_owned());
     }
     lines.join("\n")
 }
@@ -408,6 +446,9 @@ pub fn new_request(duty: &Duty, requester: &str, trigger: Option<String>) -> Hel
         swap_only: false,
         admins_told: false,
         mentioned: Vec::new(),
+        unasked: false,
+        given_back: false,
+        asked_at: Some(chrono::Utc::now()),
         rendered: String::new(),
     }
 }
@@ -441,6 +482,14 @@ fn requester_link(state: &State, req: &HelpRequest) -> String {
     }
 }
 
+/// `mxid`'s name, or the ID itself.
+fn display_name(state: &State, mxid: &str) -> String {
+    state
+        .person_by_matrix_id(mxid)
+        .map(|p| p.display_name.clone())
+        .unwrap_or_else(|| mxid.to_owned())
+}
+
 fn helper_link(state: &State, req: &HelpRequest) -> String {
     let mxid = req.helper.as_deref().unwrap_or_default();
     match state.person_by_matrix_id(mxid) {
@@ -452,44 +501,37 @@ fn helper_link(state: &State, req: &HelpRequest) -> String {
 /// A request as it reads now, and whom it notifies.
 ///
 /// ```text
-/// 🆘 **Who can step in?** alice can't make it:
-/// **2nd Floor / Scharni · Thu–Sun (8 – 11 Oct)** · week 41
+/// 🆘 **Who takes over?** alice can't make it:
+/// **2nd Floor / Scharni · Thu–Sun (8 – 11 Oct)**
 /// 🙋 I'll do it
-/// 🔄 swap: you take it, alice takes your next turn
-/// (alice: ↩️ if you can make it after all)
+/// 🔄 swap: you take it, alice takes your next one
+/// alice: ↩️ if you can after all
 /// @bob @carl
 /// ```
 pub fn request_text(state: &State, req: &HelpRequest) -> (String, Vec<String>) {
     let Some(duty) = request_duty(state, req) else {
         return ("⌛ Closed. That group is gone.".to_owned(), Vec::new());
     };
-    let what = format!(
-        "**{} · {}** · week {}",
-        duty.place(),
-        when(&duty),
-        req.iso_week
-    );
+    let what = format!("**{} · {}**", duty.place(), when(&duty));
     let asker = requester_link(state, req);
     match req.status {
         HelpStatus::Open => {
             let pings = request_pings(state, req);
-            let name = state
-                .person_by_matrix_id(&req.requester)
-                .map(|p| p.display_name.clone())
-                .unwrap_or_else(|| req.requester.clone());
+            let name = display_name(state, &req.requester);
             let mut lines = if req.swap_only {
                 vec![
                     format!("🔄 **Who swaps?** {asker} would like to swap:"),
                     what,
-                    format!("🔄 swap: you take it, {name} takes your next turn"),
-                    format!("({name}: ↩️ to take it back)"),
+                    format!("🔄 you do this, {name} does your next one"),
+                    format!("{name}: ↩️ to cancel"),
                 ]
             } else {
                 vec![
-                    format!("🆘 **Who can step in?** {asker} can't make it:"),
+                    format!("🆘 **Who takes over?** {asker} can't make it:"),
                     what,
-                    format!("🙋 I'll do it\n🔄 swap: you take it, {name} takes your next turn"),
-                    format!("({name}: ↩️ if you can make it after all)"),
+                    "🙋 I'll do it".to_owned(),
+                    format!("🔄 swap: you do this, {name} does your next one"),
+                    format!("{name}: ↩️ to cancel"),
                 ]
             };
             if !pings.is_empty() {
@@ -497,38 +539,57 @@ pub fn request_text(state: &State, req: &HelpRequest) -> (String, Vec<String>) {
             }
             (lines.join("\n"), pings)
         }
+        HelpStatus::Taken if req.unasked => {
+            let name = display_name(state, &req.requester);
+            let mut text = format!(
+                "🙋 {} takes over {what} from {asker}. Thanks! 💛",
+                helper_link(state, req),
+            );
+            if req
+                .trade
+                .as_ref()
+                .is_some_and(|t| keepable(state, t, crate::state::today()))
+            {
+                text.push_str(&format!("\n{name}: ↩️ to keep it"));
+            }
+            (text, vec![req.requester.clone()])
+        }
+        HelpStatus::Withdrawn if req.unasked && req.given_back => (
+            format!(
+                "↩️ {} gives {what} back to {asker}.",
+                helper_link(state, req)
+            ),
+            vec![req.requester.clone()],
+        ),
+        HelpStatus::Withdrawn if req.unasked => (
+            format!(
+                "↩️ {asker} keeps {what}. Thanks anyway, {}! 💛",
+                helper_link(state, req)
+            ),
+            req.helper.iter().cloned().collect(),
+        ),
         HelpStatus::Taken => (
             format!(
-                "✅ **Sorted!** {} does {what} for {}. Thank you 💛\n↩️ undoes it, until it starts.",
+                "✅ **Sorted!** {} does {what} for {asker}. Thanks! 💛\n↩️ to undo, until it starts",
                 helper_link(state, req),
-                req.requester
             ),
             vec![req.requester.clone()],
         ),
         HelpStatus::Swapped => {
-            let instead = req
+            let mut lines = vec![
+                "✅ **Swapped!** Thanks! 💛".to_owned(),
+                format!("➡️ {} does {what}", helper_link(state, req)),
+            ];
+            if let Some(d) = req
                 .trade
                 .as_ref()
                 .and_then(|t| t.changes.get(1))
                 .and_then(|c| duty_of(state, c))
-                .map(|d| {
-                    format!(
-                        ", and {} does **{} · {}** · week {} instead",
-                        req.requester,
-                        d.place(),
-                        when(&d),
-                        d.turn.week
-                    )
-                })
-                .unwrap_or_default();
-            (
-                format!(
-                    "✅ **Swapped!** {} does {what} for {}{instead}. Thank you 💛\n↩️ undoes it, until it starts.",
-                    helper_link(state, req),
-                    req.requester
-                ),
-                vec![req.requester.clone()],
-            )
+            {
+                lines.push(format!("⬅️ {asker} does **{} · {}**", d.place(), when(&d)));
+            }
+            lines.push("↩️ to undo, until it starts".to_owned());
+            (lines.join("\n"), vec![req.requester.clone()])
         }
         HelpStatus::Withdrawn if req.swap_only => (
             format!("👍 {asker} keeps {what} after all."),
@@ -696,9 +757,39 @@ pub fn back(state: &mut State, req: &mut HelpRequest, who: &str, today: NaiveDat
             let Some(mut trade) = req.trade.clone() else {
                 return Ok(Back::Nothing);
             };
-            if !undo(state, &mut trade, who, today)? {
+            let undone = if req.unasked {
+                keepable(state, &trade, today) && hand_back(state, &mut trade, who)?
+            } else {
+                undo(state, &mut trade, who, today)?
+            };
+            if !undone {
                 return Ok(Back::TooLate);
             }
+            // Both know: who tapped, and the other one by the reply
+            // (`on_request`) or the edit.
+            for c in &trade.changes {
+                state.mark_told(&c.group_id, c.slot_index, c.turn(), c.from.as_ref());
+            }
+            if req.unasked {
+                // Nobody asked: undone, the turn is back where it was. Given
+                // back by the one who took it, the edit tells its holder.
+                req.given_back = req.helper.as_deref() == Some(who);
+                if req.given_back {
+                    for c in &trade.changes {
+                        state.mark_told(&c.group_id, c.slot_index, c.turn(), c.from.as_ref());
+                    }
+                }
+                req.status = HelpStatus::Withdrawn;
+                req.trade = Some(trade);
+                return Ok(Back::Undone);
+            }
+            if who == req.requester {
+                // The one who asked does it after all.
+                req.status = HelpStatus::Withdrawn;
+                req.trade = Some(trade);
+                return Ok(Back::Undone);
+            }
+            // The helper can't after all: open again.
             req.status = HelpStatus::Open;
             req.helper = None;
             req.trade = None;
@@ -729,10 +820,23 @@ pub fn settle(state: &State, req: &mut HelpRequest, today: NaiveDate) -> bool {
     true
 }
 
-/// An open request whose turn has started: time to tell the admins.
-fn needs_admins(state: &State, req: &HelpRequest, today: NaiveDate) -> bool {
+/// How long the group has to step in before the admins hear of a request
+/// whose turn has started.
+const ADMIN_GRACE_HOURS: i64 = 4;
+
+/// An open request whose turn has started, asked a while ago (`now`): time
+/// to tell the admins.
+fn needs_admins(
+    state: &State,
+    req: &HelpRequest,
+    today: NaiveDate,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
     req.status == HelpStatus::Open
         && !req.admins_told
+        && req
+            .asked_at
+            .is_none_or(|at| now - at >= chrono::Duration::hours(ADMIN_GRACE_HOURS))
         && request_duty(state, req).is_some_and(|d| d.turn.dates(&d.group.rhythm).0 <= today)
 }
 
@@ -753,7 +857,205 @@ fn prune(state: &mut State, today: NaiveDate) -> bool {
             .iter()
             .any(|c| current(c.iso_year, c.iso_week))
     });
+    let requests: HashSet<String> = state.help_requests.keys().cloned().collect();
+    let cards = state.confirm_cards.len();
+    state
+        .confirm_cards
+        .retain(|_, c| requests.contains(&c.request_id));
     state.help_requests.len() + state.early_swaps.len() != before
+        || state.confirm_cards.len() != cards
+}
+
+// ── "Take it over? ✅" ────────────────────────────────────────────────────────
+
+/// What `take` would say if `helper` stepped in on `req` now (🔄 with
+/// `swap`). Nothing changes.
+pub fn could_take(
+    state: &State,
+    req: &HelpRequest,
+    helper: &str,
+    swap: bool,
+    today: NaiveDate,
+) -> Taken {
+    let mut probe = req.clone();
+    if settle(state, &mut probe, today) || probe.status != HelpStatus::Open {
+        return Taken::NotOpen;
+    }
+    if helper == req.requester {
+        return Taken::Own;
+    }
+    if req.swap_only && !swap {
+        return Taken::SwapOnly;
+    }
+    if swap && swap_give(state, req, helper, today).is_none() {
+        return Taken::NothingToSwap;
+    }
+    Taken::Done
+}
+
+fn menu_turn(d: &Duty) -> MenuTurn {
+    MenuTurn {
+        group_id: d.group.id.clone(),
+        slot_index: d.slot_index,
+        iso_year: d.turn.year,
+        iso_week: d.turn.week,
+        shift: d.turn.shift,
+    }
+}
+
+/// The turn of `helper` a 🔄 on `req` would hand the one asking.
+fn swap_give(state: &State, req: &HelpRequest, helper: &str, today: NaiveDate) -> Option<Duty> {
+    let duty = request_duty(state, req)?;
+    let helper_id = state.person_by_matrix_id(helper)?.id.clone();
+    let requester_id = state.person_by_matrix_id(&req.requester)?.id.clone();
+    next_turn_to_give(state, &helper_id, &requester_id, &duty, today)
+}
+
+/// A question as it reads now.
+///
+/// ```text
+/// 🙋 bob, take over **Kitchen · 13 – 19 Oct** from alice?
+/// Tap ✅ to confirm.
+/// ```
+pub fn card_text(state: &State, card: &ConfirmCard, today: NaiveDate) -> String {
+    let Some(req) = state.help_requests.get(&card.request_id) else {
+        return "⌛ Not open any more.".to_owned();
+    };
+    let Some(duty) = request_duty(state, req) else {
+        return "⌛ Not open any more.".to_owned();
+    };
+    let you = match state.person_by_matrix_id(&card.user_id) {
+        Some(p) => view::user_link(p),
+        None => view::user_id_link(&card.user_id),
+    };
+    let theirs = req.helper.as_deref() == Some(card.user_id.as_str())
+        && matches!(req.status, HelpStatus::Taken | HelpStatus::Swapped);
+    if card.status == CardStatus::Done || theirs {
+        return format!("✅ Done. Thanks, {you}! 💛");
+    }
+    let what = format!("**{} · {}**", duty.place(), when(&duty));
+    let name = display_name(state, &req.requester);
+    let note = card
+        .note
+        .as_ref()
+        .map(|n| format!("\n{n}"))
+        .unwrap_or_default();
+    let text = match could_take(state, req, &card.user_id, card.swap, today) {
+        Taken::Done if card.swap => match swap_give(state, req, &card.user_id, today) {
+            Some(give) => format!(
+                "🔄 {you}, swap with {name}?\n➡️ You do {what}\n⬅️ {name} does your **{} · {}**\nTap ✅ to swap.",
+                give.place(),
+                when(&give)
+            ),
+            None => "⌛ Not open any more.".to_owned(),
+        },
+        Taken::Done => format!("🙋 {you}, take over {what} from {name}?\nTap ✅ to confirm."),
+        Taken::NothingToSwap => {
+            format!("🤷 {you}, you have no turn of that group left to swap.")
+        }
+        _ => {
+            return match req.helper.as_deref() {
+                Some(helper) if matches!(req.status, HelpStatus::Taken | HelpStatus::Swapped) => {
+                    format!(
+                        "⌛ {} was quicker. Thanks anyway!",
+                        display_name(state, helper)
+                    )
+                }
+                _ => "⌛ Not open any more.".to_owned(),
+            }
+        }
+    };
+    format!("{text}{note}")
+}
+
+// ── 🙋 Taking a turn over, nobody asked ──────────────────────────────────────
+
+/// What taking a turn over did.
+#[derive(Debug, PartialEq)]
+pub enum TakeOver {
+    /// Theirs now, from someone who is told by `notice` (a request record,
+    /// `unasked`, to post: its ↩️ lets them keep it).
+    Notice(Box<HelpRequest>),
+    /// Theirs now; it had a 🆘 request (this event ID), now sorted.
+    Sorted(String),
+    /// Theirs now; nobody held it.
+    Quiet,
+    /// Someone else holds it than when they picked it: nothing changed.
+    Changed,
+    /// Done already: nothing changed.
+    Done,
+    /// Over: nothing changed.
+    Over,
+    /// Theirs already.
+    Own,
+}
+
+/// `taker` (Matrix ID) takes `duty` over, nobody asked, as long as
+/// `expected` still holds it (they saw it that way when they picked it).
+pub fn take_over(
+    state: &mut State,
+    duty: &Duty,
+    taker: &str,
+    expected: Option<&PersonId>,
+    today: NaiveDate,
+) -> Result<TakeOver> {
+    if duty.turn.dates(&duty.group.rhythm).1 < today {
+        return Ok(TakeOver::Over);
+    }
+    if state.is_turn_slot_done(&duty.group, duty.slot_index, duty.turn) {
+        return Ok(TakeOver::Done);
+    }
+    let current = holder(state, &duty.group, duty.slot_index, duty.turn);
+    let taker_id = state.person_by_matrix_id(taker).map(|p| p.id.clone());
+    if current.is_some() && current == taker_id {
+        return Ok(TakeOver::Own);
+    }
+    if current.as_ref() != expected {
+        return Ok(TakeOver::Changed);
+    }
+    // Asked for cover already: that request is the one that gets sorted.
+    if let Some((id, req)) = open_request(state, duty)
+        .filter(|(_, r)| !r.swap_only)
+        .map(|(id, r)| (id.clone(), r.clone()))
+    {
+        let mut req = req;
+        if take(state, &mut req, taker, false, today)? == Taken::Done {
+            state.help_requests.insert(id.clone(), req);
+            return Ok(TakeOver::Sorted(id));
+        }
+    }
+    state.apply_event(DomainEvent::PersonCreated {
+        person_id: uuid::Uuid::new_v4().to_string(),
+        display_name: taker.into(),
+        matrix_id: Some(taker.into()),
+    })?;
+    let taker_id = state
+        .person_by_matrix_id(taker)
+        .map(|p| p.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("{taker} has no person record"))?;
+    let from_mxid = current
+        .as_ref()
+        .and_then(|id| state.person_by_id(id))
+        .and_then(|p| p.matrix_id.clone());
+    let mut trade = Trade::default();
+    trade.changes.push(reassignment(
+        state,
+        &duty.group,
+        duty.slot_index,
+        duty.turn,
+        &taker_id,
+        false,
+    ));
+    apply(state, &trade, AssignmentSource::Takeover, taker)?;
+    let Some(from) = from_mxid else {
+        return Ok(TakeOver::Quiet);
+    };
+    let mut notice = new_request(duty, &from, None);
+    notice.unasked = true;
+    notice.status = HelpStatus::Taken;
+    notice.helper = Some(taker.to_owned());
+    notice.trade = Some(trade);
+    Ok(TakeOver::Notice(Box::new(notice)))
 }
 
 // ── Matrix ────────────────────────────────────────────────────────────────────
@@ -889,6 +1191,7 @@ pub async fn post_request(
             }
         };
     let swap_only = req.swap_only;
+    let unasked = req.unasked;
     req.rendered = text;
     req.mentioned = notify;
     {
@@ -896,7 +1199,13 @@ pub async fn post_request(
         state.help_requests.insert(event_id.to_string(), req);
         save(ctx, &mut state).await;
     }
-    let buttons: &[&str] = if swap_only { &[SWAP] } else { &[TAKE, SWAP] };
+    let buttons: &[&str] = if unasked {
+        &[UNDO]
+    } else if swap_only {
+        &[SWAP, UNDO]
+    } else {
+        &[TAKE, SWAP, UNDO]
+    };
     seed(room, &event_id, buttons).await;
     Some(event_id)
 }
@@ -914,24 +1223,28 @@ pub async fn on_reaction(
 ) -> bool {
     let what = {
         let state = ctx.state.lock().await;
-        if state.help_requests.contains_key(reacted_to)
-            && (is_take(key) || is_swap(key) || is_undo(key))
-        {
+        let on_request = state.help_requests.contains_key(reacted_to);
+        let plan_week = state.weekly_plan_event_ids.get(reacted_to).copied();
+        if state.confirm_cards.contains_key(reacted_to) && is_confirm(key) {
+            Some(Tap::Confirm)
+        } else if on_request && is_undo(key) {
             Some(Tap::Request)
+        } else if on_request && (is_take(key) || is_swap(key)) {
+            Some(Tap::Offer(is_swap(key)))
         } else if state.early_swaps.contains_key(reacted_to) && is_undo(key) {
             Some(Tap::EarlyUndo)
         } else if is_ask(key) {
-            state
-                .weekly_plan_event_ids
-                .get(reacted_to)
-                .copied()
-                .or_else(|| {
-                    state
-                        .reminder_messages
-                        .get(reacted_to)
-                        .map(|r| (r.iso_year, r.iso_week))
-                })
-                .map(Tap::Ask)
+            match plan_week {
+                Some(week) => Some(Tap::Ask(week, true, false)),
+                None => state
+                    .reminder_messages
+                    .get(reacted_to)
+                    .map(|r| Tap::Ask((r.iso_year, r.iso_week), false, false)),
+            }
+        } else if is_swap(key) && plan_week.is_some() {
+            plan_week.map(|week| Tap::Ask(week, true, true))
+        } else if is_take(key) && plan_week.is_some() {
+            Some(Tap::TakeMenu)
         } else {
             None
         }
@@ -948,52 +1261,312 @@ pub async fn on_reaction(
     }
     let today = crate::state::today();
     match what {
-        Tap::Ask(week) => ask(ctx, room, reaction_id, sender, reacted_to, week, today).await,
-        Tap::Request => on_request(ctx, room, sender, reacted_to, key, today).await,
+        Tap::Ask(week, on_plan, swap) => {
+            let asking = Asking {
+                week,
+                on_plan,
+                swap,
+            };
+            ask(ctx, room, reaction_id, sender, reacted_to, asking, today).await;
+            if swap {
+                // 🔄 is a button; 🆘 stays, taking it back withdraws.
+                consume(room, reaction_id).await;
+            }
+        }
+        Tap::Request => on_request(ctx, room, sender, reacted_to, today).await,
+        Tap::Offer(swap) => {
+            offer(ctx, room, sender, reacted_to, swap, today).await;
+            consume(room, reaction_id).await;
+        }
+        Tap::Confirm => {
+            confirm(ctx, room, sender, reacted_to, today).await;
+            consume(room, reaction_id).await;
+        }
+        Tap::TakeMenu => {
+            take_menu(ctx, room, sender, reacted_to).await;
+            consume(room, reaction_id).await;
+        }
         Tap::EarlyUndo => undo_early(ctx, room, sender.as_str(), reacted_to, None, today).await,
     }
     true
 }
 
+/// What a 🆘 or 🔄 on the plan or a reminder asks for.
+struct Asking {
+    week: (i32, u32),
+    /// On the plan: its week and the next.
+    on_plan: bool,
+    /// 🔄: a swap only.
+    swap: bool,
+}
+
 enum Tap {
-    Ask((i32, u32)),
+    /// 🆘 on the plan (`true`) or a reminder of that week; 🔄 on the plan
+    /// (`true`, `true`).
+    Ask((i32, u32), bool, bool),
+    /// ↩️ on a request.
     Request,
+    /// 🙋 or 🔄 (`true`) on a request: ask them to confirm.
+    Offer(bool),
+    /// ✅ on a "Take it over?" question.
+    Confirm,
+    /// 🙋 on the plan: the menu of turns to take over.
+    TakeMenu,
     EarlyUndo,
 }
 
-/// 🆘 on the plan or a reminder of `week`: a request for each of the
-/// sender's open turns that week.
+/// Take a button press back, so the button can be pressed again.
+async fn consume(room: &Room, reaction_id: &EventId) {
+    if let Some(bot) = room.client().user_id().map(ToOwned::to_owned) {
+        crate::onboarding::consume_tap(room, &reaction_id.to_owned(), &bot).await;
+    }
+}
+
+/// 🙋 or 🔄 (`swap`) on request `request_id`: ask the sender to confirm
+/// with a ✅, or say why not.
+async fn offer(
+    ctx: &BotContext,
+    room: &Room,
+    sender: &UserId,
+    request_id: &str,
+    swap: bool,
+    today: NaiveDate,
+) {
+    let who = sender.as_str();
+    let (check, swap_only, asked_already) = {
+        let state = ctx.state.lock().await;
+        let Some(req) = state.help_requests.get(request_id) else {
+            return;
+        };
+        let asked_already = state.confirm_cards.values().any(|c| {
+            c.user_id == who
+                && c.request_id == request_id
+                && c.swap == swap
+                && c.status == CardStatus::Asking
+        });
+        (
+            could_take(&state, req, who, swap, today),
+            req.swap_only,
+            asked_already,
+        )
+    };
+    let answer = match check {
+        Taken::Done if asked_already => return,
+        Taken::Done => None,
+        Taken::Own => Some("🙃 That's your own request. ↩️ withdraws it."),
+        Taken::NothingToSwap if swap_only => {
+            Some("🤷 You have no upcoming turn in that group to swap.")
+        }
+        Taken::NothingToSwap => {
+            Some("🤷 You have no upcoming turn in that group to swap. 🙋 takes it over instead.")
+        }
+        Taken::SwapOnly => {
+            Some("🔄 This one is a swap: 🔄 takes it and gives them your next turn.")
+        }
+        Taken::NotOpen => Some("⌛ That one is sorted already."),
+    };
+    if let Some(text) = answer {
+        reply(room, request_id, who, text).await;
+        return;
+    }
+    let mut card = ConfirmCard {
+        user_id: who.to_owned(),
+        request_id: request_id.to_owned(),
+        swap,
+        give: None,
+        note: None,
+        status: CardStatus::Asking,
+        rendered: String::new(),
+    };
+    {
+        let state = ctx.state.lock().await;
+        if swap {
+            card.give = state
+                .help_requests
+                .get(request_id)
+                .and_then(|req| swap_give(&state, req, who, today))
+                .map(|d| menu_turn(&d));
+        }
+        card.rendered = card_text(&state, &card, today);
+    }
+    let Ok(request_event) = request_id.parse::<OwnedEventId>() else {
+        return;
+    };
+    let mut message = content(ctx, room, &card.rendered, &[]).await;
+    message.relates_to = Some(Relation::Reply(Reply::with_event_id(request_event)));
+    let event_id = match mxbot_common::send::send_with_retry(room, message).await {
+        Ok(event_id) => event_id,
+        Err(e) => {
+            tracing::warn!("Failed to ask to confirm a takeover: {e}");
+            return;
+        }
+    };
+    {
+        let mut state = ctx.state.lock().await;
+        state.confirm_cards.insert(event_id.to_string(), card);
+        if !save(ctx, &mut state).await {
+            return;
+        }
+    }
+    seed(room, &event_id, &["✅"]).await;
+}
+
+/// ✅ on question `card_id`: by the one asked, it goes through (if it still
+/// can; the question then says why not). Anyone else's ✅ does nothing.
+async fn confirm(ctx: &BotContext, room: &Room, sender: &UserId, card_id: &str, today: NaiveDate) {
+    let request_id = {
+        let mut state = ctx.state.lock().await;
+        let Some(mut card) = state.confirm_cards.get(card_id).cloned() else {
+            return;
+        };
+        if card.user_id != sender.as_str() || card.status != CardStatus::Asking {
+            return;
+        }
+        let Some(mut req) = state.help_requests.get(&card.request_id).cloned() else {
+            return;
+        };
+        // A swap goes through only with the turn it showed.
+        let give = card
+            .swap
+            .then(|| swap_give(&state, &req, sender.as_str(), today))
+            .flatten()
+            .map(|d| menu_turn(&d));
+        if card.swap && give.is_some() && give != card.give {
+            card.give = give;
+            card.note = Some("🔀 That changed, see above. ✅ again if it suits you.".to_owned());
+            let request_id = card.request_id.clone();
+            state.confirm_cards.insert(card_id.to_owned(), card);
+            if save(ctx, &mut state).await {
+                drop(state);
+                update_cards(ctx, room, Some(&request_id)).await;
+            }
+            return;
+        }
+        card.note = None;
+        match take(&mut state, &mut req, sender.as_str(), card.swap, today) {
+            Ok(Taken::Done) => {
+                card.status = CardStatus::Done;
+                state.help_requests.insert(card.request_id.clone(), req);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("A confirmed takeover failed: {e}");
+                return;
+            }
+        }
+        let request_id = card.request_id.clone();
+        state.confirm_cards.insert(card_id.to_owned(), card);
+        if !save(ctx, &mut state).await {
+            return;
+        }
+        request_id
+    };
+    update_request(ctx, room, &request_id).await;
+    refresh_plan(ctx, room).await;
+}
+
+/// 🙋 on the plan (`plan_id`): the sender's menu of turns to take over, in
+/// their private chat if they have one, else under the plan.
+async fn take_menu(ctx: &BotContext, room: &Room, sender: &UserId, plan_id: &str) {
+    let private = crate::help_board::private_chat(ctx, &room.client(), &sender.to_owned()).await;
+    let target = private.as_ref().unwrap_or(room);
+    let relation = match (&private, plan_id.parse::<OwnedEventId>()) {
+        (None, Ok(plan)) => Some(Relation::Reply(Reply::with_event_id(plan))),
+        _ => None,
+    };
+    match crate::turn_menu::post_take(ctx, target, sender, relation).await {
+        Ok(true) => {}
+        Ok(false) => {
+            reply(
+                room,
+                plan_id,
+                sender.as_str(),
+                crate::turn_menu::NOTHING_TO_TAKE,
+            )
+            .await
+        }
+        Err(e) => tracing::warn!("Failed to post a take menu: {e}"),
+    }
+}
+
+/// Bring the questions about `request_id` (all, without one) up to date.
+pub(crate) async fn update_cards(ctx: &BotContext, room: &Room, request_id: Option<&str>) {
+    let today = crate::state::today();
+    let stale: Vec<(String, String)> = {
+        let state = ctx.state.lock().await;
+        state
+            .confirm_cards
+            .iter()
+            .filter(|(_, c)| request_id.is_none_or(|r| c.request_id == r))
+            .map(|(id, c)| (id.clone(), card_text(&state, c, today), c))
+            .filter(|(_, text, c)| text != &c.rendered)
+            .map(|(id, text, _)| (id, text))
+            .collect()
+    };
+    for (id, text) in stale {
+        if edit(ctx, room, &id, &text, &[], &[]).await {
+            let mut state = ctx.state.lock().await;
+            if let Some(card) = state.confirm_cards.get_mut(&id) {
+                card.rendered = text;
+            }
+            save(ctx, &mut state).await;
+        }
+    }
+}
+
+/// 🆘 (or 🔄) on the plan (its week and the next) or a reminder of its
+/// week: a request for the sender's open turn. Several on the plan: their
+/// menu to pick one; several on a reminder: a request each.
 async fn ask(
     ctx: &BotContext,
     room: &Room,
     reaction_id: &EventId,
     sender: &UserId,
     reacted_to: &str,
-    week: (i32, u32),
+    asking: Asking,
     today: NaiveDate,
 ) {
+    let Asking {
+        week,
+        on_plan,
+        swap,
+    } = asking;
     let (fresh, asked) = {
         let state = ctx.state.lock().await;
-        let duties = state
+        let mut weeks = vec![week];
+        if on_plan {
+            weeks.push(crate::state::add_weeks(week.0, week.1, 1));
+        }
+        let duties: Vec<Duty> = state
             .person_by_matrix_id(sender.as_str())
-            .map(|p| askable(&state, &p.id, week, today))
+            .map(|p| {
+                weeks
+                    .iter()
+                    .flat_map(|w| askable(&state, &p.id, *w, today))
+                    .collect()
+            })
             .unwrap_or_default();
         let asked = duties.len();
         let fresh: Vec<HelpRequest> = duties
             .iter()
             .filter(|d| open_request(&state, d).is_none())
-            .map(|d| new_request(d, sender.as_str(), Some(reaction_id.to_string())))
+            .map(|d| {
+                // A 🔄 is consumed: its reaction can't withdraw.
+                let trigger = (!swap).then(|| reaction_id.to_string());
+                let mut req = new_request(d, sender.as_str(), trigger);
+                req.swap_only = swap;
+                req
+            })
             .collect();
         (fresh, asked)
     };
     if asked == 0 {
-        reply(
-            room,
-            reacted_to,
-            sender.as_str(),
-            "🤷 You have no open turn this week, nothing to ask cover for.",
-        )
-        .await;
+        let text = if on_plan {
+            "🤷 Nothing open of yours this week or next. Later turns: 📅 !next"
+        } else {
+            "🤷 Nothing open of yours this week."
+        };
+        reply(room, reacted_to, sender.as_str(), text).await;
         return;
     }
     if fresh.is_empty() {
@@ -1006,18 +1579,41 @@ async fn ask(
         .await;
         return;
     }
+    if on_plan && fresh.len() > 1 {
+        let menu = {
+            let state = ctx.state.lock().await;
+            crate::turn_menu::new_menu(
+                &state,
+                sender.as_str(),
+                room.room_id().as_str(),
+                crate::turn_menu::DEFAULT,
+            )
+        };
+        if let (Some(mut menu), Ok(plan)) = (menu, reacted_to.parse::<OwnedEventId>()) {
+            menu.feedback = Some(if swap {
+                "🤔 Which one? Tap its number, then 🔄.".to_owned()
+            } else {
+                "🤔 Which one? Tap its number, then 🆘.".to_owned()
+            });
+            let relation = Some(Relation::Reply(Reply::with_event_id(plan)));
+            if let Err(e) = crate::turn_menu::post_menu(ctx, room, menu, relation).await {
+                tracing::warn!("Failed to post a turn menu for a 🆘: {e}");
+            }
+            return;
+        }
+    }
     for req in fresh {
         post_request(ctx, room, req).await;
     }
 }
 
-/// 🙋, 🔄 or ↩️ on a request.
+/// ↩️ on a request: withdraw it (the one asking), or undo the handover
+/// (either of the two), or keep a turn taken over unasked (its holder).
 async fn on_request(
     ctx: &BotContext,
     room: &Room,
     sender: &UserId,
     request_id: &str,
-    key: &str,
     today: NaiveDate,
 ) {
     let who = sender.as_str();
@@ -1026,38 +1622,47 @@ async fn on_request(
         return;
     };
     let before = req.clone();
-    let swap_only = req.swap_only;
-    let mut answer = None;
-    let result = if is_undo(key) {
-        back(&mut state, &mut req, who, today).map(|outcome| {
-            if outcome == Back::TooLate {
-                answer = Some("⌛ Too late to undo, it has started (or changed since).");
-            }
-        })
-    } else {
-        take(&mut state, &mut req, who, is_swap(key), today).map(|outcome| match outcome {
-            Taken::Own => {
-                answer = Some("🙃 That's your own request. ↩️ withdraws it.");
-            }
-            Taken::NothingToSwap if swap_only => {
-                answer = Some("🤷 You have no upcoming turn in that group to swap.");
-            }
-            Taken::NothingToSwap => {
-                answer = Some(
-                    "🤷 You have no upcoming turn in that group to swap. 🙋 takes it over instead.",
-                );
-            }
-            Taken::SwapOnly => {
-                answer = Some("🔄 This one is a swap: 🔄 takes it and gives them your next turn.");
-            }
-            Taken::Done | Taken::NotOpen => {}
-        })
+    let too_late = match back(&mut state, &mut req, who, today) {
+        Ok(outcome) => outcome == Back::TooLate,
+        Err(e) => {
+            tracing::error!("A swap tap failed: {e}");
+            return;
+        }
     };
-    if let Err(e) = result {
-        tracing::error!("A swap tap failed: {e}");
-        return;
-    }
     let changed = req != before;
+    // Who an undo leaves holding or losing the turn without having done it:
+    // the edit wouldn't notify them (they were in the first message), so a
+    // reply does.
+    let what = request_duty(&state, &req).map(|d| format!("**{} · {}**", d.place(), when(&d)));
+    let handed_over = matches!(before.status, HelpStatus::Taken | HelpStatus::Swapped);
+    let tell = match (&what, changed && handed_over, req.status) {
+        (Some(what), true, HelpStatus::Withdrawn) if req.unasked && req.given_back => Some((
+            req.requester.clone(),
+            format!("↩️ it's yours again: {what}"),
+        )),
+        (Some(_), true, HelpStatus::Withdrawn) if req.unasked => None,
+        (Some(what), true, HelpStatus::Withdrawn) => before.helper.clone().map(|helper| {
+            (
+                helper,
+                format!(
+                    "↩️ {} does {what} after all. Thanks anyway! 💛",
+                    display_name(&state, &req.requester)
+                ),
+            )
+        }),
+        (Some(what), true, HelpStatus::Open) => Some((
+            req.requester.clone(),
+            format!(
+                "↩️ {} can't after all: {what} is yours again. Your 🆘 is open.",
+                before
+                    .helper
+                    .as_deref()
+                    .map(|h| display_name(&state, h))
+                    .unwrap_or_default()
+            ),
+        )),
+        _ => None,
+    };
     if changed {
         state.help_requests.insert(request_id.to_owned(), req);
         if !save(ctx, &mut state).await {
@@ -1065,8 +1670,11 @@ async fn on_request(
         }
     }
     drop(state);
-    if let Some(text) = answer {
-        reply(room, request_id, who, text).await;
+    if let Some((user, text)) = tell {
+        reply(room, request_id, &user, &text).await;
+    }
+    if too_late {
+        reply(room, request_id, who, "⌛ Too late, it has started.").await;
     }
     if changed {
         update_request(ctx, room, request_id).await;
@@ -1074,8 +1682,8 @@ async fn on_request(
     }
 }
 
-/// Bring a request's message up to date.
-async fn update_request(ctx: &BotContext, room: &Room, request_id: &str) {
+/// Bring a request's message up to date, and the questions about it.
+pub(crate) async fn update_request(ctx: &BotContext, room: &Room, request_id: &str) {
     let (text, notify, before) = {
         let state = ctx.state.lock().await;
         let Some(req) = state.help_requests.get(request_id) else {
@@ -1083,6 +1691,8 @@ async fn update_request(ctx: &BotContext, room: &Room, request_id: &str) {
         };
         let (text, notify) = request_text(&state, req);
         if text == req.rendered {
+            drop(state);
+            update_cards(ctx, room, Some(request_id)).await;
             return;
         }
         (text, notify, req.mentioned.clone())
@@ -1094,6 +1704,7 @@ async fn update_request(ctx: &BotContext, room: &Room, request_id: &str) {
         }
         save(ctx, &mut state).await;
     }
+    update_cards(ctx, room, Some(request_id)).await;
 }
 
 /// ↩️ on an early swap (by the cleaner or one moved), or the ✅ behind it
@@ -1120,13 +1731,7 @@ async fn undo_early(
         Ok(false) => {
             drop(state);
             if reaction.is_none() {
-                reply(
-                    room,
-                    notice_id,
-                    who,
-                    "⌛ Too late to swap back, the later shift has started (or changed since).",
-                )
-                .await;
+                reply(room, notice_id, who, "⌛ Too late, it has started.").await;
             }
             return;
         }
@@ -1196,7 +1801,7 @@ pub async fn tidy(ctx: &BotContext, room: &Room, nudge: bool) {
         let mut nudges = Vec::new();
         for (id, req) in requests.iter_mut() {
             changed |= settle(&state, req, today);
-            if nudge && needs_admins(&state, req, today) {
+            if nudge && needs_admins(&state, req, today, chrono::Utc::now()) {
                 req.admins_told = true;
                 changed = true;
                 nudges.push((id.clone(), request_duty(&state, req).map(|d| d.label())));
@@ -1232,7 +1837,7 @@ pub async fn tidy(ctx: &BotContext, room: &Room, nudge: bool) {
             continue;
         };
         let text = format!(
-            "👀 Nobody has stepped in yet for **{}**.\n{} can you help sort it out? (!plan assign)",
+            "👀 Still nobody for **{}**.\n{}, can you sort it? (!plan assign)",
             label.unwrap_or_default(),
             admins.join(" ")
         );
@@ -1328,7 +1933,7 @@ mod tests {
         let text = early_text(&state, &swap);
         assert!(text.starts_with("🔄 @alice:x.org, [bob]"), "{text}");
         assert!(text.contains("**2nd Floor · Mon–Wed**"), "{text}");
-        assert!(text.contains("you're on **Thu–Sun ("), "{text}");
+        assert!(text.contains("\nYou do **Thu–Sun ("), "{text}");
         assert!(text.contains("↩️"), "{text}");
 
         // Once Thursday came, it stays.
@@ -1406,7 +2011,7 @@ mod tests {
         assert_eq!(duties.len(), 1);
         let mut req = new_request(&duties[0], "@bob:x.org", None);
         let (text, pings) = request_text(&state, &req);
-        assert!(text.starts_with("🆘 **Who can step in?** [bob]"), "{text}");
+        assert!(text.starts_with("🆘 **Who takes over?** [bob]"), "{text}");
         assert!(text.contains("**2nd Floor · Thu–Sun ("), "{text}");
         assert!(text.contains("🙋 I'll do it\n🔄 swap"), "{text}");
         assert_eq!(pings, ["@alice:x.org", "@carol:x.org"]);
@@ -1438,6 +2043,9 @@ mod tests {
             back(&mut state, &mut req, "@carol:x.org", monday).unwrap(),
             Back::Undone
         );
+        // Carol can't after all: bob's request is open again.
+        assert_eq!(req.status, HelpStatus::Open);
+        assert_eq!(req.helper, None);
         assert_eq!(who(&state, &group, week, 1), "@bob:x.org");
         assert_eq!(req.status, HelpStatus::Open);
         // Bob can make it after all.
@@ -1463,18 +2071,20 @@ mod tests {
         assert_eq!(who(&state, &group, week, 1), "@carol:x.org");
         assert_eq!(who(&state, &group, next, 0), "@bob:x.org");
         let (text, _) = request_text(&state, &req);
-        assert!(text.starts_with("✅ **Swapped!** [carol]"), "{text}");
         assert!(
-            text.contains("@bob:x.org does **2nd Floor · Mon–Wed ("),
+            text.starts_with("✅ **Swapped!** Thanks! 💛\n➡️ [carol]"),
             "{text}"
         );
-        // Undone: both go back.
+        assert!(text.contains("\n⬅️ [bob]"), "{text}");
+        assert!(text.contains(" does **2nd Floor · Mon–Wed ("), "{text}");
+        // Undone by bob, who asked: both go back, and he keeps his (no new request).
         assert_eq!(
             back(&mut state, &mut req, "@bob:x.org", monday).unwrap(),
             Back::Undone
         );
         assert_eq!(who(&state, &group, week, 1), "@bob:x.org");
         assert_eq!(who(&state, &group, next, 0), "@carol:x.org");
+        assert_eq!(req.status, HelpStatus::Withdrawn);
     }
 
     #[test]
@@ -1513,8 +2123,12 @@ mod tests {
             "@bob:x.org",
             None,
         );
-        assert!(!needs_admins(&state, &req, day(week, 2)));
-        assert!(needs_admins(&state, &req, day(week, 3)));
+        let asked = req.asked_at.unwrap();
+        let later = asked + chrono::Duration::hours(ADMIN_GRACE_HOURS);
+        assert!(!needs_admins(&state, &req, day(week, 2), later));
+        // Started: the group gets a few hours first.
+        assert!(!needs_admins(&state, &req, day(week, 3), asked));
+        assert!(needs_admins(&state, &req, day(week, 3), later));
         assert!(!settle(&state, &mut req, day(week, 6)));
         // Over.
         assert!(settle(&state, &mut req.clone(), day(week, 7)));
@@ -1564,5 +2178,298 @@ mod tests {
         assert!(is_swap("🔄") && is_swap("🔄\u{fe0f}"));
         assert!(is_undo("↩️") && is_undo("↩"));
         assert!(!is_undo("✅") && !is_take("✅"));
+    }
+
+    fn duty(group: &CleaningGroup, week: (i32, u32), shift: u8) -> Duty {
+        Duty {
+            group: group.clone(),
+            slot_index: 0,
+            turn: Turn::new(week.0, week.1, shift),
+        }
+    }
+
+    #[test]
+    fn a_turn_is_taken_over_without_asking_and_its_holder_can_keep_it() {
+        let (mut state, group, week, ids) = split_week();
+        let monday = day(week, 0);
+        // Carol takes bob's Thu–Sun, as she saw it: bob's.
+        let thu = duty(&group, week, 1);
+        let TakeOver::Notice(notice) =
+            take_over(&mut state, &thu, "@carol:x.org", Some(&ids[1]), monday).unwrap()
+        else {
+            panic!("bob is told");
+        };
+        let mut notice = *notice;
+        assert_eq!(who(&state, &group, week, 1), "@carol:x.org");
+        assert!(notice.unasked);
+        assert_eq!(notice.requester, "@bob:x.org");
+        let (text, pings) = request_text(&state, &notice);
+        assert!(
+            text.starts_with(
+                "🙋 [carol](https://matrix.to/#/@carol:x.org) takes over **2nd Floor · Thu–Sun ("
+            ),
+            "{text}"
+        );
+        assert!(text.contains("from [bob]"), "{text}");
+        assert!(text.ends_with("\nbob: ↩️ to keep it"), "{text}");
+        assert!(!text.contains('—'), "{text}");
+        assert_eq!(pings, ["@bob:x.org"]);
+        // Carol knows, she did it: no change notice for her.
+        assert_eq!(
+            state
+                .told_holders
+                .get(&crate::state::slot_key(&group.id, 0, thu.turn)),
+            Some(&Some(ids[2].clone()))
+        );
+
+        // Someone else's ↩️ does nothing; bob's keeps it.
+        assert_eq!(
+            back(&mut state, &mut notice, "@alice:x.org", monday).unwrap(),
+            Back::Nothing
+        );
+        assert_eq!(
+            back(&mut state, &mut notice, "@bob:x.org", monday).unwrap(),
+            Back::Undone
+        );
+        assert_eq!(who(&state, &group, week, 1), "@bob:x.org");
+        assert_eq!(notice.status, HelpStatus::Withdrawn);
+        let (text, pings) = request_text(&state, &notice);
+        assert!(text.starts_with("↩️ [bob]"), "{text}");
+        assert!(text.contains("keeps **2nd Floor · Thu–Sun ("), "{text}");
+        assert_eq!(pings, ["@carol:x.org"]);
+        // Undone is undone: no second ↩️.
+        assert_eq!(
+            back(&mut state, &mut notice, "@bob:x.org", monday).unwrap(),
+            Back::Nothing
+        );
+    }
+
+    #[test]
+    fn a_running_turn_taken_over_can_be_kept_until_done_or_over() {
+        let (mut state, group, week, ids) = split_week();
+        let friday = day(week, 4);
+        let thu = duty(&group, week, 1);
+        // Friday, bob's Thu–Sun is running; carol takes it.
+        let TakeOver::Notice(notice) =
+            take_over(&mut state, &thu, "@carol:x.org", Some(&ids[1]), friday).unwrap()
+        else {
+            panic!("bob is told");
+        };
+        let mut kept = *notice;
+        // Bob wanted to clean on Saturday: he keeps it.
+        assert_eq!(
+            back(&mut state, &mut kept, "@bob:x.org", day(week, 5)).unwrap(),
+            Back::Undone
+        );
+        assert_eq!(who(&state, &group, week, 1), "@bob:x.org");
+
+        // Taken again and cleaned: then it stays.
+        let TakeOver::Notice(notice) =
+            take_over(&mut state, &thu, "@carol:x.org", Some(&ids[1]), friday).unwrap()
+        else {
+            panic!("bob is told");
+        };
+        let mut done = *notice;
+        crate::commands::mark_duties_done(&mut state, &ids[2], std::slice::from_ref(&thu)).unwrap();
+        assert_eq!(
+            back(&mut state, &mut done, "@bob:x.org", day(week, 5)).unwrap(),
+            Back::TooLate
+        );
+        assert_eq!(who(&state, &group, week, 1), "@carol:x.org");
+    }
+
+    #[test]
+    fn a_turn_taken_over_and_given_back_tells_its_holder() {
+        let (mut state, group, week, ids) = split_week();
+        let monday = day(week, 0);
+        let thu = duty(&group, week, 1);
+        let TakeOver::Notice(notice) =
+            take_over(&mut state, &thu, "@carol:x.org", Some(&ids[1]), monday).unwrap()
+        else {
+            panic!("bob is told");
+        };
+        let mut notice = *notice;
+        assert_eq!(
+            back(&mut state, &mut notice, "@carol:x.org", monday).unwrap(),
+            Back::Undone
+        );
+        assert_eq!(who(&state, &group, week, 1), "@bob:x.org");
+        let (text, pings) = request_text(&state, &notice);
+        assert!(text.starts_with("↩️ [carol]"), "{text}");
+        assert!(text.contains(" gives **2nd Floor · Thu–Sun ("), "{text}");
+        assert!(
+            text.ends_with(" back to [bob](https://matrix.to/#/@bob:x.org)."),
+            "{text}"
+        );
+        assert_eq!(pings, ["@bob:x.org"]);
+        // The edit tells bob: no change notice on top.
+        assert_eq!(
+            state
+                .told_holders
+                .get(&crate::state::slot_key(&group.id, 0, thu.turn)),
+            Some(&Some(ids[1].clone()))
+        );
+    }
+
+    #[test]
+    fn a_takeover_only_goes_through_while_the_turn_is_still_as_picked() {
+        let (mut state, group, week, ids) = split_week();
+        let monday = day(week, 0);
+        let thu = duty(&group, week, 1);
+        // Carol and alice both picked bob's Thu–Sun; carol confirms first.
+        assert!(matches!(
+            take_over(&mut state, &thu, "@carol:x.org", Some(&ids[1]), monday).unwrap(),
+            TakeOver::Notice(_)
+        ));
+        assert_eq!(
+            take_over(&mut state, &thu, "@alice:x.org", Some(&ids[1]), monday).unwrap(),
+            TakeOver::Changed
+        );
+        assert_eq!(who(&state, &group, week, 1), "@carol:x.org");
+        // Seeing it's carol's now, alice can still take it.
+        assert!(matches!(
+            take_over(&mut state, &thu, "@alice:x.org", Some(&ids[2]), monday).unwrap(),
+            TakeOver::Notice(_)
+        ));
+        assert_eq!(who(&state, &group, week, 1), "@alice:x.org");
+        assert_eq!(
+            take_over(&mut state, &thu, "@alice:x.org", Some(&ids[0]), monday).unwrap(),
+            TakeOver::Own
+        );
+        // Over, or done: nothing changes.
+        let mon = duty(&group, week, 0);
+        assert_eq!(
+            take_over(&mut state, &mon, "@bob:x.org", Some(&ids[0]), day(week, 3)).unwrap(),
+            TakeOver::Over
+        );
+        crate::commands::mark_duties_done(&mut state, &ids[0], std::slice::from_ref(&mon)).unwrap();
+        assert_eq!(
+            take_over(&mut state, &mon, "@bob:x.org", Some(&ids[0]), monday).unwrap(),
+            TakeOver::Done
+        );
+        assert_eq!(who(&state, &group, week, 0), "@alice:x.org");
+    }
+
+    #[test]
+    fn taking_over_a_turn_its_holder_asked_cover_for_sorts_the_request() {
+        let (mut state, group, week, ids) = split_week();
+        let monday = day(week, 0);
+        let thu = duty(&group, week, 1);
+        state
+            .help_requests
+            .insert("$sos".into(), new_request(&thu, "@bob:x.org", None));
+        assert_eq!(
+            take_over(&mut state, &thu, "@carol:x.org", Some(&ids[1]), monday).unwrap(),
+            TakeOver::Sorted("$sos".into())
+        );
+        let req = &state.help_requests["$sos"];
+        assert_eq!(req.status, HelpStatus::Taken);
+        assert_eq!(req.helper.as_deref(), Some("@carol:x.org"));
+        assert_eq!(who(&state, &group, week, 1), "@carol:x.org");
+    }
+
+    #[test]
+    fn a_tap_on_a_request_asks_first_and_only_the_first_confirm_wins() {
+        let (mut state, group, week, _) = split_week();
+        let monday = day(week, 0);
+        let thu = duty(&group, week, 1);
+        state
+            .help_requests
+            .insert("$sos".into(), new_request(&thu, "@bob:x.org", None));
+        let card = |user: &str, swap: bool| ConfirmCard {
+            user_id: user.to_owned(),
+            request_id: "$sos".into(),
+            swap,
+            give: None,
+            note: None,
+            status: CardStatus::Asking,
+            rendered: String::new(),
+        };
+        let req = state.help_requests["$sos"].clone();
+        assert_eq!(
+            could_take(&state, &req, "@bob:x.org", false, monday),
+            Taken::Own
+        );
+        assert_eq!(
+            could_take(&state, &req, "@carol:x.org", false, monday),
+            Taken::Done
+        );
+        // Asking changes nothing.
+        assert_eq!(who(&state, &group, week, 1), "@bob:x.org");
+
+        let carols = card("@carol:x.org", false);
+        let text = card_text(&state, &carols, monday);
+        assert!(
+            text.starts_with(
+                "🙋 [carol](https://matrix.to/#/@carol:x.org), take over **2nd Floor · Thu–Sun ("
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with(" from bob?\nTap ✅ to confirm."), "{text}");
+
+        // Carol swaps: she does bob's Thu–Sun, he her Mon–Wed next week.
+        let swap = card_text(&state, &card("@carol:x.org", true), monday);
+        assert!(swap.starts_with("🔄 [carol]"), "{swap}");
+        assert!(
+            swap.contains(", swap with bob?\n➡️ You do **2nd Floor · Thu–Sun ("),
+            "{swap}"
+        );
+        assert!(
+            swap.contains("\n⬅️ bob does your **2nd Floor · Mon–Wed ("),
+            "{swap}"
+        );
+        assert!(swap.ends_with("\nTap ✅ to swap."), "{swap}");
+
+        // Alice confirms first.
+        let mut req = state.help_requests["$sos"].clone();
+        assert_eq!(
+            take(&mut state, &mut req, "@alice:x.org", false, monday).unwrap(),
+            Taken::Done
+        );
+        state.help_requests.insert("$sos".into(), req.clone());
+        assert_eq!(
+            card_text(&state, &carols, monday),
+            "⌛ alice was quicker. Thanks anyway!"
+        );
+        assert_eq!(
+            could_take(&state, &req, "@carol:x.org", false, monday),
+            Taken::NotOpen
+        );
+        let alices = card("@alice:x.org", false);
+        assert!(card_text(&state, &alices, monday).starts_with("✅ Done. Thanks, [alice]"));
+        assert_eq!(who(&state, &group, week, 1), "@alice:x.org");
+    }
+
+    #[test]
+    fn whoever_gets_a_turn_by_a_trade_counts_as_told() {
+        let (mut state, group, week, ids) = split_week();
+        let monday = day(week, 0);
+        let thu = duty(&group, week, 1);
+        let mut req = new_request(&thu, "@bob:x.org", None);
+        assert_eq!(
+            take(&mut state, &mut req, "@carol:x.org", true, monday).unwrap(),
+            Taken::Done
+        );
+        let told = |state: &State, shift_week: (i32, u32), shift: u8| {
+            state
+                .told_holders
+                .get(&crate::state::slot_key(
+                    &group.id,
+                    0,
+                    Turn::new(shift_week.0, shift_week.1, shift),
+                ))
+                .cloned()
+        };
+        let next = add_weeks(week.0, week.1, 1);
+        // Carol has bob's Thu–Sun, bob carol's Mon–Wed next week.
+        assert_eq!(told(&state, week, 1), Some(Some(ids[2].clone())));
+        assert_eq!(told(&state, next, 0), Some(Some(ids[1].clone())));
+        // Bob takes it back: he knows, and carol is told by a reply.
+        assert_eq!(
+            back(&mut state, &mut req, "@bob:x.org", monday).unwrap(),
+            Back::Undone
+        );
+        assert_eq!(told(&state, week, 1), Some(Some(ids[1].clone())));
+        assert_eq!(told(&state, next, 0), Some(Some(ids[2].clone())));
     }
 }

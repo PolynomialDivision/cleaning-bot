@@ -725,9 +725,26 @@ pub fn people_page(f: &Frame, plan: &Plan, weeks: usize) -> String {
 }
 
 /// `/me`: the visitor's turns of the next `weeks`, and where their calendar is.
-pub fn me_page(f: &Frame, plan: &Plan, weeks: usize) -> String {
+/// `room`: a link to the plan in the cleaning room, where turns are swapped and taken over.
+pub fn me_page(f: &Frame, plan: &Plan, weeks: usize, room: Option<&str>) -> String {
     let lang = f.lang;
     let mut out = format!("<h1>{}</h1>", esc(t(lang, "me.title")));
+    if !plan.guest && plan.me.is_some() {
+        // How to swap, give away or take over: before the list, not under it.
+        let link = room
+            .map(|url| {
+                format!(
+                    "<p><a class=\"login\" href=\"{}\">{}</a></p>",
+                    esc(url),
+                    esc(t(lang, "me.room"))
+                )
+            })
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "<div class=\"h-note\" role=\"note\"><p>{}</p>{link}</div>",
+            esc(t(lang, "me.change"))
+        ));
+    }
     if plan.guest {
         out.push_str(&format!(
             "<div class=\"h-note\" role=\"note\"><p>{}</p><p><a class=\"login\" href=\"{}\">{}</a></p></div>",
@@ -757,9 +774,8 @@ pub fn me_page(f: &Frame, plan: &Plan, weeks: usize) -> String {
         }
     }
     out.push_str(&format!(
-        "<div class=\"h-note\" role=\"note\"><p>🗓 {}</p><p>{}</p></div>",
-        esc(t(lang, "me.calendar")),
-        esc(t(lang, "me.change"))
+        "<div class=\"h-note\" role=\"note\"><p>🗓 {}</p></div>",
+        esc(t(lang, "me.calendar"))
     ));
     out
 }

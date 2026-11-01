@@ -128,6 +128,8 @@ impl Site {
                 proxy_secret: SECRET.as_bytes().to_vec(),
                 home_url: None,
                 home_name: None,
+                room_id: Some("!clean:house.test".into()),
+                via: Some("house.test".into()),
             },
             "@cleaningbot:example.org",
         )
@@ -310,6 +312,12 @@ async fn in_the_house_a_guest_sees_the_plan_without_logging_in() {
     let (status, me) = site.get("/me", "alice").await;
     assert_eq!(status, StatusCode::OK);
     assert!(!me.contains("know who you are") && !me.contains("href=\"/login\""));
+    // How to swap or take over, and the way to the plan, before the list.
+    let room = me
+        .find("href=\"https://matrix.to/#/!clean:house.test?via=house.test\"")
+        .unwrap_or_else(|| panic!("room link: {me}"));
+    assert!(room < me.find("<ol").unwrap_or(usize::MAX), "{me}");
+    assert!(me.contains("🙋"), "{me}");
     let (_, _, week) = site
         .send(
             Request::get("/")
@@ -752,6 +760,8 @@ fn site_with(allowed_groups: &[&str], guests: bool, secret: &[u8]) -> Result<Sit
             proxy_secret: secret.to_vec(),
             home_url: None,
             home_name: None,
+            room_id: None,
+            via: None,
         },
         "@cleaningbot:example.org",
     )?;

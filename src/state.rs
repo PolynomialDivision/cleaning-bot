@@ -195,6 +195,18 @@ pub struct HelpRequest {
     /// notify only who is new.
     #[serde(default)]
     pub mentioned: Vec<String>,
+    /// Nobody asked: `helper` took the turn over from `requester` (🙋 menu,
+    /// `!takeover`), and this is the notice telling them, ↩️ to keep it.
+    #[serde(default)]
+    pub unasked: bool,
+    /// Unasked and undone by the one who took it: they gave it back (else its
+    /// holder kept it).
+    #[serde(default)]
+    pub given_back: bool,
+    /// When it was asked: the admins hear of it a few hours later at the
+    /// earliest. Unknown for requests from before.
+    #[serde(default)]
+    pub asked_at: Option<DateTime<Utc>>,
     /// The text it shows now.
     pub rendered: String,
 }
@@ -220,8 +232,27 @@ pub enum HelpStatus {
     Closed,
 }
 
-/// A menu of someone's next turns (`!next`, 📅 on the help board): tap a
-/// number, then 🔄 or 🆘 (see `turn_menu`).
+/// What a turn menu offers.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuKind {
+    /// Their own next turns: 🔄 swap or 🆘 give away.
+    #[default]
+    Mine,
+    /// Other people's turns they may take over: ✅ takes one.
+    Take,
+}
+
+/// Who held the turn picked in a take menu when it was picked: the takeover
+/// only goes through while it is still them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PickedFrom {
+    pub holder: Option<PersonId>,
+}
+
+/// A menu of turns to tap (see `turn_menu`): someone's next turns (`!next`,
+/// 📅 on the help board), then 🔄 or 🆘; or other people's turns to take
+/// over (`!take`, 🙋 on the plan or the help board), then ✅.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TurnMenu {
     /// Whose turns; nobody else's taps count.
@@ -230,7 +261,7 @@ pub struct TurnMenu {
     /// The turns offered, in number order (1️⃣ first): fixed once posted,
     /// so a number always means the same turn.
     pub turns: Vec<MenuTurn>,
-    /// The number tapped last (0-based), waiting for 🔄 or 🆘.
+    /// The number tapped last (0-based), waiting for 🔄 or 🆘 (✅ in a take menu).
     #[serde(default)]
     pub selected: Option<usize>,
     /// What the last tap did.
@@ -239,6 +270,46 @@ pub struct TurnMenu {
     /// The text it shows now.
     #[serde(default)]
     pub rendered: String,
+    #[serde(default)]
+    pub kind: MenuKind,
+    /// Take menus: who held the picked turn when it was picked.
+    #[serde(default)]
+    pub picked_from: Option<PickedFrom>,
+}
+
+/// "Take it over? ✅": the question after someone tapped 🙋 or 🔄 on a
+/// request, so a stray tap changes nothing (see `trades`). Only their ✅
+/// counts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ConfirmCard {
+    /// Who is asked (Matrix ID).
+    pub user_id: String,
+    /// The request (its event ID in `help_requests`).
+    pub request_id: String,
+    /// 🔄: a swap; else 🙋, a takeover.
+    pub swap: bool,
+    /// A swap: the turn of theirs it shows going to the one who asked. A ✅
+    /// only swaps while that is still the one.
+    #[serde(default)]
+    pub give: Option<MenuTurn>,
+    /// Why their last ✅ didn't go through, while it still asks.
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub status: CardStatus,
+    /// The text it shows now.
+    #[serde(default)]
+    pub rendered: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CardStatus {
+    /// Waiting for their ✅.
+    #[default]
+    Asking,
+    /// Their ✅ went through.
+    Done,
 }
 
 /// One slot of one turn in a `TurnMenu`.
@@ -267,6 +338,10 @@ pub struct ReminderMessage {
     pub turns: Vec<(GroupId, u8)>,
     /// The text it shows now.
     pub rendered: String,
+    /// The day it was sent, which "ends today" or "until tomorrow" count
+    /// from. `None` for reminders from before it was kept: "ends today".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_on: Option<NaiveDate>,
 }
 
 /// What a reminder says about its turns.
@@ -275,7 +350,8 @@ pub struct ReminderMessage {
 pub enum ReminderNote {
     /// A shift starting today (the week's first is announced by the plan).
     StartsToday,
-    /// Open turns on their last day.
+    /// Open turns near their end: whole-week turns on the configured day,
+    /// shifts on their last day. The text says when each ends.
     EndsToday,
     /// `!plan remind`: open turns of this week.
     StillOpen,
@@ -486,9 +562,12 @@ pub struct State {
     /// by event ID.
     #[serde(default)]
     pub trade_taps: RecentIds,
-    /// Turn menus by event ID. The latest one per user.
+    /// Turn menus by event ID. The latest one per user and kind.
     #[serde(default)]
     pub turn_menus: HashMap<String, TurnMenu>,
+    /// "Take it over? ✅" questions by event ID (see `ConfirmCard`).
+    #[serde(default)]
+    pub confirm_cards: HashMap<String, ConfirmCard>,
     /// Private chats the bot opened (help board 💬), by Matrix user.
     #[serde(default)]
     pub private_chats: HashMap<String, PrivateChat>,
@@ -511,6 +590,72 @@ pub struct State {
     /// (`directory::reconcile`).
     #[serde(default, skip_serializing_if = "DirectoryMemory::is_empty")]
     pub directory: DirectoryMemory,
+    /// Who was last told they hold each slot of a turn coming up soon (`notices`):
+    /// [`slot_key`] → the person (`None`: nobody holds it). A message that tells
+    /// someone about a change of their own (a takeover notice, a 🆘 sorted, an early
+    /// swap) records it here, so the change notices don't tell them again.
+    #[serde(default)]
+    pub told_holders: std::collections::BTreeMap<String, Option<PersonId>>,
+}
+
+/// The key of one slot of one turn: "`group`:`year`:`week`:`shift`:`slot`".
+pub fn slot_key(group_id: &str, slot_index: usize, turn: Turn) -> String {
+    format!(
+        "{group_id}:{}:{}:{}:{slot_index}",
+        turn.year, turn.week, turn.shift
+    )
+}
+
+impl State {
+    /// Record that `holder` was told (or knows, having done it) that they hold
+    /// `slot_index` of `turn` in group `group_id`.
+    pub fn mark_told(
+        &mut self,
+        group_id: &str,
+        slot_index: usize,
+        turn: Turn,
+        holder: Option<&PersonId>,
+    ) {
+        self.told_holders
+            .insert(slot_key(group_id, slot_index, turn), holder.cloned());
+    }
+
+    /// Forget who was told about turns that ended before yesterday (or whose
+    /// group is gone). True when anything went.
+    pub fn prune_told_holders(&mut self, today: NaiveDate) -> bool {
+        let before = self.told_holders.len();
+        let groups = &self.cleaning_groups;
+        self.told_holders.retain(|key, _| {
+            let Some((group_id, turn)) = parse_slot_key(key) else {
+                return false;
+            };
+            groups
+                .iter()
+                .find(|g| g.id == group_id)
+                .is_some_and(|g| turn.dates(&g.rhythm).1 + chrono::Duration::days(1) >= today)
+        });
+        self.told_holders.len() != before
+    }
+
+    /// Forget reminders of weeks more than 8 before `(year, week)`, the
+    /// consolidated "*" ones too. True when anything went.
+    pub fn prune_sent_reminders(&mut self, (year, week): (i32, u32)) -> bool {
+        let oldest = add_weeks(year, week, -8);
+        let before = self.sent_reminders.len();
+        self.sent_reminders
+            .retain(|r| (r.iso_year, r.iso_week) >= oldest);
+        self.sent_reminders.len() != before
+    }
+}
+
+/// The group and turn of a [`slot_key`] (the group's id may hold ':').
+fn parse_slot_key(key: &str) -> Option<(&str, Turn)> {
+    let mut parts = key.rsplitn(5, ':');
+    let _slot: usize = parts.next()?.parse().ok()?;
+    let shift = parts.next()?.parse().ok()?;
+    let week = parts.next()?.parse().ok()?;
+    let year = parts.next()?.parse().ok()?;
+    Some((parts.next()?, Turn::new(year, week, shift)))
 }
 
 /// A person leaving a group because of the directory: (person, group).

@@ -1,4 +1,4 @@
-//! Assignments: !plan assign, !plan unassign, !plan import, !takeover, !undo, !next, !plan skip, !plan remind.
+//! Assignments: !plan assign, !plan unassign, !plan import, !take/!takeover, !undo, !next, !plan skip, !plan remind.
 
 use super::*;
 
@@ -469,42 +469,41 @@ pub(crate) async fn cmd_importplan(
     )))
 }
 
-// ── !takeover [<group>] [<slot>] [week <N>] [on <day>] ──────────────────────
+// ── !take / !takeover [<group>] [<slot>] [week <N>] [on <day>] ─────────────
 //
-// Self-service handoff: the sender claims a turn away from whoever currently
-// has it, whether that's the regular rotation pick or an earlier manual
-// assignment: a frozen `SlotAssigned` with `source: Takeover`, so it never
-// touches `rotation_queue` or any other turn.
+// Taking a turn over, nobody has to agree. Bare: the menu of turns to take
+// (`turn_menu`, the same as 🙋 on the plan). With arguments: that one turn,
+// as a menu with it picked already. Either way the change only happens
+// with the ✅ under it, through `trades::take_over`: a frozen `SlotAssigned`
+// with `source: Takeover`, so it never touches `rotation_queue` or any other
+// turn, and whoever held it is told in the cleaning room (↩️ keeps it).
 //
 // Group, slot, week and shift are all optional (see
-// `resolve_takeover_target`): bare `!takeover` means the sender's own group,
-// the running (or only open) turn, and auto-picks the slot when exactly one
-// is takeable, never guessing between several.
-//
-// Refuses a turn that's already completed or skipped, so a finished task
-// can't be silently reassigned out from under its record.
+// `resolve_takeover_target`): bare `!takeover <slot>` means the sender's own
+// group, the running (or only open) turn, and auto-picks the slot when
+// exactly one is takeable, never guessing between several. A turn already
+// completed or skipped is refused, so a finished task can't be reassigned
+// out from under its record.
 
-pub(crate) async fn cmd_takeover(
-    ctx: &BotContext,
-    sender: &OwnedUserId,
+/// The turn `args` names for `sender_mxid` to take over (registering them on
+/// the way), or why there is none.
+pub(crate) fn takeover_target(
+    state: &mut crate::state::State,
+    sender_mxid: &str,
     args: &[&str],
-) -> Result<Option<String>> {
-    let usage = "💡 Usage: !takeover [<group>] [<slot>] [week <1-53>] [on <day>]";
+) -> Result<std::result::Result<Duty, String>> {
+    let usage = "💡 Usage: !take [<group>] [<slot>] [week <1-53>] [on <day>]";
     let Some(parsed) = extract_turn_args(args) else {
-        return Ok(Some(usage.into()));
+        return Ok(Err(usage.into()));
     };
     let (cur_y, cur_w) = current_iso_week();
     if parsed.week < (cur_y, cur_w) {
-        return Ok(Some(format!(
+        return Ok(Err(format!(
             "Week {} ({}) is in the past.",
             parsed.week.1,
             week_dates(parsed.week.0, parsed.week.1)
         )));
     }
-
-    let sender_mxid = sender.as_str();
-    let mut state = ctx.state.lock().await;
-
     // PersonCreated is idempotent: same self-registration as !join.
     state.apply_event(DomainEvent::PersonCreated {
         person_id: Uuid::new_v4().to_string(),
@@ -512,60 +511,64 @@ pub(crate) async fn cmd_takeover(
         matrix_id: Some(sender_mxid.to_owned()),
     })?;
     let sender_person_id = state.person_by_matrix_id(sender_mxid).unwrap().id.clone();
-
     let (group, slot_index, turn) = match resolve_takeover_target(
-        &state,
+        state,
         &sender_person_id,
         &parsed.rest,
         parsed.week,
         parsed.day,
     ) {
         Ok(v) => v,
-        Err(e) => return Ok(Some(e)),
+        Err(e) => return Ok(Err(e)),
     };
     let title = turn_title(&group, slot_index, turn);
     if state.is_turn_slot_done(&group, slot_index, turn) {
-        return Ok(Some(format!(
+        return Ok(Err(format!(
             "🤷 {title} is already done or skipped. Nothing to take over."
         )));
     }
-    let previous_id = state
+    let holder = state
         .slot_assignee(&group, slot_index, turn)
         .map(|p| p.id.clone());
-    if previous_id.as_deref() == Some(sender_person_id.as_str()) {
-        return Ok(Some(format!("ℹ️ You are already responsible for {title}.")));
+    if holder.as_deref() == Some(sender_person_id.as_str()) {
+        return Ok(Err(format!("ℹ️ You are already responsible for {title}.")));
     }
-
-    state.apply_event(DomainEvent::SlotAssigned {
-        group_id: group.id.clone(),
+    Ok(Ok(Duty {
+        group,
         slot_index,
-        iso_year: turn.year,
-        iso_week: turn.week,
-        shift: turn.shift,
-        person_id: Some(sender_person_id.clone()),
-        source: AssignmentSource::Takeover,
-        actor_id: Some(sender_mxid.to_owned()),
-        previous_person_id: previous_id.clone(),
-    })?;
-    state.save(&ctx.state_path).await?;
+        turn,
+    }))
+}
 
-    let membership_note = if group.member_ids.contains(&sender_person_id) {
-        String::new()
-    } else {
-        format!(" (not a member of «{}», one-off takeover)", group.name)
+pub(crate) async fn cmd_take(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+    args: &[&str],
+    answer_to: Answer,
+) -> Result<Option<RoomMessageEventContent>> {
+    let relation = (room.room_id() == ctx.room_id).then_some(answer_to);
+    let say = |text: &str| Some(format::intentional(format::mentionify(text)));
+    if args.is_empty() {
+        let posted = crate::turn_menu::post_take(ctx, room, sender, relation).await?;
+        return Ok(if posted {
+            None
+        } else {
+            say(crate::turn_menu::NOTHING_TO_TAKE)
+        });
+    }
+    let menu = {
+        let mut state = ctx.state.lock().await;
+        match takeover_target(&mut state, sender.as_str(), args)? {
+            Ok(duty) => {
+                state.save(&ctx.state_path).await?;
+                crate::turn_menu::take_one(&state, sender.as_str(), room.room_id().as_str(), &duty)
+            }
+            Err(why) => return Ok(say(&why)),
+        }
     };
-    let from_note = previous_id
-        .map(|prev_id| {
-            let prev_label = state
-                .person_by_id(&prev_id)
-                .map(person_label)
-                .unwrap_or_else(|| "nobody".into());
-            format!(" from {prev_label}")
-        })
-        .unwrap_or_default();
-    Ok(Some(format!(
-        "✅ You took over {title}{from_note}{membership_note}."
-    )))
+    crate::turn_menu::post_menu(ctx, room, menu, relation).await?;
+    Ok(None)
 }
 
 // ── !undo [group] ─────────────────────────────────────────────────────────────

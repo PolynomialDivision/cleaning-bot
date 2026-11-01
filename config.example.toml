@@ -40,9 +40,10 @@ interval_weeks = 1
 # A shift starting later in the week gets its own reminder that day.
 reminder_weekday = 0          # Monday
 
-# Day of week for the final "not done yet" reminder of whole-week turns.
+# Day of week for the last "still open" reminder of whole-week turns
+# (missed that day: the next day). Saturday leaves a weekend day to clean.
 # Shifts get theirs on their own last day.
-final_reminder_weekday = 6    # Sunday
+final_reminder_weekday = 5    # Saturday
 
 # Local time (HH:MM) from which the plan and reminders are sent each day.
 reminder_time = "09:00"

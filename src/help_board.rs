@@ -31,6 +31,7 @@ use crate::{format, BotContext};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Next,
+    Take,
     Plan,
     Groups,
     Pdf,
@@ -38,8 +39,9 @@ pub enum Action {
 }
 
 /// The board's buttons, in order.
-pub const BUTTONS: [(&str, Action); 5] = [
+pub const BUTTONS: [(&str, Action); 6] = [
     ("📅", Action::Next),
+    ("🙋", Action::Take),
     ("📋", Action::Plan),
     ("👥", Action::Groups),
     ("📄", Action::Pdf),
@@ -57,22 +59,19 @@ pub fn action_for(key: &str) -> Option<Action> {
 
 /// The board, a little playful.
 pub fn board_text() -> String {
-    "🤖 **Bip bup bup! I'm the cleaning bot** 🧹\n\
-     I keep track of whose turn it is, give you a nudge when it's yours, \
-     and do a tiny happy dance when it's done ✨\n\
+    "🧹 **Cleaning bot**\n\
+     📌 The plan is pinned up top, new every week, next week included.\n\
+     Under it: ✅ done · 🆘 give away · 🔄 swap · 🙋 take over\n\
      \n\
-     📋 Every Monday the plan gets pinned up top. React ✅ on it when your part is done.\n\
-     ⏰ When your turn starts or is about to run out, I'll send a short reminder.\n\
-     🆘 Can't make it? React 🆘 on the plan. Someone can take your turn or swap theirs for it.\n\
+     **Tap a button here:**\n\
+     📅 my turns\n\
+     🙋 take over a turn\n\
+     📋 the plan\n\
+     👥 my groups\n\
+     📄 plan as PDF\n\
+     💬 private chat with me\n\
      \n\
-     **Tap a button below and I'll do it for you:**\n\
-     📅 your next turns: swap one, or say you can't make it\n\
-     📋 the plan for the next weeks\n\
-     👥 join or leave groups\n\
-     📄 a printable plan (PDF)\n\
-     💬 a private chat with me\n\
-     \n\
-     Rather type? !next · !plan · !mygroups · !sos · !help"
+     Rather type? !next · !take · !plan · !help"
         .to_owned()
 }
 
@@ -132,6 +131,16 @@ pub async fn run(
             {
                 Ok(true) => Ok(None),
                 Ok(false) => crate::commands::cmd_next(ctx, user, &[]).await,
+                Err(e) => Err(e),
+            }
+        }
+        Action::Take => {
+            let relation = private
+                .is_none()
+                .then(|| Relation::Reply(Reply::with_event_id(board.clone())));
+            match crate::turn_menu::post_take(ctx, target, user, relation).await {
+                Ok(true) => Ok(None),
+                Ok(false) => Ok(Some(crate::turn_menu::NOTHING_TO_TAKE.to_owned())),
                 Err(e) => Err(e),
             }
         }

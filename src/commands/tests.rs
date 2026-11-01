@@ -1,4 +1,42 @@
 use super::*;
+
+/// `!takeover <args>` confirmed with its ✅ at once: the target the command
+/// picks, then the takeover the ✅ makes (`trades::take_over`).
+async fn cmd_takeover(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    let mut state = ctx.state.lock().await;
+    let duty = match takeover_target(&mut state, sender.as_str(), args)? {
+        Ok(duty) => duty,
+        Err(why) => return Ok(Some(why)),
+    };
+    let holder = state
+        .slot_assignee(&duty.group, duty.slot_index, duty.turn)
+        .map(|p| (p.id.clone(), p.display_name.clone()));
+    let member = duty.group.member_ids.iter().any(|id| {
+        state
+            .person_by_matrix_id(sender.as_str())
+            .is_some_and(|p| &p.id == id)
+    });
+    crate::trades::take_over(
+        &mut state,
+        &duty,
+        sender.as_str(),
+        holder.as_ref().map(|(id, _)| id),
+        crate::state::today(),
+    )?;
+    state.save(&ctx.state_path).await?;
+    let from = holder
+        .map(|(_, name)| format!(" from {name}"))
+        .unwrap_or_default();
+    let one_off = if member { "" } else { " (one-off takeover)" };
+    Ok(Some(format!(
+        "✅ You took over {}{from}{one_off}.",
+        duty.label()
+    )))
+}
 use crate::{
     config::Config,
     domain::{CleaningSlot, SlotAssignment},
@@ -1124,6 +1162,8 @@ async fn import_makes_a_matrix_participant_mentionable_and_a_non_matrix_particip
     let state = ctx.state.lock().await;
     let (raw_next, _mxids) = scheduler::build_weekly_plan(&state, ny, nw, &state.cleaning_groups);
     drop(state);
+    // That week's own turns (the heads-up below shows the week after).
+    let raw_next = raw_next.split("\n\n👀").next().unwrap().to_owned();
     assert!(raw_next.contains("Flo3"), "{raw_next}");
     assert!(
         !raw_next.contains('@'),
@@ -4672,7 +4712,7 @@ fn a_calendar_feed_has_one_event_per_shift_with_its_own_dates() {
         .collect();
     assert_eq!(mine.len(), 1);
     assert_eq!(mine[0].shift_label.as_deref(), Some("Thu–Sun"));
-    let ics = crate::ical::render_ics(&snapshot, &who);
+    let ics = crate::ical::render_ics(&snapshot, &who, None);
     let thursday = Turn::new(y, w, 1).dates(&bathroom.rhythm).0;
     assert!(
         ics.contains(&format!("DTSTART;VALUE=DATE:{}", thursday.format("%Y%m%d"))),
@@ -5854,7 +5894,7 @@ fn shared_snapshot_keeps_completion_author_dates_windows_and_imports_in_exports(
             && tex.contains("{\\small 30 Sep}"),
         "{tex}"
     );
-    let ics = crate::ical::render_ics(&snapshot, &ids[0]);
+    let ics = crate::ical::render_ics(&snapshot, &ids[0], None);
     assert!(!ics.contains("STATUS:COMPLETED"));
     assert!(ics.contains("STATUS:CANCELLED"));
     assert!(ics.replace("\r\n ", "").contains("Done by cleo"));
@@ -6288,7 +6328,7 @@ fn a_preview_shows_what_is_later_planned_and_changes_nothing() {
     let (year, week) = current_iso_week();
     let _ = plan_text(&state, 12);
     let _ = status_text(&state, year, week);
-    let _ = crate::ical::render_ics(&preview, &alice);
+    let _ = crate::ical::render_ics(&preview, &alice, None);
     let _ = crate::pdf::render_tex(&preview);
     let id = format!("$selector-{MIA}");
     let selector = onboarding::new_selector(&state, MIA, true);

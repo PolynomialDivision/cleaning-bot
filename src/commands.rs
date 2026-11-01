@@ -167,6 +167,9 @@ pub async fn handle(
         }
         ("!plan", Some("pdf")) => return cmd_pdf(ctx, sender, room, rest, Some(answer_to)).await,
         ("!mygroups", _) => return cmd_mygroups(ctx, sender, room).await,
+        ("!take" | "!takeover", _) => {
+            return cmd_take(ctx, sender, room, &args, answer_to.clone()).await
+        }
         ("!sos" | "!cant", _) => {
             let reply = cmd_sos(ctx, sender, room, &args).await?;
             return Ok(reply.map(|s| format::intentional(format::mentionify(&s))));
@@ -200,7 +203,6 @@ pub async fn handle(
              !groups lists groups; !help lists everything."
                 .into(),
         )),
-        ("!takeover", _) => cmd_takeover(ctx, sender, &args).await,
         ("!swap", Some("accept")) => cmd_acceptswap(ctx, sender, rest).await,
         ("!swap", Some("reject")) => cmd_rejectswap(ctx, sender, rest).await,
         ("!swap", _) => cmd_swap(ctx, sender, &args).await,
@@ -327,7 +329,7 @@ pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&st
         ("!done" | "!undo" | "!join" | "!leave", _) => joined(args),
         ("!next" | "!myplan" | "!mycleaning", _) => person_then_number(args),
         ("!cleaning", Some("person")) => with_sub(args[0], person_then_number(rest)),
-        ("!takeover" | "!sos" | "!cant", _) => group_first(state, args, 0),
+        ("!take" | "!takeover" | "!sos" | "!cant", _) => group_first(state, args, 0),
         ("!swap", Some("accept" | "reject")) => owned(args),
         ("!swap", Some(_)) => {
             let mut out = vec![args[0].to_owned()];
@@ -404,7 +406,8 @@ const MEMBER_USAGE: &str = "💡 Usage: !member add|remove <@user:server | name>
 /// Nothing about other people, nothing for admins (they have their own DM).
 pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
     match cmd {
-        "!help" | "!mygroups" | "!join" | "!leave" | "!done" | "!undo" | "!sos" | "!cant" => true,
+        "!help" | "!mygroups" | "!join" | "!leave" | "!done" | "!undo" | "!sos" | "!cant"
+        | "!take" | "!takeover" => true,
         "!next" | "!myplan" | "!mycleaning" => {
             args.is_empty() || (args.len() == 1 && args[0].parse::<usize>().is_ok())
         }
@@ -424,12 +427,13 @@ pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
 }
 
 fn help_text() -> String {
-    "🧹 **A little cleaning, a happier house** ✨\n\n\
-📅 !next · your turns, swap one or 🆘 from there\n\
+    "🧹 **Cleaning bot**\n\n\
+📅 !next · your turns: swap or give one away\n\
+🙋 !take · take over a turn\n\
 📋 !plan · see the plan\n\
 👥 !mygroups · join or leave groups\n\
 ✅ !done · done! (or ✅ on the plan)\n\
-🆘 !sos · can't make it? find cover (or 🆘 on the plan)\n\
+🆘 !sos · give a turn away (or 🆘 on the plan)\n\
 🗓 !ical · your calendar\n\
 📄 !plan pdf · printable plan\n\n\
 ❓ !help more · !help admin"
@@ -441,8 +445,8 @@ fn more_help_text() -> String {
 📊 !status · this week's progress\n\
 ↩️ !undo [group] · take your done mark back\n\
 ✅ !done <group> · mark a group you cleaned\n\
-🆘 !sos [group] [slot] [week N] [on <day>] · ask who steps in for a later turn\n\
-🙋 !takeover [group] · take a turn over yourself\n\
+🆘 !sos [group] [slot] [week N] [on <day>] · give a later turn away\n\
+🙋 !take [group] [slot] [week N] · take that turn over (then ✅)\n\
 🔄 !swap @user [group] · ask someone to cover, they accept or reject\n\
 ➕ !join <group> · ➖ !leave <group> · without the number buttons\n\
 👥 !groups [group] · groups, members, rooms\n\
@@ -452,9 +456,10 @@ fn more_help_text() -> String {
 👥 In !mygroups, tap a number to join that group. Tap it again to leave. \
 ✅ marks the groups you're in.\n\
 🆘 on the plan: someone can take your turn (🙋) or swap theirs for it (🔄).\n\
+🙋 on the plan: take a turn over, nobody has to agree. Its holder can ↩️ keep it.\n\
 ✅ while your shift is still to come and the running one is open: \
 you swap, and ↩️ swaps back.\n\
-🔒 !next, !plan, !mygroups, !done, !sos and !ical also work in a private chat with me. \
+🔒 !next, !take, !plan, !mygroups, !done, !sos and !ical also work in a private chat with me. \
 Tap 💬 on the help board and I'll invite you."
         .into()
 }
