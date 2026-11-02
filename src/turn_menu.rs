@@ -577,6 +577,9 @@ pub async fn post_take(
 
 /// What an old menu says once a newer one replaced it.
 const REPLACED: &str = "⌛ Replaced by a newer menu.";
+/// A take menu's feedback once the turn is taken. In the cleaning room the
+/// menu then goes away: the pinned plan shows the new holder.
+const TAKEN: &str = "✅ It's yours. Thanks! 💛";
 
 /// What a take menu says when there's nothing to take.
 pub const NOTHING_TO_TAKE: &str = "🤷 Nothing to take over in the next 3 weeks.";
@@ -677,7 +680,7 @@ fn take_from_menu(
             return AfterTake::Nothing;
         }
     };
-    let thanks = "✅ It's yours. Thanks! 💛".to_owned();
+    let thanks = TAKEN.to_owned();
     let (feedback, after) = match outcome {
         trades::TakeOver::Notice(req) => (thanks, AfterTake::Notice(*req)),
         trades::TakeOver::Sorted(id) => (thanks, AfterTake::Sorted(id)),
@@ -719,6 +722,7 @@ pub async fn on_reaction(
     bot: &OwnedUserId,
 ) -> bool {
     let today = crate::state::today();
+    let delete;
     let request = {
         let mut state = ctx.state.lock().await;
         let Some(mut menu) = state
@@ -747,7 +751,15 @@ pub async fn on_reaction(
             }
             _ => AfterTake::Nothing,
         };
-        state.turn_menus.insert(reacted_to.to_owned(), menu);
+        // A turn taken from a menu in the cleaning room: the menu is done
+        // and only clutters the room, it goes (below). In a private chat it
+        // stays as the confirmation.
+        delete = menu.feedback.as_deref() == Some(TAKEN) && menu.room_id == ctx.room_id.as_str();
+        if delete {
+            state.turn_menus.remove(reacted_to);
+        } else {
+            state.turn_menus.insert(reacted_to.to_owned(), menu);
+        }
         if let Err(e) = state.save(&ctx.state_path).await {
             tracing::error!("Failed to save a turn menu tap: {e}");
             return true;
@@ -817,7 +829,20 @@ pub async fn on_reaction(
         }
     }
     refresh_all(ctx, &room.client()).await;
-    crate::onboarding::consume_tap(room, &reaction_id.to_owned(), bot).await;
+    if delete {
+        // The bot's own message: no power level needed. Its reactions go with it.
+        let menu_id = reacted_to.parse::<OwnedEventId>();
+        match menu_id {
+            Ok(id) => {
+                if let Err(e) = room.redact(&id, None, None).await {
+                    tracing::warn!("Failed to remove a used take menu: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("A take menu with a bad event ID {reacted_to}: {e}"),
+        }
+    } else {
+        crate::onboarding::consume_tap(room, &reaction_id.to_owned(), bot).await;
+    }
     true
 }
 
