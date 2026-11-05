@@ -95,15 +95,25 @@ fn link_to(mxid: &str, label: &str) -> String {
     format!("[{label}](https://matrix.to/#/{mxid})")
 }
 
-/// How a pinned week came about ("imported", …); `None` for a plain
-/// rotation pick.
+/// How a pinned week came about ("assigned", …); `None` for a plain
+/// rotation pick and for a week imported from the paper plan (that is just
+/// the plan, nothing anyone changed).
 pub fn source_note(source: &AssignmentSource) -> Option<&'static str> {
     match source {
         AssignmentSource::RoundRobin => None,
         AssignmentSource::Manual | AssignmentSource::Assign => Some("assigned"),
         AssignmentSource::Takeover => Some("taken over"),
         AssignmentSource::Swap => Some("swapped"),
-        AssignmentSource::Import => Some("imported"),
+        AssignmentSource::Import => None,
+    }
+}
+
+/// How a pinned week came about, for admins (what a re-plan discarded, what
+/// a leave handed on): an imported week says so here.
+pub fn pin_label(source: &AssignmentSource) -> &'static str {
+    match source {
+        AssignmentSource::Import => "imported",
+        other => source_note(other).unwrap_or("planned"),
     }
 }
 

@@ -521,6 +521,31 @@ pub(crate) async fn cmd_resetplan(
     Ok(Some(reply))
 }
 
+// ── Admin: !plan replan <group> ────────────────────────────────────────────────
+
+pub(crate) async fn cmd_replan(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    args: &[&str],
+) -> Result<Option<String>> {
+    require_admin(ctx, sender)?;
+    let Some(group_name) = args.first() else {
+        return Ok(Some("💡 Usage: !plan replan <group>".into()));
+    };
+    let mut state = ctx.state.lock().await;
+    let Some(group_id) = state.group_by_name(group_name).map(|g| g.id.clone()) else {
+        return Ok(Some(group_not_found(group_name)));
+    };
+    let redrawn = replan_rotation(&mut state, &group_id)?;
+    let next = next_assignment_summary(&state, &group_id);
+    state.save(&ctx.state_path).await?;
+    Ok(Some(format!(
+        "✅ «{}»: {redrawn} rotation turn(s) after this week drawn again, whoever cleaned longest \
+         ago first; imported, assigned and swapped weeks stay. {next}",
+        group_name_of(&state, &group_id)
+    )))
+}
+
 pub(crate) async fn cmd_addslot(
     ctx: &BotContext,
     sender: &OwnedUserId,

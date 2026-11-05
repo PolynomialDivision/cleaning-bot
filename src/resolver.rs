@@ -238,6 +238,7 @@ fn materialize_with(
             })
             .cloned()
             .collect();
+        let line = spaced_line(state, group, (dy, dw), queue.len(), &planned, line);
         let picks = pick_week(
             group,
             &line,
@@ -321,6 +322,56 @@ fn materialize_with(
         });
     }
     events
+}
+
+/// `line` with whoever has another turn of `group` too close to `week` moved
+/// to the back, the closest last: a turn the rotation did not draw (an
+/// import, `!plan assign`, a swap) or one it drew around a gap (a turn
+/// handed on when someone left) can sit right next to the week being
+/// drawn, and the queue alone would hand that person a second turn in a row
+/// while others wait (2026-11: a leaver's turn went to someone whose
+/// imported turn was the week after). Too close is under half the group's
+/// cycle (its people over its seats per due week, in weeks, at least one).
+/// They keep their place in the queue, so the next week draws them first
+/// again; they are only drawn here when nobody else is left.
+fn spaced_line(
+    state: &State,
+    group: &CleaningGroup,
+    week: (i32, u32),
+    people: usize,
+    planned: &[(Turn, PersonId)],
+    line: Vec<PersonId>,
+) -> Vec<PersonId> {
+    let seats =
+        (state.turns_in_week(group, week.0, week.1).len() * group.slots.len().max(1)).max(1);
+    let cycle_weeks = people.div_ceil(seats) * group.rhythm.every_weeks() as usize;
+    let gap = (cycle_weeks / 2).max(1) as i64;
+    let nearest = |pid: &PersonId| {
+        state
+            .slot_assignments
+            .iter()
+            .filter(|a| a.group_id == group.id && a.person_id.as_ref() == Some(pid))
+            .map(|a| (a.iso_year, a.iso_week))
+            .chain(
+                planned
+                    .iter()
+                    .filter(|(_, p)| p == pid)
+                    .map(|(t, _)| (t.year, t.week)),
+            )
+            .filter(|w| *w != week)
+            .map(|w| weeks_between(week, w).abs())
+            .min()
+    };
+    let (mut spaced, mut close): (Vec<_>, Vec<_>) = line
+        .into_iter()
+        .map(|pid| {
+            let near = nearest(&pid);
+            (pid, near)
+        })
+        .partition(|(_, near)| near.is_none_or(|d| d >= gap));
+    close.sort_by_key(|(_, near)| std::cmp::Reverse(*near));
+    spaced.extend(close);
+    spaced.into_iter().map(|(pid, _)| pid).collect()
 }
 
 /// Who cleans the `open` turns of one due week, of the people in `line`

@@ -402,6 +402,36 @@ pub struct GroupSelector {
     /// The text last sent or edited in: edit only when it changes.
     #[serde(default)]
     pub rendered: String,
+    /// A tap asked to leave a group they still have turns in: it waits for
+    /// their ✅ on the selector (`onboarding::LEAVE_CONFIRM_MINUTES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_leave: Option<PendingLeave>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PendingLeave {
+    pub group_id: GroupId,
+    pub asked_at: DateTime<Utc>,
+}
+
+/// The plan of a group just before someone left it, so that their coming
+/// back soon puts it back exactly (`commands::apply_group_join`): a leave and
+/// a join are not each other's undo otherwise (a join re-plans from the next
+/// cycle, the leaver's turns before that stay with others).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RecentDeparture {
+    pub person_id: PersonId,
+    pub group_id: GroupId,
+    pub at: DateTime<Utc>,
+    /// `event_log` length right after the departure, and the ID of its last
+    /// event there: what happened to the group since is read from there.
+    pub after_event: usize,
+    pub last_event_id: Option<String>,
+    /// The group's turns after the week it happened in, before.
+    pub assignments: Vec<SlotAssignment>,
+    pub queue: Vec<PersonId>,
+    #[serde(default)]
+    pub deferred: std::collections::BTreeMap<PersonId, u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -596,6 +626,14 @@ pub struct State {
     /// swap) records it here, so the change notices don't tell them again.
     #[serde(default)]
     pub told_holders: std::collections::BTreeMap<String, Option<PersonId>>,
+    /// Departures of the last hour, for an undo by coming back
+    /// (`commands::RESTORE_WINDOW_MINUTES`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_departures: Vec<RecentDeparture>,
+    /// The last `apply_group_join` put the plan back as it was before that
+    /// person left (group, person): for its confirmation only.
+    #[serde(skip)]
+    pub restored_join: Option<(GroupId, PersonId)>,
 }
 
 /// The key of one slot of one turn: "`group`:`year`:`week`:`shift`:`slot`".

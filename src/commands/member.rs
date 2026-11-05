@@ -374,6 +374,23 @@ pub(crate) async fn cmd_leavefloor(
     let Some(group_id) = state.group_by_name(group_name).map(|g| g.id.clone()) else {
         return Ok(Some(group_not_found(group_name)));
     };
+    let confirmed = args
+        .get(1)
+        .is_some_and(|a| a.eq_ignore_ascii_case("confirm"));
+    if !confirmed {
+        if let Some(turns) = leave_needs_confirmation(&state, sender.as_str(), &group_id) {
+            let name = group_name_of(&state, &group_id);
+            let typed = if name.contains(char::is_whitespace) {
+                format!("\"{name}\"")
+            } else {
+                name.clone()
+            };
+            return Ok(Some(format!(
+                "⚠️ Leaving «{name}» hands your turns there ({turns}) on to others.\n\
+                 👉 To leave: !leave {typed} confirm"
+            )));
+        }
+    }
     let reply = match leave_group(ctx, &mut state, sender.as_str(), &group_id)? {
         Ok(summary) => format!(
             "👋 You left {}\n{summary}",
@@ -426,6 +443,56 @@ pub(crate) fn join_group(
         &person_id,
         replanned_from,
     )))
+}
+
+/// Whether `mxid` leaving `group_id` on their own needs a second yes (the
+/// group selector's ✅, `!leave <group> confirm`): when the leave would go
+/// through and hand on turns of theirs, those ("Week 45 · 2 – 8 Nov, Week
+/// 53 · …"). A stray tap once gave someone's turn to a person with the
+/// next week already (2026-10-15).
+pub(crate) fn leave_needs_confirmation(
+    state: &crate::state::State,
+    mxid: &str,
+    group_id: &GroupId,
+) -> Option<String> {
+    if house_wide_refusal(state, group_id)
+        .or_else(|| directory_refusal(state, group_id))
+        .is_some()
+    {
+        return None;
+    }
+    let group = state.group_by_id(group_id)?;
+    let person_id = state
+        .person_by_matrix_id(mxid)
+        .map(|p| p.id.clone())
+        .filter(|pid| group.member_ids.contains(pid))?;
+    if !current_open_assignments(state, group_id, &person_id).is_empty() {
+        return None;
+    }
+    let current = crate::state::current_iso_week();
+    let mut turns: Vec<Turn> = state
+        .slot_assignments
+        .iter()
+        .filter(|a| {
+            a.group_id == *group_id
+                && a.person_id.as_ref() == Some(&person_id)
+                && (a.iso_year, a.iso_week) > current
+        })
+        .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+        .collect();
+    if turns.is_empty() {
+        return None;
+    }
+    turns.sort();
+    let mut named: Vec<String> = turns
+        .iter()
+        .take(3)
+        .map(|t| crate::view::turn_label(*t, &group.rhythm))
+        .collect();
+    if turns.len() > 3 {
+        named.push(format!("{} more", turns.len() - 3));
+    }
+    Some(named.join(", "))
 }
 
 /// A Matrix user leaves a group on their own (`!leave`, the group

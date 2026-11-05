@@ -2433,7 +2433,8 @@ async fn next_lists_the_senders_turns_with_when_what_and_kind() {
         lines[5].starts_with(&format!("• Week {} · ", week(3))),
         "{reply}"
     );
-    assert_eq!(lines[6], format!("{}Floor · imported", crate::view::INDENT));
+    // An imported week is just the plan: no note.
+    assert_eq!(lines[6], format!("{}Floor", crate::view::INDENT));
     // Her imported week counts as her turn, so Bob (last on in week 1)
     // comes before her again: her next is week 5, not 4, and tentative.
     assert!(
@@ -4848,7 +4849,7 @@ async fn cleaning_person_shows_a_non_matrix_participant_with_pinned_turns() {
     );
     assert_eq!(
         lines[4],
-        format!("{indent}Kitchen · imported"),
+        format!("{indent}Kitchen"),
         "an imported turn outside his own group: {reply}"
     );
     let _ = tokio::fs::remove_file(path).await;
@@ -5410,7 +5411,7 @@ async fn tapping_a_number_joins_and_taking_it_back_leaves() {
 }
 
 #[tokio::test]
-async fn tapping_a_group_youre_in_leaves_it_and_taking_it_back_rejoins() {
+async fn tapping_a_group_youre_in_asks_then_its_check_leaves_and_taking_that_back_rejoins() {
     let (ctx, path, admin) = selector_world();
     cmd_member_add(&ctx, &admin, &[MIA, "Kitchen"])
         .await
@@ -5425,12 +5426,18 @@ async fn tapping_a_group_youre_in_leaves_it_and_taking_it_back_rejoins() {
         "{}",
         state.group_selectors[&id].rendered
     );
-    let left = onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "2️⃣")
+    // Mia has turns in the Kitchen: the tap only asks, her ✅ leaves.
+    let asked = onboarding::tap(&ctx, &mut state, &id, "$r1", MIA, "2️⃣")
+        .unwrap()
+        .unwrap();
+    assert!(asked.starts_with("⚠️ Leave **Kitchen**?"), "{asked}");
+    assert!(is_in(&state, MIA, "Kitchen"));
+    let left = onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "✅")
         .unwrap()
         .unwrap();
     assert!(left.contains("Left **Kitchen**"), "{left}");
     assert!(!is_in(&state, MIA, "Kitchen"));
-    let (_, back) = onboarding::untap(&ctx, &mut state, "$r1").unwrap().unwrap();
+    let (_, back) = onboarding::untap(&ctx, &mut state, "$r2").unwrap().unwrap();
     assert!(back.contains("Joined **Kitchen**"), "{back}");
     assert!(is_in(&state, MIA, "Kitchen"));
     assert_consistent(&state);
@@ -5524,7 +5531,7 @@ async fn taking_a_tap_back_after_leaving_by_command_does_nothing() {
             .unwrap();
         id
     };
-    cmd_leavefloor(&ctx, &mia, &["Kitchen"])
+    cmd_leavefloor(&ctx, &mia, &["Kitchen", "confirm"])
         .await
         .unwrap()
         .unwrap();
@@ -5885,12 +5892,13 @@ fn shared_snapshot_keeps_completion_author_dates_windows_and_imports_in_exports(
         .unwrap();
     let matrix = duty.matrix_line(true, false);
     assert!(
-        matrix.contains("✅") && matrix.contains("done by cleo") && matrix.contains("imported"),
+        matrix.contains("✅") && matrix.contains("done by cleo") && !matrix.contains("imported"),
         "{matrix}"
     );
     let tex = crate::pdf::render_tex(&snapshot);
     assert!(
-        tex.contains(r"done by cleo \textperiodcentered{} imported")
+        tex.contains("done by cleo")
+            && !tex.contains("imported")
             && tex.contains("{\\small 30 Sep}"),
         "{tex}"
     );
@@ -6133,8 +6141,12 @@ async fn the_bot_clearing_a_tap_is_no_undo_and_the_number_works_again() {
         crate::reactions::Redaction::Refused
     );
     assert!(is_in(&state, MIA, "2nd Floor"));
-    // The same number, tapped again, toggles back.
-    let left = onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "1️⃣")
+    // The same number, tapped again, toggles back (with her ✅, as she has
+    // turns there now).
+    onboarding::tap(&ctx, &mut state, &id, "$r2", MIA, "1️⃣")
+        .unwrap()
+        .unwrap();
+    let left = onboarding::tap(&ctx, &mut state, &id, "$r3", MIA, "✅")
         .unwrap()
         .unwrap();
     assert!(left.starts_with("👋 Left **2nd Floor**"), "{left}");
@@ -6145,8 +6157,8 @@ async fn the_bot_clearing_a_tap_is_no_undo_and_the_number_works_again() {
     );
     // Delivered again after a restart, neither tap counts twice.
     *state = serde_json::from_str(&serde_json::to_string(&*state).unwrap()).unwrap();
-    for reaction in ["$r1", "$r2"] {
-        assert!(onboarding::tap(&ctx, &mut state, &id, reaction, MIA, "1️⃣")
+    for (reaction, key) in [("$r1", "1️⃣"), ("$r2", "1️⃣"), ("$r3", "✅")] {
+        assert!(onboarding::tap(&ctx, &mut state, &id, reaction, MIA, key)
             .unwrap()
             .is_none());
     }
@@ -6550,6 +6562,236 @@ async fn calendars_no_longer_kept_are_forgotten() {
     assert!(saved.nextcloud_calendars.is_empty(), "saved");
     let selector = onboarding::prepare_selector(&mut state, &private, MIA, false).unwrap();
     assert!(!selector.rendered.contains("in your calendar in the cloud"));
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+// ── A stray leave and its undo (2026-10-15) ───────────────────────────────────
+
+/// "3+4 Floor" as it was: 16 people, Scharni and Colbe every week, the next
+/// eight weeks imported from paper (p00 p01 | p02 p03 | …), the rest drawn
+/// by the rotation. Returns the context, its state file and the people.
+fn imported_floor() -> (BotContext, PathBuf, Vec<String>, GroupId) {
+    let mut state = State::default();
+    state.created_at = Some(Utc::now());
+    let mut group = CleaningGroup::new("3+4 Floor");
+    group.slots = vec![
+        crate::domain::CleaningSlot::new("Scharni"),
+        crate::domain::CleaningSlot::new("Colbe"),
+    ];
+    let people: Vec<String> = (0..16).map(|i| format!("@p{i:02}:example.org")).collect();
+    for mxid in &people {
+        let person = Person::new_matrix(mxid);
+        group.member_ids.push(person.id.clone());
+        state.persons.push(person);
+    }
+    let group_id = group.id.clone();
+    state.cleaning_groups.push(group);
+    let (y, w) = current_iso_week();
+    for (i, mxid) in people.iter().enumerate() {
+        let (year, week) = add_weeks(y, w, i as i64 / 2 + 1);
+        let person_id = state.person_by_matrix_id(mxid).unwrap().id.clone();
+        state
+            .apply_event(DomainEvent::SlotAssigned {
+                group_id: group_id.clone(),
+                slot_index: i % 2,
+                iso_year: year,
+                iso_week: week,
+                shift: 0,
+                person_id: Some(person_id),
+                source: AssignmentSource::Import,
+                actor_id: Some("@admin:example.org".into()),
+                previous_person_id: None,
+            })
+            .unwrap();
+    }
+    seed_materialized_weeks(&mut state, 16);
+    let (ctx, path, _) = test_context_with_horizon(state, 16);
+    (ctx, path, people, group_id)
+}
+
+/// Each person's turns in the group, as week offsets from this week.
+fn turns_by_person(state: &State, group_id: &GroupId) -> Vec<(String, Vec<i64>)> {
+    let current = current_iso_week();
+    let mut out: Vec<(String, Vec<i64>)> = Vec::new();
+    for person in &state.persons {
+        let mut weeks: Vec<i64> = state
+            .slot_assignments
+            .iter()
+            .filter(|a| a.group_id == *group_id && a.person_id.as_ref() == Some(&person.id))
+            .map(|a| crate::state::weeks_between(current, (a.iso_year, a.iso_week)))
+            .collect();
+        weeks.sort();
+        out.push((person.matrix_id.clone().unwrap_or_default(), weeks));
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_turn_handed_on_never_goes_to_someone_cleaning_the_week_next_to_it() {
+    let (ctx, path, people, group_id) = imported_floor();
+    let mut state = ctx.state.lock().await;
+    // p01 had Colbe next week; p02, first in line, has Scharni the week after.
+    leave_group(&ctx, &mut state, &people[1], &group_id)
+        .unwrap()
+        .unwrap();
+    for (who, weeks) in turns_by_person(&state, &group_id) {
+        for pair in weeks.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 4,
+                "{who} cleans in weeks {weeks:?}: two turns closer than half the cycle"
+            );
+        }
+    }
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn leaving_and_coming_back_within_the_hour_puts_the_plan_back_exactly() {
+    let (ctx, path, people, group_id) = imported_floor();
+    let mut state = ctx.state.lock().await;
+    let plan = |state: &State| {
+        let mut turns: Vec<_> = state
+            .slot_assignments
+            .iter()
+            .filter(|a| a.group_id == group_id)
+            .map(|a| {
+                (
+                    a.iso_year,
+                    a.iso_week,
+                    a.slot_index,
+                    a.person_id.clone(),
+                    a.source.clone(),
+                )
+            })
+            .collect();
+        turns.sort_by_key(|t| (t.0, t.1, t.2));
+        let group = state.group_by_id(&group_id).unwrap();
+        (
+            turns,
+            group.rotation_queue.clone(),
+            group.rotation_deferred.clone(),
+        )
+    };
+    let before = plan(&state);
+    // Twice, as the stray taps did: leave, back, leave, back.
+    for _ in 0..2 {
+        leave_group(&ctx, &mut state, &people[1], &group_id)
+            .unwrap()
+            .unwrap();
+        assert_ne!(plan(&state), before);
+        let summary = join_group(&ctx, &mut state, &people[1], &group_id)
+            .unwrap()
+            .unwrap();
+        assert!(summary.contains("as it was before leaving"), "{summary}");
+        assert_eq!(plan(&state), before);
+    }
+    assert_consistent(&state);
+
+    // Not once anything else happened to the group in between.
+    leave_group(&ctx, &mut state, &people[1], &group_id)
+        .unwrap()
+        .unwrap();
+    // Someone without a turn this week, so they may leave.
+    let other = people[2..]
+        .iter()
+        .find(|m| {
+            let pid = state.person_by_matrix_id(m).unwrap().id.clone();
+            current_open_assignments(&state, &group_id, &pid).is_empty()
+        })
+        .unwrap()
+        .clone();
+    leave_group(&ctx, &mut state, &other, &group_id)
+        .unwrap()
+        .unwrap();
+    let summary = join_group(&ctx, &mut state, &people[1], &group_id)
+        .unwrap()
+        .unwrap();
+    assert!(!summary.contains("as it was before leaving"), "{summary}");
+    assert_consistent(&state);
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn coming_back_after_the_hour_re_plans_as_any_join() {
+    let (ctx, path, people, group_id) = imported_floor();
+    let mut state = ctx.state.lock().await;
+    leave_group(&ctx, &mut state, &people[1], &group_id)
+        .unwrap()
+        .unwrap();
+    for departure in &mut state.recent_departures {
+        departure.at -= chrono::Duration::minutes(RESTORE_WINDOW_MINUTES + 1);
+    }
+    let summary = join_group(&ctx, &mut state, &people[1], &group_id)
+        .unwrap()
+        .unwrap();
+    assert!(!summary.contains("as it was before leaving"), "{summary}");
+    assert!(state.recent_departures.is_empty());
+    drop(state);
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn leave_asks_for_confirm_while_it_would_hand_on_turns() {
+    let (ctx, path, people, _) = imported_floor();
+    let p01 = OwnedUserId::try_from(people[1].as_str()).unwrap();
+    let asked = cmd_leavefloor(&ctx, &p01, &["3+4 Floor"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        asked.starts_with("⚠️ Leaving «3+4 Floor» hands your turns there (Week "),
+        "{asked}"
+    );
+    assert!(asked.contains("!leave \"3+4 Floor\" confirm"), "{asked}");
+    assert!(is_in(&*ctx.state.lock().await, &people[1], "3+4 Floor"));
+    let left = cmd_leavefloor(&ctx, &p01, &["3+4 Floor", "confirm"])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(left.starts_with("👋 You left 3+4 Floor"), "{left}");
+    assert!(!is_in(&*ctx.state.lock().await, &people[1], "3+4 Floor"));
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn a_selector_check_mark_without_a_fresh_question_does_nothing() {
+    let (ctx, path, people, _) = imported_floor();
+    let mut state = ctx.state.lock().await;
+    let id = open_selector(&mut state, &people[1], false);
+    assert_eq!(
+        onboarding::tap(&ctx, &mut state, &id, "$c0", &people[1], "✅").unwrap(),
+        None
+    );
+    onboarding::tap(&ctx, &mut state, &id, "$r1", &people[1], "1️⃣")
+        .unwrap()
+        .unwrap();
+    // Asked too long ago.
+    state
+        .group_selectors
+        .get_mut(&id)
+        .unwrap()
+        .pending_leave
+        .as_mut()
+        .unwrap()
+        .asked_at -= chrono::Duration::minutes(onboarding::LEAVE_CONFIRM_MINUTES + 1);
+    assert_eq!(
+        onboarding::tap(&ctx, &mut state, &id, "$c1", &people[1], "✅").unwrap(),
+        None
+    );
+    assert!(is_in(&state, &people[1], "3+4 Floor"));
+    // Someone else's ✅ never counts.
+    onboarding::tap(&ctx, &mut state, &id, "$r2", &people[1], "1️⃣")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        onboarding::tap(&ctx, &mut state, &id, "$c2", &people[2], "✅").unwrap(),
+        None
+    );
+    assert!(is_in(&state, &people[1], "3+4 Floor"));
     drop(state);
     let _ = tokio::fs::remove_file(path).await;
 }

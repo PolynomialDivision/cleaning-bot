@@ -354,6 +354,9 @@ pub(crate) async fn cmd_importplan(
     let mut to_add: Vec<&PlannedImport> = Vec::new();
     let mut to_replace: Vec<(&PlannedImport, String)> = Vec::new(); // (entry, previous holder label)
     let mut already_imported = 0usize;
+    // The rotation drew the same person already: pinned now all the same, so
+    // a re-plan (`!plan replan`) keeps the week as the paper has it.
+    let mut to_pin: Vec<&PlannedImport> = Vec::new();
     for p in &planned {
         let existing = state.slot_assignments.iter().find(|a| {
             a.group_id == p.group_id
@@ -361,7 +364,17 @@ pub(crate) async fn cmd_importplan(
                 && (a.iso_year, a.iso_week, a.shift) == (p.year, p.week, p.shift)
         });
         if existing.is_some_and(|a| a.person_id.as_deref() == Some(p.person.id.as_str())) {
-            already_imported += 1;
+            let drawn = existing.is_some_and(|a| a.source == AssignmentSource::RoundRobin);
+            let group = state
+                .group_by_id(&p.group_id)
+                .expect("resolved group must exist");
+            if drawn
+                && !state.is_turn_slot_done(group, p.slot_index, Turn::new(p.year, p.week, p.shift))
+            {
+                to_pin.push(p);
+            } else {
+                already_imported += 1;
+            }
             continue;
         }
 
@@ -412,14 +425,14 @@ pub(crate) async fn cmd_importplan(
         )));
     }
 
-    if to_add.is_empty() && to_replace.is_empty() {
+    if to_add.is_empty() && to_replace.is_empty() && to_pin.is_empty() {
         return Ok(Some(format!(
             "✅ Nothing to do. All {already_imported} entr{} already imported.",
             if already_imported == 1 { "y" } else { "ies" }
         )));
     }
 
-    let make_event = |p: &PlannedImport| DomainEvent::SlotAssigned {
+    let make_event = |p: &PlannedImport, previous: Option<PersonId>| DomainEvent::SlotAssigned {
         group_id: p.group_id.clone(),
         slot_index: p.slot_index,
         iso_year: p.year,
@@ -428,12 +441,17 @@ pub(crate) async fn cmd_importplan(
         person_id: Some(p.person.id.clone()),
         source: AssignmentSource::Import,
         actor_id: Some(sender.as_str().to_owned()),
-        previous_person_id: None,
+        previous_person_id: previous,
     };
     let events: Vec<DomainEvent> = to_add
         .iter()
-        .map(|p| make_event(p))
-        .chain(to_replace.iter().map(|(p, _)| make_event(p)))
+        .map(|p| make_event(p, None))
+        .chain(to_replace.iter().map(|(p, _)| make_event(p, None)))
+        .chain(
+            to_pin
+                .iter()
+                .map(|p| make_event(p, Some(p.person.id.clone()))),
+        )
         .collect();
     let mut lines: Vec<String> = to_add
         .iter()
@@ -463,8 +481,13 @@ pub(crate) async fn cmd_importplan(
     }
     state.save(&ctx.state_path).await?;
 
+    let pinned = if to_pin.is_empty() {
+        String::new()
+    } else {
+        format!(", {} kept and pinned", to_pin.len())
+    };
     Ok(Some(format!(
-        "✅ Import complete: {added_count} added, {replaced_count} replaced, {already_imported} unchanged:\n{}",
+        "✅ Import complete: {added_count} added, {replaced_count} replaced{pinned}, {already_imported} unchanged:\n{}",
         lines.join("\n")
     )))
 }

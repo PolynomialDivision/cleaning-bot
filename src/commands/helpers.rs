@@ -16,7 +16,7 @@ pub(crate) fn command_may_change_current_plan(cmd: &str, sub: Option<&str>) -> b
         "!swap" => sub == Some("accept"),
         "!plan" => matches!(
             sub,
-            Some("assign" | "unassign" | "skip" | "reset" | "import")
+            Some("assign" | "unassign" | "skip" | "reset" | "replan" | "import")
         ),
         // Which groups/slots are shown, and who is marked away.
         "!groups" => matches!(
@@ -135,6 +135,50 @@ pub(crate) fn reset_and_rematerialize(
     Ok(cleared)
 }
 
+/// Admin `!plan replan`: every rotation turn of `group_id` after this week
+/// (not done, not pinned) drawn again, within the horizon it has, from a
+/// line of who cleaned there longest ago first. Pinned weeks stay, and
+/// count as that person's turn as the draw passes them, so after a
+/// `!plan import` the rotation goes on from where the paper plan ends,
+/// everyone in the order of their last imported turn (rather than from a
+/// queue that never saw the import). Returns how many turns were redrawn.
+pub(crate) fn replan_rotation(
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+) -> anyhow::Result<usize> {
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(0);
+    };
+    let current = current_iso_week();
+    let next = add_weeks(current.0, current.1, 1);
+    let horizon = group_horizon_weeks_ahead(state, group_id);
+    let dropped = take_replannable_assignments(state, &group, Turn::new(next.0, next.1, 0));
+    let last_turn = |pid: &PersonId| {
+        state
+            .slot_assignments
+            .iter()
+            .filter(|a| {
+                a.group_id == *group_id
+                    && a.person_id.as_ref() == Some(pid)
+                    && (a.iso_year, a.iso_week) <= current
+            })
+            .map(|a| Turn::new(a.iso_year, a.iso_week, a.shift))
+            .max()
+    };
+    let mut queue = resolver::reconcile_queue(state, &group);
+    queue.sort_by_cached_key(|pid| last_turn(pid));
+    state.apply_event(DomainEvent::RotationQueueSet {
+        group_id: group_id.clone(),
+        queue,
+    })?;
+    state.apply_event(DomainEvent::RotationDeferralsSet {
+        group_id: group_id.clone(),
+        deferred: Default::default(),
+    })?;
+    materialize_group_and_apply(state, group_id, horizon)?;
+    Ok(dropped.len())
+}
+
 /// "Discarded 3 pinned week(s): 41 (imported), 42 (imported), 50 (assigned).":
 /// or nothing when only plain rotation weeks were cleared.
 pub(crate) fn discarded_pins_note(cleared: &[crate::domain::SlotAssignment]) -> Option<String> {
@@ -148,13 +192,7 @@ pub(crate) fn discarded_pins_note(cleared: &[crate::domain::SlotAssignment]) -> 
     pinned.sort_by_key(|a| (a.iso_year, a.iso_week, a.shift, a.slot_index));
     let weeks: Vec<String> = pinned
         .iter()
-        .map(|a| {
-            format!(
-                "{} ({})",
-                a.iso_week,
-                crate::view::source_note(&a.source).unwrap_or("planned")
-            )
-        })
+        .map(|a| format!("{} ({})", a.iso_week, crate::view::pin_label(&a.source)))
         .collect();
     Some(format!(
         "⚠️ Discarded {} pinned week(s), now plain rotation: {}.",
@@ -271,6 +309,12 @@ pub(crate) fn apply_group_join(
     group_id: &GroupId,
     person_id: &PersonId,
 ) -> anyhow::Result<Option<Turn>> {
+    state.restored_join = None;
+    if let Some(changed_from) = restore_departure(state, group_id, person_id)? {
+        state.restored_join = Some((group_id.clone(), person_id.clone()));
+        sync_house_after(ctx, state, group_id)?;
+        return Ok(changed_from);
+    }
     let rotation_was_empty = state
         .group_by_id(group_id)
         .is_some_and(|g| g.member_ids.is_empty());
@@ -527,7 +571,14 @@ pub(crate) fn join_summary(
         ),
         None => "📅 First turn: not planned yet.".to_owned(),
     };
+    let restored = state
+        .restored_join
+        .as_ref()
+        .is_some_and(|(g, p)| g == group_id && p == person_id);
     let plan = match replanned_from {
+        _ if restored => {
+            "↩️ Back within the hour: the plan is as it was before leaving.".to_owned()
+        }
         Some(turn) => format!(
             "🔄 Re-planned from week {} on; earlier weeks unchanged.",
             turn.week
@@ -570,6 +621,22 @@ pub(crate) fn apply_group_departure(
     let Some(group) = state.group_by_id(group_id).cloned() else {
         return Ok(Departure::default());
     };
+    let current = current_iso_week();
+    let before = crate::state::RecentDeparture {
+        person_id: person_id.clone(),
+        group_id: group_id.clone(),
+        at: chrono::Utc::now(),
+        after_event: 0,
+        last_event_id: None,
+        assignments: state
+            .slot_assignments
+            .iter()
+            .filter(|a| a.group_id == *group_id && (a.iso_year, a.iso_week) > current)
+            .cloned()
+            .collect(),
+        queue: group.rotation_queue.clone(),
+        deferred: group.rotation_deferred.clone(),
+    };
     let horizon = group_horizon_weeks_ahead(state, group_id);
     let vacated = remove_future_assignments_for_person(state, person_id, group_id);
     let mut replaced = match vacated
@@ -595,7 +662,177 @@ pub(crate) fn apply_group_departure(
         vacated,
     };
     sync_house_after(ctx, state, group_id)?;
+    remember_departure(state, before);
     Ok(departure)
+}
+
+/// How long coming back undoes a departure exactly (`restore_departure`).
+pub(crate) const RESTORE_WINDOW_MINUTES: i64 = 60;
+
+/// Keep `departure` (the group's plan before it) for `restore_departure`,
+/// as of the end of the event log; forget those too old to restore.
+fn remember_departure(
+    state: &mut crate::state::State,
+    mut departure: crate::state::RecentDeparture,
+) {
+    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(RESTORE_WINDOW_MINUTES);
+    departure.after_event = state.event_log.len();
+    departure.last_event_id = state.event_log.last().map(|e| e.id.clone());
+    state.recent_departures.retain(|d| {
+        d.at > cutoff && !(d.person_id == departure.person_id && d.group_id == departure.group_id)
+    });
+    state.recent_departures.push(departure);
+}
+
+/// Someone who left `group_id` within the last hour comes back: put its
+/// plan back exactly as it was before they left (their turns, everyone
+/// else's, the queue), if nothing else touched the group since: a join
+/// otherwise re-plans only from the next cycle, so a stray tap and its undo
+/// would keep the leaver's turns before that with others (2026-10-15: a
+/// leave and a join by mistake gave someone two weeks in a row).
+///
+/// Since the departure only these may have happened to the group: done or
+/// skipped marks of a week not after it, and the planning horizon rolling
+/// on (turns drawn for weeks the plan didn't have, the queue that drew
+/// them): those weeks are drawn again from the restored queue. Returns
+/// `None` when it can't be restored (nothing changed then), else
+/// `Some(first turn whose assignee changed back)`.
+fn restore_departure(
+    state: &mut crate::state::State,
+    group_id: &GroupId,
+    person_id: &PersonId,
+) -> anyhow::Result<Option<Option<Turn>>> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(RESTORE_WINDOW_MINUTES);
+    state.recent_departures.retain(|d| d.at > cutoff);
+    let Some(index) = state
+        .recent_departures
+        .iter()
+        .rposition(|d| d.group_id == *group_id && d.person_id == *person_id)
+    else {
+        return Ok(None);
+    };
+    let departure = state.recent_departures.remove(index);
+    let Some(group) = state.group_by_id(group_id).cloned() else {
+        return Ok(None);
+    };
+    if group.member_ids.contains(person_id) || !departure_still_restorable(state, &departure) {
+        return Ok(None);
+    }
+    let first_week = departure
+        .assignments
+        .iter()
+        .map(|a| (a.iso_year, a.iso_week))
+        .min();
+    let key = |a: &crate::domain::SlotAssignment| (a.slot_index, a.iso_year, a.iso_week, a.shift);
+    let known: std::collections::HashSet<_> = departure.assignments.iter().map(key).collect();
+    // Weeks the horizon rolled on to since: drawn again below.
+    state.slot_assignments.retain(|a| {
+        a.group_id != *group_id
+            || first_week.is_none_or(|w| (a.iso_year, a.iso_week) < w)
+            || known.contains(&key(a))
+    });
+
+    state.apply_event(DomainEvent::PersonJoinedGroup {
+        person_id: person_id.clone(),
+        group_id: group_id.clone(),
+    })?;
+    let mut changed_from: Option<Turn> = None;
+    let mut turns = departure.assignments.clone();
+    turns.sort_by_key(|a| (a.iso_year, a.iso_week, a.shift, a.slot_index));
+    for old in turns {
+        let now = state
+            .slot_assignments
+            .iter()
+            .find(|a| a.group_id == *group_id && key(a) == key(&old));
+        if now.is_some_and(|a| a.person_id == old.person_id && a.source == old.source) {
+            continue;
+        }
+        let turn = Turn::new(old.iso_year, old.iso_week, old.shift);
+        changed_from = Some(changed_from.map_or(turn, |t| t.min(turn)));
+        state.apply_event(DomainEvent::SlotAssigned {
+            group_id: group_id.clone(),
+            slot_index: old.slot_index,
+            iso_year: old.iso_year,
+            iso_week: old.iso_week,
+            shift: old.shift,
+            person_id: old.person_id.clone(),
+            source: old.source.clone(),
+            actor_id: None,
+            previous_person_id: now.and_then(|a| a.person_id.clone()),
+        })?;
+    }
+    state.apply_event(DomainEvent::RotationQueueSet {
+        group_id: group_id.clone(),
+        queue: departure.queue.clone(),
+    })?;
+    state.apply_event(DomainEvent::RotationDeferralsSet {
+        group_id: group_id.clone(),
+        deferred: departure.deferred.clone(),
+    })?;
+    // The weeks the horizon rolled on to, from the restored queue.
+    let horizon = group_horizon_weeks_ahead(state, group_id);
+    materialize_group_and_apply(state, group_id, horizon)?;
+    Ok(Some(changed_from))
+}
+
+/// Nothing but done marks of weeks up to the departure's and the horizon
+/// rolling on happened to the departure's group since (`restore_departure`).
+fn departure_still_restorable(
+    state: &crate::state::State,
+    departure: &crate::state::RecentDeparture,
+) -> bool {
+    let Some(anchor) = departure.after_event.checked_sub(1) else {
+        return false;
+    };
+    // The log is append-only; a mismatch means it isn't the log it was.
+    if state.event_log.get(anchor).map(|e| &e.id) != departure.last_event_id.as_ref() {
+        return false;
+    }
+    let first_week = departure
+        .assignments
+        .iter()
+        .map(|a| (a.iso_year, a.iso_week))
+        .min();
+    let planned: std::collections::HashSet<_> = departure
+        .assignments
+        .iter()
+        .map(|a| (a.slot_index, a.iso_year, a.iso_week, a.shift))
+        .collect();
+    state.event_log[departure.after_event..].iter().all(|e| {
+        let concerns_group = serde_json::to_value(&e.event)
+            .is_ok_and(|v| v["group_id"].as_str() == Some(departure.group_id.as_str()));
+        if !concerns_group {
+            return true;
+        }
+        match &e.event {
+            DomainEvent::CleaningCompleted {
+                iso_year, iso_week, ..
+            }
+            | DomainEvent::CleaningSkipped {
+                iso_year, iso_week, ..
+            }
+            | DomainEvent::CleaningUndone {
+                iso_year, iso_week, ..
+            } => first_week.is_none_or(|w| (*iso_year, *iso_week) < w),
+            DomainEvent::SlotAssigned {
+                slot_index,
+                iso_year,
+                iso_week,
+                shift,
+                source,
+                actor_id,
+                previous_person_id,
+                ..
+            } => {
+                *source == AssignmentSource::RoundRobin
+                    && actor_id.is_none()
+                    && previous_person_id.is_none()
+                    && !planned.contains(&(*slot_index, *iso_year, *iso_week, *shift))
+            }
+            DomainEvent::RotationQueueSet { .. } | DomainEvent::RotationDeferralsSet { .. } => true,
+            _ => false,
+        }
+    })
 }
 
 /// Confirmation lines for a departure: what happened to the leaver's
@@ -638,7 +875,7 @@ pub(crate) fn departure_summary(
         };
         lines.push(format!(
             "⚠️ {} week {} ({}) → now {now}",
-            capitalize(crate::view::source_note(&a.source).unwrap_or("planned")),
+            capitalize(crate::view::pin_label(&a.source)),
             turn.week,
             duty.label(),
         ));

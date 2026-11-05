@@ -208,9 +208,17 @@ fn current_feedback<'a>(state: &State, selector: &'a GroupSelector) -> Option<&'
     (!changed).then_some(feedback)
 }
 
+/// How long a tap asking to leave waits for the ✅ that confirms it.
+pub const LEAVE_CONFIRM_MINUTES: i64 = 10;
+
 /// A reaction `key` by `sender` on the selector `selector_id`: toggle that
 /// group. Returns the confirmation to reply with, or `None` when the
 /// reaction is no tap (someone else's, another emoji, seen or taken back before).
+///
+/// Leaving a group they still have turns in takes a second yes: the tap
+/// only asks (naming the turns that would go to others), their ✅ on the
+/// selector within `LEAVE_CONFIRM_MINUTES` leaves. A stray tap, or two,
+/// changes nothing that way (2026-10-15).
 pub fn tap(
     ctx: &BotContext,
     state: &mut State,
@@ -228,21 +236,59 @@ pub fn tap(
     {
         return Ok(None);
     }
-    let Some(group_id) = number_index(key).and_then(|i| selector.group_ids.get(i).cloned()) else {
-        return Ok(None);
-    };
-    let joined = state
-        .person_by_matrix_id(sender)
-        .is_some_and(|p| state.is_member(&group_id, &p.id));
-    let (effect, reply) = if state.group_by_id(&group_id).is_none() {
-        (TapEffect::Nothing, None)
-    } else if joined {
-        toggle(ctx, state, sender, &group_id, false)?
+    let mut pending = None;
+    let (group_id, effect, reply) = if reaction::is_one_of(key, &["✅"]) {
+        // Only a fresh question from this selector, for a group they're still in.
+        let fresh = chrono::Utc::now() - chrono::Duration::minutes(LEAVE_CONFIRM_MINUTES);
+        let Some(asked) = selector
+            .pending_leave
+            .clone()
+            .filter(|p| p.asked_at > fresh)
+        else {
+            return Ok(None);
+        };
+        let still_in = state
+            .person_by_matrix_id(sender)
+            .is_some_and(|p| state.is_member(&asked.group_id, &p.id));
+        if !still_in {
+            return Ok(None);
+        }
+        let (effect, reply) = toggle(ctx, state, sender, &asked.group_id, false)?;
+        (asked.group_id, effect, reply)
     } else {
-        toggle(ctx, state, sender, &group_id, true)?
+        let Some(group_id) = number_index(key).and_then(|i| selector.group_ids.get(i).cloned())
+        else {
+            return Ok(None);
+        };
+        let joined = state
+            .person_by_matrix_id(sender)
+            .is_some_and(|p| state.is_member(&group_id, &p.id));
+        let (effect, reply) = if state.group_by_id(&group_id).is_none() {
+            (TapEffect::Nothing, None)
+        } else if !joined {
+            toggle(ctx, state, sender, &group_id, true)?
+        } else if let Some(turns) =
+            crate::commands::leave_needs_confirmation(state, sender, &group_id)
+        {
+            pending = Some(crate::state::PendingLeave {
+                group_id: group_id.clone(),
+                asked_at: chrono::Utc::now(),
+            });
+            (
+                TapEffect::Nothing,
+                Some(format!(
+                    "⚠️ Leave **{}**? Your turns there go to others: {turns}. Tap ✅ here to leave.",
+                    group_name_of(state, &group_id)
+                )),
+            )
+        } else {
+            toggle(ctx, state, sender, &group_id, false)?
+        };
+        (group_id, effect, reply)
     };
     let applied_at_event = Some(state.event_log.len());
     if let Some(selector) = state.group_selectors.get_mut(selector_id) {
+        selector.pending_leave = pending;
         selector.feedback = reply.clone();
         selector.feedback_at = applied_at_event;
         selector.taps.insert(
@@ -321,7 +367,19 @@ fn toggle(
         leave_group(ctx, state, mxid, group_id)?
     };
     let group = group_name_of(state, group_id);
+    let restored = state
+        .restored_join
+        .as_ref()
+        .is_some_and(|(g, _)| g == group_id)
+        && state.person_by_matrix_id(mxid).map(|p| &p.id)
+            == state.restored_join.as_ref().map(|(_, p)| p);
     Ok(match (outcome, join) {
+        (Ok(_summary), true) if restored => (
+            TapEffect::Joined,
+            Some(format!(
+                "✅ Joined **{group}** again · ↩️ your turns are back as before"
+            )),
+        ),
         (Ok(_summary), true) => (TapEffect::Joined, Some(format!("✅ Joined **{group}**"))),
         (Ok(_summary), false) => (TapEffect::Left, Some(format!("👋 Left **{group}**"))),
         (Err(why), _) => (TapEffect::Nothing, Some(why)),

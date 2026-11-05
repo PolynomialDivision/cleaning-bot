@@ -44,7 +44,7 @@ pub(crate) use exports::{cmd_pdf, plan_text};
 pub(crate) use helpers::*;
 use maintenance::*;
 use member::*;
-pub(crate) use member::{join_group, leave_group};
+pub(crate) use member::{join_group, leave_group, leave_needs_confirmation};
 use overview::*;
 #[cfg(test)]
 pub(crate) use rotation::add_matrix_participant;
@@ -221,6 +221,7 @@ pub async fn handle(
         ("!plan", Some("unassign")) => cmd_unassign(ctx, sender, rest).await,
         ("!plan", Some("skip")) => cmd_skip(ctx, sender, rest).await,
         ("!plan", Some("reset")) => cmd_resetplan(ctx, sender, rest).await,
+        ("!plan", Some("replan")) => cmd_replan(ctx, sender, rest).await,
         ("!plan", Some("import")) => cmd_importplan(ctx, sender, rest).await,
         ("!plan", Some(_)) => Ok(Some(PLAN_USAGE.to_owned())),
 
@@ -483,6 +484,7 @@ fn admin_help_text() -> String {
 !plan assign <group> [slot] <person> [week N] [on <day>]
 !plan unassign <group> [slot] [week N] [on <day>]
 !plan reset <group> · redistribute future weeks from the rotation
+!plan replan <group> · draw the rotation weeks after this one again, pinned weeks (imported, assigned, swapped) stay
 !plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
 !plan pdf [view] [next | history] [N] [group] · printable plan (next = from next week; view = only to look at)
 !plan pdf style [group] days | tick | default · a box per day, or one tick per duty with the slots side by side, for everyone or one group

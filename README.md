@@ -229,6 +229,23 @@ stays; removing it yourself then undoes that tap. `!mygroups` posts a fresh
 selector; `!join`/`!leave` work without buttons. More than ten groups: the
 rest via `!groups` and `!join`.
 
+Leaving a group you still have turns in takes a second yes: the tap only asks
+(naming the turns that would go to others), your ✅ on the selector within 10
+minutes leaves; `!leave <group>` asks the same and leaves with
+`!leave <group> confirm`. Coming back within the hour (the reaction taken back,
+a tap, `!join`, an admin's `!member add`) puts the plan back exactly as it was
+before, as long as nothing else changed in that group meanwhile; later, a join
+re-plans from the next cycle as before. A turn handed on never goes to someone
+whose other turn in that group is less than half a cycle away (2026-11, after a
+stray leave gave someone two weeks in a row).
+
+After `!plan import` (weeks from a paper plan), `!plan replan <group>` draws the
+rotation weeks after the imported ones again, everyone in the order of their
+last imported turn, so the rotation goes on where the paper ends. An import
+also pins a week the rotation had already given to the same person. An
+imported week shows no note in the plan (it is just the plan); admins'
+messages still say "imported".
+
 **A private chat with the bot** (encrypted) also takes `!next`, `!plan`,
 `!plan pdf`, `!mygroups`, `!join`, `!leave`, `!done`, `!undo`, `!sos`,
 `!help` and `!ical`, only about yourself, never about others, and never admin commands

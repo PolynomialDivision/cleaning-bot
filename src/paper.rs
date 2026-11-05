@@ -442,8 +442,8 @@ fn duty_row(
             a.slot_name.as_deref().unwrap_or(""),
             a.period_label,
             match a.source {
-                crate::domain::AssignmentSource::RoundRobin => "",
-                crate::domain::AssignmentSource::Import => " · imported",
+                crate::domain::AssignmentSource::RoundRobin
+                | crate::domain::AssignmentSource::Import => "",
                 _ => " · assigned",
             }
         ),
