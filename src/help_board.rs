@@ -1,0 +1,360 @@
+//! The help board: `!help post` (admin) puts a friendly overview in the
+//! cleaning room, with reactions that do things for whoever taps them.
+//! Their next turns, the plan, their groups, a PDF, or a private chat.
+//!
+//! A tap is answered privately when there's a verified private chat with
+//! that person (`private`), else as a reply to the board, addressed to them.
+//! Like a group selector tap, the reaction is then taken away again, so the
+//! board keeps its clean row of buttons and the same one works next time.
+//!
+//! 💬 makes the bot invite the person to a new encrypted chat: the bot
+//! invites rather than waits to be invited, so it needs no invite allowlist
+//! for it. Once they join, it greets them there with their group selector.
+
+use anyhow::Result;
+use mxbot_common::matrix_sdk::{
+    ruma::{
+        events::{
+            reaction::ReactionEventContent,
+            relation::{Annotation, Reply},
+            room::message::{Relation, RoomMessageEventContent},
+        },
+        OwnedEventId, OwnedRoomId, OwnedUserId, UserId,
+    },
+    Client, Room,
+};
+use mxbot_common::reaction;
+
+use crate::{format, BotContext};
+
+/// What a reaction on the board asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Next,
+    Take,
+    Plan,
+    Groups,
+    Pdf,
+    PrivateChat,
+}
+
+/// The board's buttons, in order.
+pub const BUTTONS: [(&str, Action); 6] = [
+    ("📅", Action::Next),
+    ("🙋", Action::Take),
+    ("📋", Action::Plan),
+    ("👥", Action::Groups),
+    ("📄", Action::Pdf),
+    ("💬", Action::PrivateChat),
+];
+
+/// The action of reaction `key`, with or without the emoji variation
+/// selector some clients leave out.
+pub fn action_for(key: &str) -> Option<Action> {
+    BUTTONS
+        .iter()
+        .find(|(emoji, _)| reaction::is_one_of(key, &[emoji]))
+        .map(|(_, action)| *action)
+}
+
+/// The board, a little playful.
+pub fn board_text() -> String {
+    "🧹 **Cleaning bot**\n\
+     📌 The plan is pinned up top, new every week, next week included.\n\
+     Under it: ✅ done · 🆘 give away · 🔄 swap · 🙋 take over\n\
+     \n\
+     **Tap a button here:**\n\
+     📅 my turns\n\
+     🙋 take over a turn\n\
+     📋 the plan\n\
+     👥 my groups\n\
+     📄 plan as PDF\n\
+     💬 private chat with me\n\
+     \n\
+     Rather type? !next · !take · !plan · !help"
+        .to_owned()
+}
+
+/// Post a board in the cleaning room and seed its buttons.
+pub async fn post(ctx: &BotContext, room: &Room) -> Result<OwnedEventId> {
+    let content = format::intentional(format::mentionify(&board_text()));
+    let event_id = mxbot_common::send::send_with_retry(room, content).await?;
+    {
+        let mut state = ctx.state.lock().await;
+        state.help_boards.insert(event_id.to_string());
+        state.save(&ctx.state_path).await?;
+    }
+    for (emoji, _) in BUTTONS {
+        let reaction = ReactionEventContent::new(Annotation::new(event_id.clone(), emoji.into()));
+        if let Err(e) = mxbot_common::send::send_with_retry(room, reaction).await {
+            tracing::warn!("Failed to seed {emoji} on the help board: {e}");
+        }
+    }
+    Ok(event_id)
+}
+
+/// `account` tapped `action` on `board` (in the cleaning room `room`), as
+/// `user`, the person the plan knows (`directory`): the private chat is
+/// `account`'s, the turns are `user`'s.
+pub async fn run(
+    ctx: &BotContext,
+    client: &Client,
+    room: &Room,
+    board: &OwnedEventId,
+    account: &OwnedUserId,
+    user: &OwnedUserId,
+    action: Action,
+) {
+    if action == Action::PrivateChat {
+        if let Err(e) = open_private_chat(ctx, client, account).await {
+            tracing::warn!("Could not open a private chat with {account}: {e}");
+            answer(
+                room,
+                board,
+                account,
+                "😕 I couldn't start a private chat with you.\n🔁 Try again later, or invite me yourself.",
+            )
+            .await;
+        }
+        return;
+    }
+    let private = private_chat(ctx, client, account).await;
+    let target = private.as_ref().unwrap_or(room);
+    let result: Result<Option<String>> = match action {
+        Action::Next => {
+            // The menu of their turns. The plain list when they have none.
+            let relation = private
+                .is_none()
+                .then(|| Relation::Reply(Reply::with_event_id(board.clone())));
+            match crate::turn_menu::post(ctx, target, user, crate::turn_menu::DEFAULT, relation)
+                .await
+            {
+                Ok(true) => Ok(None),
+                Ok(false) => crate::commands::cmd_next(ctx, user, &[]).await,
+                Err(e) => Err(e),
+            }
+        }
+        Action::Take => {
+            let relation = private
+                .is_none()
+                .then(|| Relation::Reply(Reply::with_event_id(board.clone())));
+            match crate::turn_menu::post_take(ctx, target, user, relation).await {
+                Ok(true) => Ok(None),
+                Ok(false) => Ok(Some(crate::turn_menu::NOTHING_TO_TAKE.to_owned())),
+                Err(e) => Err(e),
+            }
+        }
+        Action::Plan => Ok(Some(crate::commands::plan_text(
+            &*ctx.state.lock().await,
+            6,
+        ))),
+        Action::Groups => crate::onboarding::post_selector(ctx, target, user.as_str(), false)
+            .await
+            .map(|()| None),
+        Action::Pdf => {
+            let answer_to = private
+                .is_none()
+                .then(|| Relation::Reply(Reply::with_event_id(board.clone())));
+            crate::commands::cmd_pdf(ctx, user, target, &[], answer_to)
+                .await
+                // A reply only when it went wrong; the file speaks for itself.
+                .map(|reply| reply.map(|c| c.body().to_owned()))
+        }
+        Action::PrivateChat => unreachable!("handled above"),
+    };
+    let text = match result {
+        Ok(Some(text)) => text,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("Help board {action:?} for {user} failed: {e}");
+            "😕 That didn't work. Try the command instead.".to_owned()
+        }
+    };
+    match private {
+        Some(chat) => {
+            let content = format::intentional(format::mentionify(&text));
+            if let Err(e) = mxbot_common::send::send_with_retry(&chat, content).await {
+                tracing::warn!("Failed to answer {user} privately: {e}");
+            }
+        }
+        None => answer(room, board, account, &text).await,
+    }
+}
+
+async fn answer(room: &Room, board: &OwnedEventId, user: &UserId, text: &str) {
+    if let Err(e) =
+        mxbot_common::send::send_with_retry(room, answer_content(board, user, text)).await
+    {
+        tracing::warn!("Failed to answer a help board tap: {e}");
+    }
+}
+
+/// `text` for `user`, as a reply to the board: addressed to them, so they
+/// see it's theirs.
+fn answer_content(board: &OwnedEventId, user: &UserId, text: &str) -> RoomMessageEventContent {
+    let mut content = format::intentional(format::mentionify(&format!("{user}\n{text}")));
+    content.relates_to = Some(Relation::Reply(Reply::with_event_id(board.clone())));
+    content
+}
+
+/// The verified private chat with `user`, if there is one: one the bot
+/// opened for them, or another direct chat: either only if it passes the
+/// `private` check right now.
+/// One the bot opened for another account of theirs counts too (their address moved to the
+/// account they chose, `directory`): it stays theirs.
+pub async fn private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId) -> Option<Room> {
+    let mut accounts = vec![user.clone()];
+    accounts.extend(ctx.recognised(user).into_iter().filter(|a| a != user));
+    let known: Vec<Room> = {
+        let state = ctx.state.lock().await;
+        accounts
+            .iter()
+            .filter_map(|a| state.private_chats.get(a.as_str()))
+            .filter_map(|chat| OwnedRoomId::try_from(chat.room_id.as_str()).ok())
+            .filter_map(|id| client.get_room(&id))
+            .collect()
+    };
+    let direct = accounts.iter().flat_map(|a| client.get_dm_rooms(a));
+    for room in known.into_iter().chain(direct) {
+        if crate::private::authorized(ctx, &room, user).await {
+            return Some(room);
+        }
+    }
+    None
+}
+
+/// Say hello in the private chat with `user`, or, without one yet, invite
+/// them to a new encrypted one (greeted once they join, `greet_on_join`).
+async fn open_private_chat(ctx: &BotContext, client: &Client, user: &OwnedUserId) -> Result<()> {
+    if let Some(chat) = private_chat(ctx, client, user).await {
+        let content = format::intentional(format::mentionify(
+            "👋 Here I am! Ask me anything you'd ask in the cleaning room:\n!next · !plan · !mygroups · !done · !ical",
+        ));
+        mxbot_common::send::send_with_retry(&chat, content).await?;
+        return Ok(());
+    }
+    invite_to_private_chat(ctx, client, user).await
+}
+
+/// Invite `user` to the encrypted private chat the bot opens for them (or
+/// again to the one they haven't accepted yet). Once they join,
+/// `greet_on_join` greets them there with their groups.
+/// For someone without a verified private chat (`private_chat`).
+pub async fn invite_to_private_chat(
+    ctx: &BotContext,
+    client: &Client,
+    user: &OwnedUserId,
+) -> Result<()> {
+    // Still waiting for them to accept an earlier invite: invite again
+    // rather than open a second chat.
+    let pending = ctx
+        .state
+        .lock()
+        .await
+        .private_chats
+        .get(user.as_str())
+        .filter(|chat| !chat.greeted)
+        .and_then(|chat| OwnedRoomId::try_from(chat.room_id.as_str()).ok())
+        .and_then(|id| client.get_room(&id));
+    if let Some(room) = pending {
+        if room.invite_user_by_id(user).await.is_ok() {
+            return Ok(());
+        }
+    }
+    // The person gets the default power level: only the bot can invite.
+    let room = mxbot_common::private::create_private_dm(
+        client,
+        user,
+        &mxbot_common::private::PREFERRED_ROOM_VERSIONS,
+    )
+    .await?;
+    let mut state = ctx.state.lock().await;
+    state.private_chats.insert(
+        user.to_string(),
+        crate::state::PrivateChat {
+            room_id: room.room_id().to_string(),
+            greeted: false,
+        },
+    );
+    state.save(&ctx.state_path).await?;
+    Ok(())
+}
+
+/// `user` joined `room`: if it's the private chat the bot opened for them,
+/// greet them there: once.
+pub async fn greet_on_join(ctx: &BotContext, room: &Room, user: &OwnedUserId) {
+    let ours = ctx
+        .state
+        .lock()
+        .await
+        .private_chats
+        .get(user.as_str())
+        .is_some_and(|chat| chat.room_id == room.room_id().as_str() && !chat.greeted);
+    if !ours || !crate::private::authorized(ctx, room, user).await {
+        return;
+    }
+    {
+        let mut state = ctx.state.lock().await;
+        if let Some(chat) = state.private_chats.get_mut(user.as_str()) {
+            chat.greeted = true;
+        }
+        if let Err(e) = state.save(&ctx.state_path).await {
+            tracing::error!("Failed to save the private chat with {user}: {e}");
+            return;
+        }
+    }
+    let hello = format::intentional(format::mentionify(&private_hello()));
+    if let Err(e) = mxbot_common::send::send_with_retry(room, hello).await {
+        tracing::warn!("Failed to greet {user} privately: {e}");
+        return;
+    }
+    if let Err(e) = crate::onboarding::post_selector(ctx, room, user.as_str(), false).await {
+        tracing::warn!("Failed to post {user}'s private group selector: {e}");
+    }
+}
+
+fn private_hello() -> String {
+    "👋 Psst, it's just us here!\n\
+     Ask me what you'd ask in the cleaning room, nobody else sees it:\n\
+     📅 !next · 📋 !plan · ✅ !done · 🗓 !ical · ❓ !help\n\
+     Your groups come right below 👇"
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_button_is_on_the_board_and_found_with_or_without_fe0f() {
+        let board = board_text();
+        for (emoji, action) in BUTTONS {
+            assert!(board.contains(&format!("\n{emoji} ")), "{emoji} missing");
+            assert_eq!(action_for(emoji), Some(action));
+            assert_eq!(action_for(&format!("{emoji}\u{fe0f}")), Some(action));
+        }
+        assert_eq!(action_for("✅"), None);
+        // The board pings nobody.
+        let content = format::intentional(format::mentionify(&board));
+        assert!(content.mentions.unwrap().user_ids.is_empty());
+    }
+
+    #[test]
+    fn an_answer_on_the_board_is_addressed_to_whoever_tapped() {
+        use mxbot_common::matrix_sdk::ruma::{owned_event_id, user_id};
+        let board = owned_event_id!("$board");
+        let content = answer_content(&board, user_id!("@mia:example.org"), "📅 Your next turns");
+        assert!(matches!(
+            &content.relates_to,
+            Some(Relation::Reply(reply)) if reply.in_reply_to.event_id == board
+        ));
+        let ids: Vec<String> = content
+            .mentions
+            .unwrap()
+            .user_ids
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(ids, ["@mia:example.org"]);
+    }
+}

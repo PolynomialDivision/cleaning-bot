@@ -1,0 +1,556 @@
+use anyhow::Result;
+use matrix_sdk::{
+    ruma::{
+        events::room::message::{
+            Relation, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
+        },
+        OwnedUserId,
+    },
+    Room,
+};
+use mxbot_common::matrix_sdk;
+use uuid::Uuid;
+
+use crate::{
+    analytics::{self, DomainEvent},
+    domain::{AssignmentSource, CleaningGroup, GroupId, Person, PersonId},
+    format, resolver,
+    rhythm::{parse_weekday, Turn},
+    schedule::build_schedule,
+    scheduler,
+    state::{add_weeks, current_iso_week, week_dates, SwapStatus},
+    BotContext,
+};
+
+mod assignments;
+mod exports;
+mod helpers;
+#[cfg(test)]
+mod house_tests;
+mod maintenance;
+mod member;
+mod overview;
+mod rotation;
+mod setup;
+mod stats;
+mod swaps;
+#[cfg(test)]
+mod tests;
+
+use assignments::*;
+pub(crate) use assignments::{cmd_next, upcoming_duties};
+use exports::*;
+pub(crate) use exports::{cmd_pdf, plan_text};
+pub(crate) use helpers::*;
+use maintenance::*;
+use member::*;
+pub(crate) use member::{join_group, leave_group, leave_needs_confirmation};
+use overview::*;
+#[cfg(test)]
+pub(crate) use rotation::add_matrix_participant;
+use rotation::*;
+pub(crate) use setup::person_has_activity;
+use setup::*;
+use stats::*;
+use swaps::*;
+
+/// Shell-like tokenizer: splits on whitespace but keeps "quoted strings" together.
+/// Quotes are stripped from the resulting tokens. Straight and typographic
+/// double quotes (as phone keyboards insert them) both work; an apostrophe
+/// is just a letter, so names like `Sam's` stay intact.
+/// Example: `!groups room add "2. Stock" "Tannhof Toilette"` → ["!groups", "room", "add", "2. Stock", "Tannhof Toilette"]
+fn tokenize(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' | '“' | '”' | '„' => quoted = !quoted,
+            ' ' | '\t' if !quoted => {
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// How an answer relates to what it answers: a reply, or a reply in the
+/// thread the command was written in.
+pub type Answer = Relation<RoomMessageEventContentWithoutRelation>;
+
+pub async fn handle(
+    ctx: &BotContext,
+    sender: &OwnedUserId,
+    room: &Room,
+    body: &str,
+    answer_to: Answer,
+) -> Result<Option<RoomMessageEventContent>> {
+    let mut tokens = tokenize(body);
+    let cmd_owned = if tokens.is_empty() {
+        String::new()
+    } else {
+        tokens.remove(0)
+    };
+    let cmd = cmd_owned.as_str();
+    let arg_strings = tokens;
+    let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
+
+    if room.room_id() != ctx.room_id
+        && !ctx.is_admin(sender)
+        && !private_command_allowed(cmd, &args)
+    {
+        return Ok(Some(format::intentional(format::mentionify(
+            "🏠 Use that command in the cleaning room.",
+        ))));
+    }
+
+    // Update the sender's display name from Matrix on every command
+    // (lightweight: their name here, else their cached global profile).
+    crate::names::refresh_one(ctx, room, sender.as_str()).await;
+
+    // Multi-word group/person names work without quotes: regroup the tokens
+    // so each name is a single argument before any command sees them.
+    let normalized = {
+        let state = ctx.state.lock().await;
+        normalize_args(&state, cmd, &args)
+    };
+    let args: Vec<&str> = normalized.iter().map(String::as_str).collect();
+
+    let sub = args.first().map(|a| a.to_ascii_lowercase());
+    let sub = sub.as_deref();
+    let rest = args.get(1..).unwrap_or_default();
+
+    // Your own next turns: a menu to pick one and swap it or ask for cover
+    // (`turn_menu`): as plain text only for more than it has numbers.
+    if matches!(cmd, "!next" | "!myplan" | "!mycleaning") {
+        let count = match args.as_slice() {
+            [] => Some(crate::turn_menu::DEFAULT),
+            [n] => n
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=crate::turn_menu::MAX).contains(n)),
+            _ => None,
+        };
+        if let Some(count) = count {
+            let relation = (room.room_id() == ctx.room_id).then(|| answer_to.clone());
+            if crate::turn_menu::post(ctx, room, sender, count, relation).await? {
+                return Ok(None);
+            }
+        }
+    }
+
+    // Commands that need direct room access.
+    match (cmd, sub) {
+        ("!plan", None) => return cmd_cleanplan(ctx, sender, room, &args).await,
+        ("!plan", Some(n)) if n.parse::<usize>().is_ok() => {
+            return cmd_cleanplan(ctx, sender, room, &args).await
+        }
+        ("!plan", Some("remind")) => {
+            let main = room
+                .client()
+                .get_room(&ctx.room_id)
+                .ok_or_else(|| anyhow::anyhow!("Cleaning room unavailable"))?;
+            return cmd_remind(ctx, sender, &main, rest).await;
+        }
+        ("!plan", Some("announce")) => {
+            let main = room
+                .client()
+                .get_room(&ctx.room_id)
+                .ok_or_else(|| anyhow::anyhow!("Cleaning room unavailable"))?;
+            return cmd_announceweek(ctx, sender, &main).await;
+        }
+        ("!plan", Some("pdf")) => return cmd_pdf(ctx, sender, room, rest, Some(answer_to)).await,
+        ("!mygroups", _) => return cmd_mygroups(ctx, sender, room).await,
+        ("!take" | "!takeover", _) => {
+            return cmd_take(ctx, sender, room, &args, answer_to.clone()).await
+        }
+        ("!sos" | "!cant", _) => {
+            let reply = cmd_sos(ctx, sender, room, &args).await?;
+            return Ok(reply.map(|s| format::intentional(format::mentionify(&s))));
+        }
+        ("!help", Some("post")) => return cmd_help_post(ctx, sender, room).await,
+        ("!member", Some("welcome")) => return cmd_member_welcome(ctx, sender, room, rest).await,
+        ("!ical", Some("reset" | "revoke")) => {
+            return Ok(Some(format::mentionify(
+                "🗓 There are no calendar links anymore: your turns are in your own calendar \
+                 in the house cloud (!ical says where), or !ical sends them as a file.",
+            )))
+        }
+        ("!ical", _) => return cmd_ical(ctx, sender, room, &args).await,
+        ("!member", Some("link")) => {
+            let s = cmd_linkmatrix(ctx, sender, room, rest).await?;
+            return Ok(s.map(RoomMessageEventContent::text_plain));
+        }
+        _ => {}
+    }
+
+    let reply: Option<String> = match (cmd, sub) {
+        // ── Everyone ──
+        ("!status", _) => cmd_status(ctx).await,
+        ("!done", _) => cmd_done(ctx, sender, room, &args).await,
+        ("!undo", _) => cmd_undo(ctx, sender, &args).await,
+        ("!groups", None) => cmd_groups(ctx, None).await,
+        ("!next" | "!myplan" | "!mycleaning", _) => cmd_next(ctx, sender, &args).await,
+        ("!cleaning", Some("person")) => cmd_cleaning_person(ctx, sender, rest).await,
+        ("!cleaning", _) => Ok(Some(
+            "!cleaning person <name> shows someone's turns (same as !next <name>). \
+             !groups lists groups; !help lists everything."
+                .into(),
+        )),
+        ("!swap", Some("accept")) => cmd_acceptswap(ctx, sender, rest).await,
+        ("!swap", Some("reject")) => cmd_rejectswap(ctx, sender, rest).await,
+        ("!swap", _) => cmd_swap(ctx, sender, &args).await,
+        // Old swap messages in the room still name these.
+        ("!acceptswap", _) => cmd_acceptswap(ctx, sender, &args).await,
+        ("!rejectswap", _) => cmd_rejectswap(ctx, sender, &args).await,
+        ("!join", _) => cmd_joinfloor(ctx, sender, &args).await,
+        ("!leave", _) => cmd_leavefloor(ctx, sender, &args).await,
+        ("!stats", _) => cmd_stats_overview(ctx, &args).await,
+        ("!help", Some("admin")) => Ok(Some(admin_help_text())),
+        ("!help", Some("more")) => Ok(Some(more_help_text())),
+        ("!help", _) => Ok(Some(help_text())),
+
+        // ── Admin: plan ──
+        ("!plan", Some("assign")) => cmd_assign(ctx, sender, rest).await,
+        ("!plan", Some("unassign")) => cmd_unassign(ctx, sender, rest).await,
+        ("!plan", Some("skip")) => cmd_skip(ctx, sender, rest).await,
+        ("!plan", Some("reset")) => cmd_resetplan(ctx, sender, rest).await,
+        ("!plan", Some("replan")) => cmd_replan(ctx, sender, rest).await,
+        ("!plan", Some("import")) => cmd_importplan(ctx, sender, rest).await,
+        ("!plan", Some(_)) => Ok(Some(PLAN_USAGE.to_owned())),
+
+        // ── Admin: members ──
+        ("!member", Some("add")) => cmd_member_add(ctx, sender, rest).await,
+        ("!member", Some("remove")) => cmd_member_remove(ctx, sender, rest).await,
+        ("!member", Some("away")) => cmd_absent(ctx, sender, rest).await,
+        ("!member", Some("back")) => cmd_back(ctx, sender, rest).await,
+        ("!member", _) => Ok(Some(MEMBER_USAGE.to_owned())),
+
+        // ── Admin: groups (the bare list is for everyone) ──
+        ("!groups", Some("add")) => cmd_addfloor(ctx, sender, rest).await,
+        ("!groups", Some("remove")) => cmd_removefloor(ctx, sender, rest).await,
+        ("!groups", Some("enable")) => cmd_enablegroup(ctx, sender, rest).await,
+        ("!groups", Some("disable")) => cmd_disablegroup(ctx, sender, rest).await,
+        ("!groups", Some("weight")) => cmd_weight(ctx, sender, rest).await,
+        ("!groups", Some("slot")) => cmd_groups_slot(ctx, sender, rest).await,
+        ("!groups", Some("room")) => cmd_groups_room(ctx, sender, rest).await,
+        ("!groups", Some("rhythm")) => cmd_groups_rhythm(ctx, sender, rest).await,
+        ("!groups", Some("house")) => cmd_groups_house(ctx, sender, rest).await,
+        ("!groups", Some("directory")) => {
+            crate::directory::reconcile::cmd_groups_directory(ctx, sender, rest).await
+        }
+        ("!directory", _) => crate::directory::reconcile::cmd_directory(ctx, sender, &args).await,
+        ("!groups", Some(_)) => cmd_groups(ctx, Some(&args.join(" "))).await,
+        ("!validate", _) => cmd_validate(ctx, sender).await,
+
+        _ => Ok(renamed_command_hint(cmd)),
+    }?;
+
+    // Every mutation that can change who's responsible for, or the status
+    // of, the running week's plan goes through this single refresh call.
+    // The pinned Matrix message is re-rendered straight from `State`, never
+    // patched in place, so it can never drift from the persisted domain state.
+    if command_may_change_current_plan(cmd, sub) {
+        let (year, week) = current_iso_week();
+        if let Some(main) = room.client().get_room(&ctx.room_id) {
+            scheduler::refresh_pinned_plan(ctx, &main, year, week).await;
+        }
+    }
+
+    match reply {
+        None => Ok(None),
+        Some(s) => Ok(Some(format::intentional(
+            crate::names::mentionify(ctx, &s, room).await,
+        ))),
+    }
+}
+
+// ── argument normalization ────────────────────────────────────────────────────
+
+fn joined(args: &[&str]) -> Vec<String> {
+    if args.is_empty() {
+        Vec::new()
+    } else {
+        vec![args.join(" ")]
+    }
+}
+
+/// `<group …> rest…`: the longest leading run of tokens that names a group
+/// becomes one token, leaving at least `min_rest` tokens after it.
+fn group_first(state: &crate::state::State, args: &[&str], min_rest: usize) -> Vec<String> {
+    for n in (2..=args.len().saturating_sub(min_rest)).rev() {
+        if let Some(group) = state.group_by_name(&args[..n].join(" ")) {
+            let mut out = vec![group.name.clone()];
+            out.extend(args[n..].iter().map(|a| a.to_string()));
+            return out;
+        }
+    }
+    args.iter().map(|a| a.to_string()).collect()
+}
+
+/// `<person …> <group …>`: the longest trailing run naming a group becomes
+/// one token, everything before it the person.
+fn person_then_group(state: &crate::state::State, args: &[&str]) -> Vec<String> {
+    for start in 1..args.len() {
+        if let Some(group) = state.group_by_name(&args[start..].join(" ")) {
+            return vec![args[..start].join(" "), group.name.clone()];
+        }
+    }
+    args.iter().map(|a| a.to_string()).collect()
+}
+
+/// `<person …> [N]`: a trailing number stays separate.
+fn person_then_number(args: &[&str]) -> Vec<String> {
+    match args.split_last() {
+        Some((last, head)) if !head.is_empty() && last.parse::<u32>().is_ok() => {
+            vec![head.join(" "), last.to_string()]
+        }
+        _ => joined(args),
+    }
+}
+
+/// Regroup the tokens of one command so multi-word names need no quotes.
+/// Quoted input still works. It simply already arrives as one token.
+pub(crate) fn normalize_args(state: &crate::state::State, cmd: &str, args: &[&str]) -> Vec<String> {
+    let owned = |a: &[&str]| a.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let with_sub = |sub: &str, rest: Vec<String>| {
+        let mut out = vec![sub.to_owned()];
+        out.extend(rest);
+        out
+    };
+    let sub = args.first().map(|a| a.to_ascii_lowercase());
+    let rest = args.get(1..).unwrap_or_default();
+    match (cmd, sub.as_deref()) {
+        ("!done" | "!undo" | "!join" | "!leave", _) => joined(args),
+        ("!next" | "!myplan" | "!mycleaning", _) => person_then_number(args),
+        ("!cleaning", Some("person")) => with_sub(args[0], person_then_number(rest)),
+        ("!take" | "!takeover" | "!sos" | "!cant", _) => group_first(state, args, 0),
+        ("!swap", Some("accept" | "reject")) => owned(args),
+        ("!swap", Some(_)) => {
+            let mut out = vec![args[0].to_owned()];
+            out.extend(group_first(state, rest, 0));
+            out
+        }
+        ("!stats", Some("fairness")) => with_sub(args[0], joined(rest)),
+        ("!stats", _) => joined(args),
+        ("!ical", Some("reset" | "revoke")) => with_sub(args[0], joined(rest)),
+        ("!ical", _) => person_then_number(args),
+        ("!groups", Some("remove")) => match rest.split_last() {
+            Some((last, head)) if !head.is_empty() && last.eq_ignore_ascii_case("confirm") => {
+                let mut out = with_sub(args[0], joined(head));
+                out.push(last.to_string());
+                out
+            }
+            _ => with_sub(args[0], joined(rest)),
+        },
+        ("!groups", Some("add" | "enable" | "disable")) => with_sub(args[0], joined(rest)),
+        ("!groups", Some("rhythm")) => with_sub(args[0], group_first(state, rest, 0)),
+        ("!groups", Some("house" | "directory")) => with_sub(args[0], group_first(state, rest, 1)),
+        ("!groups", Some("slot" | "room")) if !rest.is_empty() => {
+            let mut out = vec![args[0].to_owned(), rest[0].to_owned()];
+            let tail = group_first(state, &rest[1..], 1);
+            if sub.as_deref() == Some("slot") {
+                // <group> <slot name …>
+                out.extend(tail.first().cloned());
+                out.extend(joined(
+                    &tail.iter().skip(1).map(String::as_str).collect::<Vec<_>>(),
+                ));
+            } else {
+                out.extend(tail);
+            }
+            out
+        }
+        ("!groups", Some("weight")) => match rest.split_last() {
+            // <group …> [room …] <factor>
+            Some((factor, head)) if !head.is_empty() => {
+                let head = group_first(state, head, 0);
+                let mut out = vec![args[0].to_owned(), head[0].clone()];
+                out.extend(joined(
+                    &head[1..].iter().map(String::as_str).collect::<Vec<_>>(),
+                ));
+                out.push(factor.to_string());
+                out
+            }
+            _ => owned(args),
+        },
+        ("!groups", Some(_)) => joined(args),
+        ("!plan", Some("skip" | "assign" | "unassign")) => {
+            with_sub(args[0], group_first(state, rest, 0))
+        }
+        ("!plan", Some("remind" | "reset")) => with_sub(args[0], joined(rest)),
+        ("!member", Some("add" | "remove")) => with_sub(args[0], person_then_group(state, rest)),
+        ("!member", Some("away")) => with_sub(args[0], person_then_number(rest)),
+        ("!member", Some("back" | "welcome")) => with_sub(args[0], joined(rest)),
+        ("!member", Some("link")) => match rest.split_last() {
+            Some((mxid, head)) if !head.is_empty() => {
+                vec![args[0].to_owned(), head.join(" "), mxid.to_string()]
+            }
+            _ => owned(args),
+        },
+        _ => owned(args),
+    }
+}
+
+// ── help ─────────────────────────────────────────────────────────────────────
+
+const PLAN_USAGE: &str = "💡 Usage: !plan [N] | !plan assign|unassign|skip|remind|announce|pdf|reset|import … (see !help admin)";
+const MEMBER_USAGE: &str = "💡 Usage: !member add|remove <@user:server | name> <group> · !member link <name> <@user:server> · !member away <person> [weeks] · !member back <person> · !member welcome <person>";
+
+/// What a resident may do in a verified private chat with the bot: their
+/// own turns, groups, completions and calendar, and the public plan.
+/// Nothing about other people, nothing for admins (they have their own DM).
+pub(crate) fn private_command_allowed(cmd: &str, args: &[&str]) -> bool {
+    match cmd {
+        "!help" | "!mygroups" | "!join" | "!leave" | "!done" | "!undo" | "!sos" | "!cant"
+        | "!take" | "!takeover" => true,
+        "!next" | "!myplan" | "!mycleaning" => {
+            args.is_empty() || (args.len() == 1 && args[0].parse::<usize>().is_ok())
+        }
+        // The plan and its PDF are public in the cleaning room anyway.
+        "!plan" => {
+            args.is_empty()
+                || (args.len() == 1 && args[0].parse::<usize>().is_ok())
+                || args[0].eq_ignore_ascii_case("pdf")
+        }
+        "!ical" => {
+            args.is_empty()
+                || (args.len() == 1
+                    && (matches!(args[0], "reset" | "revoke") || args[0].parse::<usize>().is_ok()))
+        }
+        _ => false,
+    }
+}
+
+fn help_text() -> String {
+    "🧹 **Cleaning bot**\n\n\
+📅 !next · your turns: swap or give one away\n\
+🙋 !take · take over a turn\n\
+📋 !plan · see the plan\n\
+👥 !mygroups · join or leave groups\n\
+✅ !done · done! (or ✅ on the plan)\n\
+🆘 !sos · give a turn away (or 🆘 on the plan)\n\
+🗓 !ical · your calendar\n\
+📄 !plan pdf · printable plan\n\n\
+❓ !help more · !help admin"
+        .into()
+}
+
+fn more_help_text() -> String {
+    "🫧 **A little more help**\n\
+📊 !status · this week's progress\n\
+↩️ !undo [group] · take your done mark back\n\
+✅ !done <group> · mark a group you cleaned\n\
+🆘 !sos [group] [slot] [week N] [on <day>] · give a later turn away\n\
+🙋 !take [group] [slot] [week N] · take that turn over (then ✅)\n\
+🔄 !swap @user [group] · ask someone to cover, they accept or reject\n\
+➕ !join <group> · ➖ !leave <group> · without the number buttons\n\
+👥 !groups [group] · groups, members, rooms\n\
+📈 !stats · cleaning history\n\
+📄 !plan pdf next 20 · a PDF from next week on (history = past weeks)\n\
+🖼️ !plan pdf view · the plan only to look at (to hang up), nothing to tick\n\n\
+👥 In !mygroups, tap a number to join that group. Tap it again to leave. \
+✅ marks the groups you're in.\n\
+🆘 on the plan: someone can take your turn (🙋) or swap theirs for it (🔄).\n\
+🙋 on the plan: take a turn over, nobody has to agree. Its holder can ↩️ keep it.\n\
+✅ while your shift is still to come and the running one is open: \
+you swap, and ↩️ swaps back.\n\
+🔒 !next, !take, !plan, !mygroups, !done, !sos and !ical also work in a private chat with me. \
+Tap 💬 on the help board and I'll invite you."
+        .into()
+}
+
+fn admin_help_text() -> String {
+    r#"🔧 **Admin commands**
+
+**Members**
+!member add <@user:server | name> <group> · name = person without Matrix
+!member remove <@user:server | name> <group>
+!member link <name> <@user:server> · connect a name-only person to Matrix
+!member welcome <person> · send them the welcome and group list again
+!help post · post the help board (buttons for everyone) in the cleaning room
+!member away <person> [weeks] · skip in new rotation picks (default 4)
+!member back <person>
+
+**This week & plan**
+!plan skip [group] [slot] [on <day>] · excuse this week (not counted as missed)
+!plan remind [group] · send the reminder now
+!plan announce · (re)post and pin this week's plan
+!plan assign <group> [slot] <person> [week N] [on <day>]
+!plan unassign <group> [slot] [week N] [on <day>]
+!plan reset <group> · redistribute future weeks from the rotation
+!plan replan <group> · draw the rotation weeks after this one again, pinned weeks (imported, assigned, swapped) stay
+!plan import [--replace] <YYYY-Www[:day]> <group>[/slot] <person> [; …]
+!plan pdf [view] [next | history] [N] [group] · printable plan (next = from next week; view = only to look at)
+!plan pdf style [group] days | tick | default · a box per day, or one tick per duty with the slots side by side, for everyone or one group
+
+**Groups**
+!groups <group> · details: rhythm, turn order, slots, rooms, weights
+!groups rhythm <group> weekly | 2x | every 2 | mon-tue thu-fri · how often it is cleaned
+!groups add|enable|disable <group>
+!groups remove <group> [confirm] · deletes it with its history
+!groups house <group> on|off · everyone living here is in it (the staircase)
+!groups directory <group> <directory group | off> · its members are who is in that group of the house directory (a kitchen)
+!groups slot add <group> <slot> [x2] · x2: two people clean it together
+!groups slot remove <group> <slot>
+!groups room add|remove <group> [slot] <room>
+!groups weight <group> [room] <factor>
+
+**Directory**
+!directory · what the plan follows in the house directory, and what is held
+!directory confirm <digest> · let exactly the held departures go (the digest is in the notice and in !directory)
+
+**Other**
+!ical · where your calendar is (or a file)
+!validate · check the saved state for problems
+!admin · bot administration (verification, settings)"#
+        .to_owned()
+}
+
+/// Commands that were renamed or merged: answer with the replacement instead
+/// of silently ignoring the old name.
+fn renamed_command_hint(cmd: &str) -> Option<String> {
+    let new = match cmd {
+        "!cleanplan" => "!plan [N]",
+        "!areas" | "!listgroups" | "!floors" => "!groups",
+        "!joingroup" => "!join <group>",
+        "!leavegroup" => "!leave <group>",
+        "!icalreset" => "!ical",
+        "!leaderboard" => "!stats",
+        "!fairness" | "!planfairness" => "!stats fairness [group]",
+        "!workload" | "!groupstats" => "!stats load",
+        "!blame" => "!status (this week) or !stats <person | group>",
+        "!adduser" | "!addperson" => "!member add <@user:server | name> <group>",
+        "!removeuser" | "!removeperson" => "!member remove <@user:server | name> <group>",
+        "!linkmatrix" => "!member link <name> <@user:server>",
+        "!absent" => "!member away <person> [weeks]",
+        "!back" => "!member back <person>",
+        "!assign" => "!plan assign <group> [slot] <person> [week N]",
+        "!unassign" => "!plan unassign <group> [slot] [week N]",
+        "!importplan" => "!plan import …",
+        "!resetplan" => "!plan reset <group>",
+        "!skip" => "!plan skip [group]",
+        "!remind" => "!plan remind [group]",
+        "!announceweek" | "!repostplan" => "!plan announce",
+        "!pdf" => "!plan pdf [N]",
+        "!addgroup" => "!groups add <group>",
+        "!removegroup" => "!groups remove <group>",
+        "!enablegroup" => "!groups enable <group>",
+        "!disablegroup" => "!groups disable <group>",
+        "!addslot" => "!groups slot add <group> <slot>",
+        "!removeslot" => "!groups slot remove <group> <slot>",
+        "!addroom" => "!groups room add <group> [slot] <room>",
+        "!removeroom" => "!groups room remove <group> [slot] <room>",
+        "!setgroupweight" => "!groups weight <group> <factor>",
+        "!setroomweight" => "!groups weight <group> <room> <factor>",
+        _ => return None,
+    };
+    Some(format!(
+        "🔀 {cmd} was renamed. Use {new}.\n❔ !help lists all commands."
+    ))
+}

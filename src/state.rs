@@ -1,0 +1,1971 @@
+use anyhow::Result;
+use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    path::Path,
+    sync::OnceLock,
+};
+
+use crate::{
+    domain::{CleaningGroup, CleaningSlot, GroupId, Person, PersonId, SlotAssignment, SlotId},
+    rhythm::Turn,
+};
+
+// ── Scheduling records ────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Completion {
+    pub group_id: GroupId,
+    /// `Some` for multi-slot groups; `None` for single-slot groups.
+    #[serde(default)]
+    pub slot_id: Option<SlotId>,
+    pub completed_by_id: PersonId,
+    #[serde(default)]
+    pub responsible_person_ids: Vec<PersonId>,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    /// Shift within the week (see `rhythm`); 0 for whole-week rhythms.
+    #[serde(default)]
+    pub shift: u8,
+    /// Date selected on paper, separate from the actual recording timestamp.
+    #[serde(default)]
+    pub completed_on: Option<NaiveDate>,
+    pub completed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReactionDone {
+    pub group_id: GroupId,
+    pub completed_by_id: PersonId,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    /// Every duty the ✅ marked, so taking the reaction back undoes exactly
+    /// those. Empty in records written by older versions, which only knew
+    /// `group_id`.
+    #[serde(default)]
+    pub marked: Vec<MarkedDuty>,
+}
+
+/// One slot (`None` without slots) of one shift that a ✅ reaction marked.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MarkedDuty {
+    pub group_id: GroupId,
+    #[serde(default)]
+    pub slot_id: Option<SlotId>,
+    #[serde(default)]
+    pub shift: u8,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Absence {
+    pub person_id: PersonId,
+    pub group_id: GroupId,
+    pub from_year: i32,
+    pub from_week: u32,
+    pub duration_weeks: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SwapRequest {
+    pub id: u64,
+    /// Requester / target are Matrix MXIDs: swaps are Matrix-only.
+    pub requester: String,
+    pub target: String,
+    pub group_id: GroupId,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub created_at: DateTime<Utc>,
+    pub status: SwapStatus,
+    /// Slot being swapped in a group with slots (0 otherwise).
+    #[serde(default)]
+    pub slot_index: usize,
+    /// Shift within the week being swapped.
+    #[serde(default)]
+    pub shift: u8,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapStatus {
+    Pending,
+    Accepted,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReminderKind {
+    Initial,
+    Final,
+    WeeklySummary,
+}
+
+/// A private chat the bot opened for someone.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PrivateChat {
+    pub room_id: String,
+    /// They joined and were greeted; until then it's an open invite.
+    pub greeted: bool,
+}
+
+// ── Trades ───────────────────────────────────────────────────────────────────
+
+/// One slot of one turn a trade handed from `from` to `to` (see `trades`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Reassignment {
+    pub group_id: GroupId,
+    pub slot_index: usize,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub shift: u8,
+    pub from: Option<PersonId>,
+    /// How `from` came to hold it: restored on an undo.
+    #[serde(default)]
+    pub from_source: crate::domain::AssignmentSource,
+    pub to: Option<PersonId>,
+    /// Already cleaned when traded (the running turn someone cleaned early):
+    /// that it has started doesn't stop an undo.
+    #[serde(default)]
+    pub cleaned: bool,
+}
+
+impl Reassignment {
+    pub fn turn(&self) -> Turn {
+        Turn::new(self.iso_year, self.iso_week, self.shift)
+    }
+}
+
+/// Turns handed around in one go: undone together, or not at all.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Trade {
+    pub changes: Vec<Reassignment>,
+    #[serde(default)]
+    pub undone: bool,
+}
+
+/// Someone ✅'d a later shift while an earlier one was still open: they
+/// took the running shift, its holder got theirs. The message telling the
+/// one moved, by event ID in `State::early_swaps`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct EarlySwap {
+    pub trade: Trade,
+    /// Who cleaned early (Matrix ID).
+    pub cleaner: String,
+    /// Who was moved to the later shift (Matrix IDs).
+    pub moved: Vec<String>,
+    /// The ✅ reaction behind it, if it was one: taking that back undoes
+    /// the swap too.
+    #[serde(default)]
+    pub reaction_id: Option<String>,
+    /// The text it shows now.
+    pub rendered: String,
+}
+
+/// "I can't make it: who steps in?" (🆘 / `!sos`), by event ID in
+/// `State::help_requests`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct HelpRequest {
+    /// Who asked (Matrix ID).
+    pub requester: String,
+    pub group_id: GroupId,
+    pub slot_index: usize,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub shift: u8,
+    pub status: HelpStatus,
+    /// Who stepped in (Matrix ID), and what changed hands.
+    #[serde(default)]
+    pub helper: Option<String>,
+    #[serde(default)]
+    pub trade: Option<Trade>,
+    /// The 🆘 reaction that asked, if one did: taking it back withdraws.
+    #[serde(default)]
+    pub trigger: Option<String>,
+    /// Only a swap is asked for (🔄 in the turn menu): 🙋 doesn't count.
+    #[serde(default)]
+    pub swap_only: bool,
+    /// The admins were told nobody stepped in by the time it started.
+    #[serde(default)]
+    pub admins_told: bool,
+    /// Everyone the request was sent to (its mentions), so its edits
+    /// notify only who is new.
+    #[serde(default)]
+    pub mentioned: Vec<String>,
+    /// Nobody asked: `helper` took the turn over from `requester` (🙋 menu,
+    /// `!takeover`), and this is the notice telling them, ↩️ to keep it.
+    #[serde(default)]
+    pub unasked: bool,
+    /// Unasked and undone by the one who took it: they gave it back (else its
+    /// holder kept it).
+    #[serde(default)]
+    pub given_back: bool,
+    /// When it was asked: the admins hear of it a few hours later at the
+    /// earliest. Unknown for requests from before.
+    #[serde(default)]
+    pub asked_at: Option<DateTime<Utc>>,
+    /// The text it shows now.
+    pub rendered: String,
+}
+
+impl HelpRequest {
+    pub fn turn(&self) -> Turn {
+        Turn::new(self.iso_year, self.iso_week, self.shift)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HelpStatus {
+    /// Waiting for someone to step in.
+    Open,
+    /// Someone took it over.
+    Taken,
+    /// Someone took it and gave their next turn for it.
+    Swapped,
+    /// The requester can make it after all.
+    Withdrawn,
+    /// Settled otherwise: done, over, or no longer theirs.
+    Closed,
+}
+
+/// What a turn menu offers.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuKind {
+    /// Their own next turns: 🔄 swap or 🆘 give away.
+    #[default]
+    Mine,
+    /// Other people's turns they may take over: ✅ takes one.
+    Take,
+}
+
+/// Who held the turn picked in a take menu when it was picked: the takeover
+/// only goes through while it is still them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PickedFrom {
+    pub holder: Option<PersonId>,
+}
+
+/// A menu of turns to tap (see `turn_menu`): someone's next turns (`!next`,
+/// 📅 on the help board), then 🔄 or 🆘; or other people's turns to take
+/// over (`!take`, 🙋 on the plan or the help board), then ✅.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TurnMenu {
+    /// Whose turns; nobody else's taps count.
+    pub user_id: String,
+    pub room_id: String,
+    /// The turns offered, in number order (1️⃣ first): fixed once posted,
+    /// so a number always means the same turn.
+    pub turns: Vec<MenuTurn>,
+    /// The number tapped last (0-based), waiting for 🔄 or 🆘 (✅ in a take menu).
+    #[serde(default)]
+    pub selected: Option<usize>,
+    /// What the last tap did.
+    #[serde(default)]
+    pub feedback: Option<String>,
+    /// The text it shows now.
+    #[serde(default)]
+    pub rendered: String,
+    #[serde(default)]
+    pub kind: MenuKind,
+    /// Take menus: who held the picked turn when it was picked.
+    #[serde(default)]
+    pub picked_from: Option<PickedFrom>,
+}
+
+/// "Take it over? ✅": the question after someone tapped 🙋 or 🔄 on a
+/// request, so a stray tap changes nothing (see `trades`). Only their ✅
+/// counts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ConfirmCard {
+    /// Who is asked (Matrix ID).
+    pub user_id: String,
+    /// The request (its event ID in `help_requests`).
+    pub request_id: String,
+    /// 🔄: a swap; else 🙋, a takeover.
+    pub swap: bool,
+    /// A swap: the turn of theirs it shows going to the one who asked. A ✅
+    /// only swaps while that is still the one.
+    #[serde(default)]
+    pub give: Option<MenuTurn>,
+    /// Why their last ✅ didn't go through, while it still asks.
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub status: CardStatus,
+    /// The text it shows now.
+    #[serde(default)]
+    pub rendered: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CardStatus {
+    /// Waiting for their ✅.
+    #[default]
+    Asking,
+    /// Their ✅ went through.
+    Done,
+}
+
+/// One slot of one turn in a `TurnMenu`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MenuTurn {
+    pub group_id: GroupId,
+    pub slot_index: usize,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub shift: u8,
+}
+
+impl MenuTurn {
+    pub fn turn(&self) -> Turn {
+        Turn::new(self.iso_year, self.iso_week, self.shift)
+    }
+}
+
+/// A reminder message the bot sent, kept up to date as people finish.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ReminderMessage {
+    pub iso_year: i32,
+    pub iso_week: u32,
+    pub note: ReminderNote,
+    /// The turns it reminds of: (group, shift) in that week.
+    pub turns: Vec<(GroupId, u8)>,
+    /// The text it shows now.
+    pub rendered: String,
+    /// The day it was sent, which "ends today" or "until tomorrow" count
+    /// from. `None` for reminders from before it was kept: "ends today".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_on: Option<NaiveDate>,
+}
+
+/// What a reminder says about its turns.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReminderNote {
+    /// A shift starting today (the week's first is announced by the plan).
+    StartsToday,
+    /// Open turns near their end: whole-week turns on the configured day,
+    /// shifts on their last day. The text says when each ends.
+    EndsToday,
+    /// `!plan remind`: open turns of this week.
+    StillOpen,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SentReminder {
+    /// A group id, or `*` for the consolidated weekly plan.
+    pub group_id: GroupId,
+    pub iso_year: i32,
+    pub iso_week: u32,
+    /// Shift the reminder was for (per-turn reminders).
+    #[serde(default)]
+    pub shift: u8,
+    pub kind: ReminderKind,
+    #[serde(default)]
+    pub sent_at: Option<DateTime<Utc>>,
+}
+
+// ── Group selector ────────────────────────────────────────────────────────────
+
+/// A posted group selector (the welcome, `!mygroups`): one user's list of
+/// groups to tap. See `onboarding`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct GroupSelector {
+    /// Whose selector it is; nobody else's taps count.
+    pub user_id: String,
+    /// Empty in old state means the configured cleaning room.
+    #[serde(default)]
+    pub room_id: String,
+    /// What the last tap did ("✅ Joined **Kitchen**", or why not).
+    #[serde(default)]
+    pub feedback: Option<String>,
+    /// `event_log` length when `feedback` was given; once the owner's
+    /// memberships change after that, the feedback is out of date.
+    #[serde(default)]
+    pub feedback_at: Option<usize>,
+    /// The groups offered, in number order (1️⃣ first). Fixed once posted,
+    /// so a number always means the same group.
+    pub group_ids: Vec<GroupId>,
+    /// The welcome (with its short intro) rather than a `!mygroups` list.
+    #[serde(default)]
+    pub welcome: bool,
+    /// Every tap (reaction event ID) and what it did: a re-delivered tap
+    /// counts once, and taking one back undoes exactly that tap.
+    #[serde(default)]
+    pub taps: HashMap<String, SelectorTap>,
+    /// The text last sent or edited in: edit only when it changes.
+    #[serde(default)]
+    pub rendered: String,
+    /// A tap asked to leave a group they still have turns in: it waits for
+    /// their ✅ on the selector (`onboarding::LEAVE_CONFIRM_MINUTES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_leave: Option<PendingLeave>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PendingLeave {
+    pub group_id: GroupId,
+    pub asked_at: DateTime<Utc>,
+}
+
+/// The plan of a group just before someone left it, so that their coming
+/// back soon puts it back exactly (`commands::apply_group_join`): a leave and
+/// a join are not each other's undo otherwise (a join re-plans from the next
+/// cycle, the leaver's turns before that stay with others).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RecentDeparture {
+    pub person_id: PersonId,
+    pub group_id: GroupId,
+    pub at: DateTime<Utc>,
+    /// `event_log` length right after the departure, and the ID of its last
+    /// event there: what happened to the group since is read from there.
+    pub after_event: usize,
+    pub last_event_id: Option<String>,
+    /// The group's turns after the week it happened in, before.
+    pub assignments: Vec<SlotAssignment>,
+    pub queue: Vec<PersonId>,
+    #[serde(default)]
+    pub deferred: std::collections::BTreeMap<PersonId, u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SelectorTap {
+    pub group_id: GroupId,
+    pub effect: TapEffect,
+    #[serde(default)]
+    pub applied_at_event: Option<usize>,
+    /// The reaction was taken back (and its effect undone, if it still
+    /// applied).
+    #[serde(default)]
+    pub undone: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TapEffect {
+    Joined,
+    Left,
+    /// Refused (e.g. leaving with this week's turn open) or no such group.
+    Nothing,
+}
+
+/// Event IDs seen recently, oldest first, capped at `RecentIds::CAP`.
+/// Matrix only re-delivers recent events (after a restart, from the last
+/// sync token), so older IDs can go. Serialized as a plain list. The same
+/// JSON as the `HashSet` it replaces.
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(transparent)]
+pub struct RecentIds(std::collections::VecDeque<String>);
+
+impl RecentIds {
+    const CAP: usize = 2000;
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.0.iter().any(|seen| seen == id)
+    }
+
+    /// Remember `id`; false when it was already known.
+    pub fn insert(&mut self, id: String) -> bool {
+        if self.contains(&id) {
+            return false;
+        }
+        self.0.push_back(id);
+        while self.0.len() > Self::CAP {
+            self.0.pop_front();
+        }
+        true
+    }
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct State {
+    #[serde(default)]
+    pub paper_documents: HashMap<String, crate::paper::Document>,
+    #[serde(default)]
+    pub paper_scans: HashMap<String, crate::paper::Proposal>,
+    /// Which printable plan `!plan pdf` makes for groups without their own
+    /// (`!plan pdf style`).
+    #[serde(default)]
+    pub paper_style: crate::paper::Style,
+    /// Groups with their own printable plan (`!plan pdf style <group> …`).
+    #[serde(default)]
+    pub paper_styles: HashMap<GroupId, crate::paper::Style>,
+    #[serde(default)]
+    pub persons: Vec<Person>,
+    #[serde(default)]
+    pub cleaning_groups: Vec<CleaningGroup>,
+
+    /// Frozen per-slot assignments produced by the resolver.
+    /// These are the authoritative source for who cleans which slot each week.
+    #[serde(default)]
+    pub slot_assignments: Vec<SlotAssignment>,
+    #[serde(default)]
+    pub completions: Vec<Completion>,
+    #[serde(default)]
+    pub swap_requests: Vec<SwapRequest>,
+    #[serde(default)]
+    pub absences: Vec<Absence>,
+    #[serde(default)]
+    pub sent_reminders: Vec<SentReminder>,
+    /// Append-only domain event log.  Backfilled from completions/swaps on first load.
+    #[serde(default)]
+    pub event_log: Vec<crate::analytics::LoggedEvent>,
+
+    #[serde(default)]
+    pub next_id: u64,
+    pub created_at: Option<DateTime<Utc>>,
+    /// Updated on every save; used as deterministic DTSTAMP in ICS exports.
+    #[serde(default)]
+    pub last_modified: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub schedule_fingerprint: String,
+    /// event_id → (iso_year, iso_week)  (consolidated weekly plan / final-reminder messages)
+    #[serde(default)]
+    pub weekly_plan_event_ids: HashMap<String, (i32, u32)>,
+    /// "YEAR-Www" → canonical weekly plan event_id (initial plan only; used for pin/unpin and idempotency)
+    #[serde(default)]
+    pub weekly_plan_canonical: HashMap<String, String>,
+    /// "YEAR-Www" → the exact message body last successfully sent/edited into
+    /// that week's canonical plan message. Used to detect drift between
+    /// persisted state and the live Matrix message (e.g. after a crash
+    /// between applying a domain event and editing the message) without
+    /// having to parse Matrix edit-aggregation data back out of the room:
+    /// state stays the sole source of truth; Matrix is only ever read to
+    /// confirm the event still exists. `#[serde(default)]` so old
+    /// `state.json` files without it just re-render (and re-check) on the
+    /// next startup instead of failing to load.
+    #[serde(default)]
+    pub weekly_plan_rendered: HashMap<String, String>,
+    #[serde(default)]
+    pub reaction_dones: HashMap<String, ReactionDone>,
+    /// Reminder messages by event ID, of this and last week: edited as
+    /// people finish, and a ✅ on them counts like one on the plan.
+    #[serde(default)]
+    pub reminder_messages: HashMap<String, ReminderMessage>,
+    /// Reactions that were redacted, by their sender (an undo) or by the
+    /// bot (a consumed selector tap), so a late or repeated delivery of the
+    /// reaction itself is ignored. Only the most recent are kept.
+    #[serde(default)]
+    pub redacted_reactions: RecentIds,
+    /// ✅ reaction event ID → when the completions it made were recorded, so
+    /// taking an old reaction back can't undo a newer completion of the
+    /// same turn. Absent for reactions from before this was tracked.
+    #[serde(default)]
+    pub reaction_completion_times: HashMap<String, Vec<DateTime<Utc>>>,
+    /// "`event_id`:`line`" of commands already run, so a re-delivered
+    /// message doesn't run them twice. Only the most recent are kept.
+    #[serde(default)]
+    pub processed_commands: RecentIds,
+    /// The command now running; `save` marks it processed together with its
+    /// first change, so a crash after that doesn't run it again.
+    #[serde(skip)]
+    pub active_command: Option<String>,
+    /// Matrix users who have had their welcome, once each, ever. (Named
+    /// for the old greeting, so everyone greeted by it still counts.)
+    #[serde(default)]
+    pub greeted_users: HashSet<String>,
+    /// "`room`|`user`" → a first welcome being sent, kept until it is
+    /// recorded as sent so a retry sends the very same message.
+    #[serde(default)]
+    pub pending_welcomes: HashMap<String, GroupSelector>,
+    /// Help boards (`!help post`) by event ID: reactions on them are buttons.
+    #[serde(default)]
+    pub help_boards: HashSet<String>,
+    /// Help board taps already carried out, by reaction event ID.
+    #[serde(default)]
+    pub help_taps: RecentIds,
+    /// Early-✅ swaps by the event ID of the message telling the one moved.
+    #[serde(default)]
+    pub early_swaps: HashMap<String, EarlySwap>,
+    /// "Who steps in?" requests by event ID.
+    #[serde(default)]
+    pub help_requests: HashMap<String, HelpRequest>,
+    /// 🆘 / 🙋 / 🔄 / ↩️ reactions and turn menu taps already carried out,
+    /// by event ID.
+    #[serde(default)]
+    pub trade_taps: RecentIds,
+    /// Turn menus by event ID. The latest one per user and kind.
+    #[serde(default)]
+    pub turn_menus: HashMap<String, TurnMenu>,
+    /// "Take it over? ✅" questions by event ID (see `ConfirmCard`).
+    #[serde(default)]
+    pub confirm_cards: HashMap<String, ConfirmCard>,
+    /// Private chats the bot opened (help board 💬), by Matrix user.
+    #[serde(default)]
+    pub private_chats: HashMap<String, PrivateChat>,
+    /// Live group selectors by event ID. The latest one per user.
+    #[serde(default)]
+    pub group_selectors: HashMap<String, GroupSelector>,
+    /// `greeted_users` has been seeded with everyone who used the bot
+    /// before welcomes were tracked this way (see `onboarding`).
+    #[serde(default)]
+    pub welcomes_migrated: bool,
+    /// Plans made before the start of a split week took turns have been
+    /// re-seated (`resolver::rebalance_shifts`).
+    #[serde(default)]
+    pub shifts_rebalanced: bool,
+    /// People whose turns are in a Nextcloud calendar of their own, made and shared with them
+    /// (`calendars`): person ID → the calendar's name. Their selectors and `!ical` point there.
+    #[serde(default)]
+    pub nextcloud_calendars: std::collections::BTreeMap<PersonId, String>,
+    /// What following the house's directory remembers between its reads
+    /// (`directory::reconcile`).
+    #[serde(default, skip_serializing_if = "DirectoryMemory::is_empty")]
+    pub directory: DirectoryMemory,
+    /// Who was last told they hold each slot of a turn coming up soon (`notices`):
+    /// [`slot_key`] → the person (`None`: nobody holds it). A message that tells
+    /// someone about a change of their own (a takeover notice, a 🆘 sorted, an early
+    /// swap) records it here, so the change notices don't tell them again.
+    #[serde(default)]
+    pub told_holders: std::collections::BTreeMap<String, Option<PersonId>>,
+    /// Departures of the last hour, for an undo by coming back
+    /// (`commands::RESTORE_WINDOW_MINUTES`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_departures: Vec<RecentDeparture>,
+    /// The last `apply_group_join` put the plan back as it was before that
+    /// person left (group, person): for its confirmation only.
+    #[serde(skip)]
+    pub restored_join: Option<(GroupId, PersonId)>,
+}
+
+/// The key of one slot of one turn: "`group`:`year`:`week`:`shift`:`slot`".
+pub fn slot_key(group_id: &str, slot_index: usize, turn: Turn) -> String {
+    format!(
+        "{group_id}:{}:{}:{}:{slot_index}",
+        turn.year, turn.week, turn.shift
+    )
+}
+
+impl State {
+    /// Record that `holder` was told (or knows, having done it) that they hold
+    /// `slot_index` of `turn` in group `group_id`.
+    pub fn mark_told(
+        &mut self,
+        group_id: &str,
+        slot_index: usize,
+        turn: Turn,
+        holder: Option<&PersonId>,
+    ) {
+        self.told_holders
+            .insert(slot_key(group_id, slot_index, turn), holder.cloned());
+    }
+
+    /// Forget who was told about turns that ended before yesterday (or whose
+    /// group is gone). True when anything went.
+    pub fn prune_told_holders(&mut self, today: NaiveDate) -> bool {
+        let before = self.told_holders.len();
+        let groups = &self.cleaning_groups;
+        self.told_holders.retain(|key, _| {
+            let Some((group_id, turn)) = parse_slot_key(key) else {
+                return false;
+            };
+            groups
+                .iter()
+                .find(|g| g.id == group_id)
+                .is_some_and(|g| turn.dates(&g.rhythm).1 + chrono::Duration::days(1) >= today)
+        });
+        self.told_holders.len() != before
+    }
+
+    /// Forget reminders of weeks more than 8 before `(year, week)`, the
+    /// consolidated "*" ones too. True when anything went.
+    pub fn prune_sent_reminders(&mut self, (year, week): (i32, u32)) -> bool {
+        let oldest = add_weeks(year, week, -8);
+        let before = self.sent_reminders.len();
+        self.sent_reminders
+            .retain(|r| (r.iso_year, r.iso_week) >= oldest);
+        self.sent_reminders.len() != before
+    }
+}
+
+/// The group and turn of a [`slot_key`] (the group's id may hold ':').
+fn parse_slot_key(key: &str) -> Option<(&str, Turn)> {
+    let mut parts = key.rsplitn(5, ':');
+    let _slot: usize = parts.next()?.parse().ok()?;
+    let shift = parts.next()?.parse().ok()?;
+    let week = parts.next()?.parse().ok()?;
+    let year = parts.next()?.parse().ok()?;
+    Some((parts.next()?, Turn::new(year, week, shift)))
+}
+
+/// A person leaving a group because of the directory: (person, group).
+pub type DirectoryDeparture = (PersonId, GroupId);
+
+/// What following the directory remembers between two reads (`directory::reconcile`),
+/// saved so a restart in between neither forgets nor repeats anything.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct DirectoryMemory {
+    /// The departures the last good read asked for: one read asks, the next applies them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub missing: BTreeSet<DirectoryDeparture>,
+    /// When that read was; a read longer ago than the directory's `stale_after` doesn't count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_at: Option<DateTime<Utc>>,
+    /// Departures held back as too many at once, until an admin confirms
+    /// (`!directory confirm`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub held: BTreeSet<DirectoryDeparture>,
+    /// What the admins were told about and is still so (a resident with two people in the
+    /// plan, an address that can't move, an account two residents claim), so they are told
+    /// once.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub told: BTreeSet<String>,
+    /// The `residents_group` groups ("" for none, one name, or the names joined by commas:
+    /// `reconcile::Rules::key`) under which the departures were reviewed: two reads in a row
+    /// with nothing to leave, or an admin's `!directory confirm`. Until then (a fresh upgrade,
+    /// residents switched on, a group dropped) every departure is held for a confirm; more
+    /// groups than reviewed need no new review (`Rules::reviewed_by`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<String>,
+}
+
+impl DirectoryMemory {
+    pub fn is_empty(&self) -> bool {
+        *self == DirectoryMemory::default()
+    }
+}
+
+// ── Load / Save ───────────────────────────────────────────────────────────────
+
+impl State {
+    pub async fn load(path: &Path) -> Result<Self> {
+        let mut st: Self = mxbot_common::persist::load_json_or_default(path).await?;
+        // Backfill event log from existing data on first load after upgrade.
+        if st.event_log.is_empty() && !st.completions.is_empty() {
+            st.event_log = crate::analytics::backfill_events(&st);
+        }
+        Ok(st)
+    }
+
+    /// Apply a domain event: mutate state **and** append to the event log.
+    ///
+    /// This is the **only** permitted way to mutate domain state (persons,
+    /// groups, completions, swaps, absences).  Bot-infrastructure state
+    /// (reaction_dones, greeted_users)
+    /// may still be mutated directly.
+    ///
+    /// Returns `Ok(())` whether the event caused a state change or was a
+    /// no-op (idempotent).  Returns `Err` only for structural violations
+    /// such as referencing a non-existent group or person.
+    /// Low-level: append an already-applied backfill event without mutating state.
+    /// Only called from `analytics::backfill_events` bootstrapping path.
+    #[allow(dead_code)]
+    pub(crate) fn append_event(&mut self, event: crate::analytics::LoggedEvent) {
+        self.event_log.push(event);
+    }
+
+    pub fn apply_event(&mut self, event: crate::analytics::DomainEvent) -> anyhow::Result<()> {
+        use crate::analytics::DomainEvent as E;
+
+        let changed = match &event {
+            // ── Groups ────────────────────────────────────────────────────────
+            E::GroupCreated { group_id, name } => {
+                if self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    return Ok(());
+                }
+                let mut g = CleaningGroup::new(name);
+                g.id = group_id.clone();
+                self.cleaning_groups.push(g);
+                true
+            }
+            E::GroupDeleted { group_id } => {
+                let before = self.cleaning_groups.len();
+                self.cleaning_groups.retain(|g| &g.id != group_id);
+                if self.cleaning_groups.len() == before {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                // Nothing may keep pointing at the deleted group: its plan,
+                // history, absences, swaps and reminder bookkeeping go with it
+                // (`!groups disable` is the way to keep them).
+                self.slot_assignments.retain(|a| &a.group_id != group_id);
+                self.paper_styles.remove(group_id);
+                self.completions.retain(|c| &c.group_id != group_id);
+                self.absences.retain(|a| &a.group_id != group_id);
+                self.swap_requests.retain(|s| &s.group_id != group_id);
+                self.sent_reminders.retain(|r| &r.group_id != group_id);
+                self.reaction_dones.retain(|_, rd| &rd.group_id != group_id);
+                self.help_requests.retain(|_, r| &r.group_id != group_id);
+                for menu in self.turn_menus.values_mut() {
+                    menu.turns.retain(|t| &t.group_id != group_id);
+                    menu.selected = None;
+                }
+                self.early_swaps
+                    .retain(|_, s| s.trade.changes.iter().all(|c| &c.group_id != group_id));
+                true
+            }
+            E::GroupDisabled { group_id } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if !g.is_active {
+                    return Ok(());
+                }
+                g.is_active = false;
+                true
+            }
+            E::GroupEnabled { group_id } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if g.is_active {
+                    return Ok(());
+                }
+                g.is_active = true;
+                true
+            }
+            E::SlotAdded {
+                group_id,
+                slot_id,
+                slot_name,
+                place,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if g.slots.iter().any(|s| &s.id == slot_id) {
+                    return Ok(());
+                }
+                let mut s = CleaningSlot::new(slot_name);
+                s.id = slot_id.clone();
+                s.place = place.clone();
+                g.slots.push(s);
+                true
+            }
+            E::SlotRemoved { group_id, slot_id } => {
+                let removed_index = {
+                    let g = self
+                        .cleaning_groups
+                        .iter_mut()
+                        .find(|g| &g.id == group_id)
+                        .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                    match g.slots.iter().position(|s| &s.id == slot_id) {
+                        Some(idx) => {
+                            g.slots.remove(idx);
+                            idx
+                        }
+                        None => return Ok(()),
+                    }
+                };
+                // `SlotAssignment.slot_index` is a raw position into
+                // `group.slots`, not a stable id: removing a slot shifts
+                // every later slot down by one, so an untouched frozen
+                // assignment would silently start referring to the wrong
+                // slot. Drop the (now homeless) assignments for the removed
+                // slot FIRST, using their original index, then re-point the
+                // survivors at the same physical slot: reversing the order
+                // would shift a later assignment down onto `removed_index`
+                // and have it deleted by the very next step.
+                self.slot_assignments
+                    .retain(|a| !(a.group_id == *group_id && a.slot_index == removed_index));
+                for a in self.slot_assignments.iter_mut() {
+                    if a.group_id == *group_id && a.slot_index > removed_index {
+                        a.slot_index -= 1;
+                    }
+                }
+                true
+            }
+            E::SlotAssigned {
+                group_id,
+                slot_index,
+                iso_year,
+                iso_week,
+                shift,
+                person_id,
+                source,
+                actor_id: _,
+                previous_person_id: _,
+            } => {
+                // Upsert: replace any existing assignment for this (group, slot, turn).
+                self.slot_assignments.retain(|a| {
+                    !(a.group_id == *group_id
+                        && a.slot_index == *slot_index
+                        && (a.iso_year, a.iso_week, a.shift) == (*iso_year, *iso_week, *shift))
+                });
+                self.slot_assignments.push(SlotAssignment {
+                    group_id: group_id.clone(),
+                    slot_index: *slot_index,
+                    iso_year: *iso_year,
+                    iso_week: *iso_week,
+                    shift: *shift,
+                    person_id: person_id.clone(),
+                    source: source.clone(),
+                });
+                true
+            }
+            E::RhythmSet { group_id, rhythm } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if &g.rhythm == rhythm {
+                    return Ok(());
+                }
+                g.rhythm = rhythm.clone();
+                true
+            }
+            E::RoomAdded {
+                group_id,
+                slot_id,
+                room_name,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                match slot_id {
+                    Some(sid) => {
+                        let s = g
+                            .slots
+                            .iter_mut()
+                            .find(|s| &s.id == sid)
+                            .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
+                        if s.room_names
+                            .iter()
+                            .any(|r| r.eq_ignore_ascii_case(room_name))
+                        {
+                            return Ok(());
+                        }
+                        s.room_names.push(room_name.clone());
+                    }
+                    None => {
+                        if g.room_names
+                            .iter()
+                            .any(|r| r.eq_ignore_ascii_case(room_name))
+                        {
+                            return Ok(());
+                        }
+                        g.room_names.push(room_name.clone());
+                    }
+                }
+                true
+            }
+            E::RoomRemoved {
+                group_id,
+                slot_id,
+                room_name,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                match slot_id {
+                    Some(sid) => {
+                        let s = g
+                            .slots
+                            .iter_mut()
+                            .find(|s| &s.id == sid)
+                            .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
+                        let before = s.room_names.len();
+                        s.room_names.retain(|r| !r.eq_ignore_ascii_case(room_name));
+                        s.room_names.len() < before
+                    }
+                    None => {
+                        let before = g.room_names.len();
+                        g.room_names.retain(|r| !r.eq_ignore_ascii_case(room_name));
+                        g.room_names.len() < before
+                    }
+                }
+            }
+
+            // ── Persons ───────────────────────────────────────────────────────
+            E::PersonCreated {
+                person_id,
+                display_name,
+                matrix_id,
+            } => {
+                if self.persons.iter().any(|p| &p.id == person_id) {
+                    return Ok(());
+                }
+                if let Some(mxid) = matrix_id {
+                    if self
+                        .persons
+                        .iter()
+                        .any(|p| p.matrix_id.as_deref() == Some(mxid))
+                    {
+                        return Ok(());
+                    }
+                }
+                let mut p = match matrix_id.as_deref() {
+                    Some(mxid) => Person::new_matrix(mxid),
+                    None => Person::new_named(display_name),
+                };
+                p.id = person_id.clone();
+                self.persons.push(p);
+                true
+            }
+            E::PersonJoinedGroup {
+                person_id,
+                group_id,
+            } => {
+                if !self.persons.iter().any(|p| &p.id == person_id) {
+                    anyhow::bail!("Person not found: {person_id}");
+                }
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if g.member_ids.contains(person_id) {
+                    return Ok(());
+                }
+                g.member_ids.push(person_id.clone());
+                true
+            }
+            E::PersonLeftGroup {
+                person_id,
+                group_id,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                let before = g.member_ids.len();
+                g.member_ids.retain(|id| id != person_id);
+                g.member_ids.len() < before
+            }
+            E::RotationQueueSet { group_id, queue } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if &g.rotation_queue == queue {
+                    return Ok(());
+                }
+                g.rotation_queue = queue.clone();
+                true
+            }
+            E::RotationDeferralsSet { group_id, deferred } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if &g.rotation_deferred == deferred {
+                    return Ok(());
+                }
+                g.rotation_deferred = deferred.clone();
+                true
+            }
+            E::HouseWideSet {
+                group_id,
+                house_wide,
+                excused,
+                added,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if (g.house_wide, &g.house_excused, &g.house_added) == (*house_wide, excused, added)
+                {
+                    return Ok(());
+                }
+                g.house_wide = *house_wide;
+                g.house_excused = excused.clone();
+                g.house_added = added.clone();
+                true
+            }
+            E::RoomWeightSet {
+                group_id,
+                slot_id,
+                room_name,
+                weight,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                let weights = match slot_id {
+                    Some(sid) => {
+                        let s = g
+                            .slots
+                            .iter_mut()
+                            .find(|s| &s.id == sid)
+                            .ok_or_else(|| anyhow::anyhow!("Slot not found: {sid}"))?;
+                        &mut s.room_weights
+                    }
+                    None => &mut g.room_weights,
+                };
+                if weights.get(room_name).copied() == Some(*weight) {
+                    return Ok(());
+                }
+                weights.insert(room_name.clone(), *weight);
+                true
+            }
+            E::GroupWeightSet { group_id, weight } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if (g.weight - weight).abs() < f64::EPSILON {
+                    return Ok(());
+                }
+                g.weight = *weight;
+                true
+            }
+            E::PersonMatrixLinked {
+                person_id,
+                matrix_id,
+            } => {
+                if self
+                    .persons
+                    .iter()
+                    .any(|p| p.matrix_id.as_deref() == Some(matrix_id) && &p.id != person_id)
+                {
+                    anyhow::bail!("{matrix_id} is already linked to another person");
+                }
+                let p = self
+                    .persons
+                    .iter_mut()
+                    .find(|p| &p.id == person_id)
+                    .ok_or_else(|| anyhow::anyhow!("Person not found: {person_id}"))?;
+                if p.matrix_id.as_deref() == Some(matrix_id) {
+                    return Ok(());
+                }
+                p.matrix_id = Some(matrix_id.clone());
+                true
+            }
+            E::PersonDirectoryLinked {
+                person_id,
+                directory_id,
+            } => {
+                if self
+                    .persons
+                    .iter()
+                    .any(|p| p.directory_id.as_deref() == Some(directory_id) && &p.id != person_id)
+                {
+                    anyhow::bail!("{directory_id} is already another person's");
+                }
+                let p = self
+                    .persons
+                    .iter_mut()
+                    .find(|p| &p.id == person_id)
+                    .ok_or_else(|| anyhow::anyhow!("Person not found: {person_id}"))?;
+                if p.directory_id.as_deref() == Some(directory_id) {
+                    return Ok(());
+                }
+                p.directory_id = Some(directory_id.clone());
+                true
+            }
+            E::GroupDirectorySet {
+                group_id,
+                directory_group,
+            } => {
+                let g = self
+                    .cleaning_groups
+                    .iter_mut()
+                    .find(|g| &g.id == group_id)
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                if &g.directory_group == directory_group {
+                    return Ok(());
+                }
+                g.directory_group = directory_group.clone();
+                true
+            }
+
+            // ── Cleaning ──────────────────────────────────────────────────────
+            E::CleaningCompleted {
+                completed_on,
+                group_id,
+                slot_id,
+                person_id,
+                responsible_person_ids,
+                iso_year,
+                iso_week,
+                shift,
+            } => {
+                let turn = Turn::new(*iso_year, *iso_week, *shift);
+                // Idempotency: this slot (or, without slots, the group) of
+                // this turn already has a record.
+                let already_done = self.completions.iter().any(|c| {
+                    &c.group_id == group_id
+                        && (c.iso_year, c.iso_week, c.shift) == (turn.year, turn.week, turn.shift)
+                        && (slot_id.is_none() || c.slot_id == *slot_id)
+                });
+                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                if already_done {
+                    return Ok(());
+                }
+                self.completions.push(Completion {
+                    group_id: group_id.clone(),
+                    slot_id: slot_id.clone(),
+                    completed_by_id: person_id.clone(),
+                    responsible_person_ids: responsible_person_ids.clone(),
+                    iso_year: *iso_year,
+                    iso_week: *iso_week,
+                    shift: *shift,
+                    completed_on: *completed_on,
+                    completed_at: Utc::now(),
+                    skipped: false,
+                });
+                true
+            }
+            E::CleaningSkipped {
+                group_id,
+                skipper_id,
+                iso_year,
+                iso_week,
+                slot_id,
+                shift,
+            } => {
+                let group = self
+                    .group_by_id(group_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("Group not found: {group_id}"))?;
+                // Skip every open (slot, shift) of the week, or just the
+                // given slot and/or shift.
+                let shifts: Vec<u8> = match shift {
+                    Some(s) => vec![*s],
+                    None => (0..group.rhythm.for_week(*iso_year, *iso_week).shift_count() as u8)
+                        .collect(),
+                };
+                let slots: Vec<Option<SlotId>> = if group.is_multi_slot() {
+                    group
+                        .slots
+                        .iter()
+                        .map(|s| Some(s.id.clone()))
+                        .filter(|id| slot_id.is_none() || id == slot_id)
+                        .collect()
+                } else {
+                    vec![None]
+                };
+                let mut changed = false;
+                for sh in shifts {
+                    for sid in &slots {
+                        let done = self.completions.iter().any(|c| {
+                            &c.group_id == group_id
+                                && (c.iso_year, c.iso_week, c.shift) == (*iso_year, *iso_week, sh)
+                                && (sid.is_none() || c.slot_id == *sid)
+                        });
+                        if done {
+                            continue;
+                        }
+                        self.completions.push(Completion {
+                            completed_on: None,
+                            group_id: group_id.clone(),
+                            slot_id: sid.clone(),
+                            completed_by_id: skipper_id.clone(),
+                            responsible_person_ids: vec![],
+                            iso_year: *iso_year,
+                            iso_week: *iso_week,
+                            shift: sh,
+                            completed_at: Utc::now(),
+                            skipped: true,
+                        });
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            E::CleaningUndone {
+                group_id,
+                iso_year,
+                iso_week,
+                slot_id,
+                shift,
+            } => {
+                let before = self.completions.len();
+                self.completions.retain(|c| {
+                    !(&c.group_id == group_id
+                        && c.iso_year == *iso_year
+                        && c.iso_week == *iso_week
+                        && (shift.is_none() || Some(c.shift) == *shift)
+                        && (slot_id.is_none() || c.slot_id == *slot_id))
+                });
+                self.completions.len() < before
+            }
+
+            // ── Swaps ─────────────────────────────────────────────────────────
+            E::SwapRequested {
+                group_id,
+                requester_mxid,
+                target_mxid,
+                iso_year,
+                iso_week,
+                slot_index,
+                shift,
+            } => {
+                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                let id = self.next_id;
+                self.next_id += 1;
+                self.swap_requests.push(SwapRequest {
+                    id,
+                    requester: requester_mxid.clone(),
+                    target: target_mxid.clone(),
+                    group_id: group_id.clone(),
+                    iso_year: *iso_year,
+                    iso_week: *iso_week,
+                    created_at: Utc::now(),
+                    status: SwapStatus::Pending,
+                    slot_index: *slot_index,
+                    shift: *shift,
+                });
+                true
+            }
+            E::SwapApproved { swap_id, .. } => {
+                let req = self
+                    .swap_requests
+                    .iter_mut()
+                    .find(|r| r.id == *swap_id)
+                    .ok_or_else(|| anyhow::anyhow!("Swap not found: {swap_id}"))?;
+                if req.status == SwapStatus::Accepted {
+                    return Ok(());
+                }
+                if req.status != SwapStatus::Pending {
+                    anyhow::bail!("Swap #{swap_id} is not pending");
+                }
+                req.status = SwapStatus::Accepted;
+                true
+            }
+            E::SwapRejected { swap_id } => {
+                let req = self
+                    .swap_requests
+                    .iter_mut()
+                    .find(|r| r.id == *swap_id)
+                    .ok_or_else(|| anyhow::anyhow!("Swap not found: {swap_id}"))?;
+                if req.status == SwapStatus::Rejected {
+                    return Ok(());
+                }
+                if req.status != SwapStatus::Pending {
+                    anyhow::bail!("Swap #{swap_id} is not pending");
+                }
+                req.status = SwapStatus::Rejected;
+                true
+            }
+
+            // ── Absences ──────────────────────────────────────────────────────
+            E::AbsenceRecorded {
+                person_id,
+                group_id,
+                from_year,
+                from_week,
+                duration_weeks,
+            } => {
+                if !self.persons.iter().any(|p| &p.id == person_id) {
+                    anyhow::bail!("Person not found: {person_id}");
+                }
+                if !self.cleaning_groups.iter().any(|g| &g.id == group_id) {
+                    anyhow::bail!("Group not found: {group_id}");
+                }
+                self.absences
+                    .retain(|a| !(&a.person_id == person_id && &a.group_id == group_id));
+                self.absences.push(Absence {
+                    person_id: person_id.clone(),
+                    group_id: group_id.clone(),
+                    from_year: *from_year,
+                    from_week: *from_week,
+                    duration_weeks: *duration_weeks,
+                });
+                true
+            }
+            E::AbsenceCancelled { person_id } => {
+                let before = self.absences.len();
+                self.absences.retain(|a| &a.person_id != person_id);
+                self.absences.len() < before
+            }
+            // Only ever read from a newer version's log, never applied.
+            E::Unknown(_) => anyhow::bail!("an event of an unknown kind cannot be applied"),
+        };
+
+        if changed {
+            self.event_log
+                .push(crate::analytics::LoggedEvent::now(event));
+        }
+        Ok(())
+    }
+
+    pub async fn save(&mut self, path: &Path) -> Result<()> {
+        crate::paper::prune(self);
+        if let Some(key) = &self.active_command {
+            self.processed_commands.insert(key.clone());
+        }
+        // Completion times only matter while the reaction can still be undone.
+        let dones = &self.reaction_dones;
+        self.reaction_completion_times
+            .retain(|id, _| dones.contains_key(id));
+        use sha2::{Digest, Sha256};
+        let data = serde_json::to_value((
+            &self.persons,
+            &self.cleaning_groups,
+            &self.slot_assignments,
+            &self.completions,
+            &self.absences,
+            &self.swap_requests,
+            self.created_at,
+        ))?;
+        let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&data)?));
+        if fingerprint != self.schedule_fingerprint {
+            self.last_modified = Some(Utc::now());
+            self.schedule_fingerprint = fingerprint;
+        }
+        mxbot_common::persist::save_json_atomic(path, self).await
+    }
+
+    pub fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+// ── Domain lookups ────────────────────────────────────────────────────────────
+
+impl State {
+    pub fn person_by_matrix_id(&self, mxid: &str) -> Option<&Person> {
+        self.persons
+            .iter()
+            .find(|p| p.matrix_id.as_deref() == Some(mxid))
+    }
+    pub fn person_by_id(&self, id: &PersonId) -> Option<&Person> {
+        self.persons.iter().find(|p| &p.id == id)
+    }
+    pub fn find_person(&self, query: &str) -> Option<&Person> {
+        self.persons
+            .iter()
+            .find(|p| p.id == query || p.matches(query))
+    }
+    /// Everyone `query` could mean: the one person whose id or Matrix ID it
+    /// is, or else every person with that display name (case-insensitive):
+    /// several when names collide, so callers can ask instead of guessing.
+    pub fn find_persons(&self, query: &str) -> Vec<&Person> {
+        let exact: Vec<&Person> = self
+            .persons
+            .iter()
+            .filter(|p| p.id == query || p.matrix_id.as_deref() == Some(query))
+            .collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+        self.persons
+            .iter()
+            .filter(|p| p.display_name.eq_ignore_ascii_case(query))
+            .collect()
+    }
+    /// The printable plan `group_id` gets: its own style, else everyone's.
+    pub fn paper_style_for(&self, group_id: &str) -> crate::paper::Style {
+        self.paper_styles
+            .get(group_id)
+            .copied()
+            .unwrap_or(self.paper_style)
+    }
+    pub fn group_by_name(&self, name: &str) -> Option<&CleaningGroup> {
+        self.cleaning_groups
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name))
+    }
+    pub fn group_by_name_mut(&mut self, name: &str) -> Option<&mut CleaningGroup> {
+        self.cleaning_groups
+            .iter_mut()
+            .find(|g| g.name.eq_ignore_ascii_case(name))
+    }
+    pub fn group_by_id(&self, id: &GroupId) -> Option<&CleaningGroup> {
+        self.cleaning_groups.iter().find(|g| &g.id == id)
+    }
+    pub fn is_member(&self, group_id: &GroupId, person_id: &PersonId) -> bool {
+        self.group_by_id(group_id)
+            .is_some_and(|g| g.member_ids.contains(person_id))
+    }
+    pub fn groups_for_person(&self, person_id: &PersonId) -> Vec<&CleaningGroup> {
+        self.cleaning_groups
+            .iter()
+            .filter(|g| g.member_ids.contains(person_id))
+            .collect()
+    }
+    pub fn members_of<'a>(&'a self, group: &CleaningGroup) -> Vec<&'a Person> {
+        group
+            .member_ids
+            .iter()
+            .filter_map(|id| self.person_by_id(id))
+            .collect()
+    }
+}
+
+// ── Scheduling queries ────────────────────────────────────────────────────────
+//
+// Everything is expressed in `Turn`s (one shift of one due week, see
+// `rhythm`) and each group's own rhythm. Nothing here assumes that a turn
+// is a calendar week or that all groups share one interval.
+
+impl State {
+    /// True when `group` is cleaned in this ISO week: every
+    /// `rhythm.every_weeks` weeks, counted from the tracking start.
+    pub fn is_due_week(&self, group: &CleaningGroup, year: i32, week: u32) -> bool {
+        let every = group.rhythm.for_week(year, week).every_weeks() as i64;
+        let offset = weeks_between(self.tracking_start(), (year, week));
+        offset.rem_euclid(every) == 0
+    }
+
+    /// The group's turns in this week. One per shift, none in a week it
+    /// isn't due.
+    pub fn turns_in_week(&self, group: &CleaningGroup, year: i32, week: u32) -> Vec<Turn> {
+        if !self.is_due_week(group, year, week) {
+            return Vec::new();
+        }
+        (0..group.rhythm.for_week(year, week).shift_count() as u8)
+            .map(|shift| Turn::new(year, week, shift))
+            .collect()
+    }
+
+    /// All turns of `group` in the weeks `from..=to`, in order.
+    pub fn turns_between(
+        &self,
+        group: &CleaningGroup,
+        from: (i32, u32),
+        to: (i32, u32),
+    ) -> Vec<Turn> {
+        let weeks = weeks_between(from, to);
+        (0..=weeks.max(-1))
+            .flat_map(|i| {
+                let (y, w) = add_weeks(from.0, from.1, i);
+                self.turns_in_week(group, y, w)
+            })
+            .collect()
+    }
+
+    /// First week at or after `from` in which `group` is due.
+    pub fn next_due_week(&self, group: &CleaningGroup, from: (i32, u32)) -> (i32, u32) {
+        (0..=104)
+            .map(|i| add_weeks(from.0, from.1, i))
+            .find(|&(y, w)| self.is_due_week(group, y, w))
+            .unwrap_or(from)
+    }
+
+    /// The turn running today, if the group is due this week.
+    pub fn current_turn(&self, group: &CleaningGroup) -> Option<Turn> {
+        let today = today();
+        let (year, week) = (today.iso_week().year(), today.iso_week().week());
+        if !self.is_due_week(group, year, week) {
+            return None;
+        }
+        let weekday = today.weekday().num_days_from_monday() as u8;
+        let rhythm = group.rhythm.for_week(year, week);
+        rhythm
+            .contains_weekday(weekday)
+            .then(|| Turn::new(year, week, rhythm.shift_for_weekday(weekday)))
+    }
+
+    /// The turn has begun (its first day is today or earlier).
+    pub fn turn_started(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        turn.dates(&group.rhythm).0 <= today()
+    }
+
+    /// The turn is over (its last day was before today).
+    pub fn turn_over(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        turn.dates(&group.rhythm).1 < today()
+    }
+
+    /// The done/skipped record of one slot of one turn.
+    pub fn completion_for(
+        &self,
+        group: &CleaningGroup,
+        slot_index: usize,
+        turn: Turn,
+    ) -> Option<&Completion> {
+        let slot_id = group.slots.get(slot_index).map(|s| s.id.as_str());
+        self.completions.iter().find(|c| {
+            c.group_id == group.id
+                && (c.iso_year, c.iso_week, c.shift) == (turn.year, turn.week, turn.shift)
+                && (!group.is_multi_slot() || c.slot_id.as_deref() == slot_id)
+        })
+    }
+
+    pub fn is_turn_slot_done(&self, group: &CleaningGroup, slot_index: usize, turn: Turn) -> bool {
+        self.completion_for(group, slot_index, turn).is_some()
+    }
+
+    /// Slot indices of a group: `0..slots` (just 0 for a group without slots).
+    pub fn slot_indices(group: &CleaningGroup) -> std::ops::Range<usize> {
+        0..group.slots.len().max(1)
+    }
+
+    /// Every slot of the turn is done or skipped.
+    pub fn is_turn_done(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        Self::slot_indices(group).all(|i| self.is_turn_slot_done(group, i, turn))
+    }
+
+    /// Every slot of the turn was actually cleaned (none skipped).
+    pub fn is_turn_cleaned(&self, group: &CleaningGroup, turn: Turn) -> bool {
+        Self::slot_indices(group).all(|i| {
+            self.completion_for(group, i, turn)
+                .is_some_and(|c| !c.skipped)
+        })
+    }
+
+    /// Every turn of the group in this week is done or skipped (false in a
+    /// week the group isn't due).
+    pub fn is_completed(&self, group_id: &GroupId, year: i32, week: u32) -> bool {
+        let Some(group) = self.group_by_id(group_id) else {
+            return false;
+        };
+        let turns = self.turns_in_week(group, year, week);
+        !turns.is_empty() && turns.iter().all(|t| self.is_turn_done(group, *t))
+    }
+
+    /// The group appears in that week's plan message.
+    pub fn belongs_in_weekly_plan(&self, group: &CleaningGroup, year: i32, week: u32) -> bool {
+        group.is_active && self.is_due_week(group, year, week)
+    }
+
+    pub fn is_absent(
+        &self,
+        person_id: &PersonId,
+        group_id: &GroupId,
+        year: i32,
+        week: u32,
+    ) -> bool {
+        self.absences.iter().any(|a| {
+            if &a.person_id != person_id || &a.group_id != group_id {
+                return false;
+            }
+            let end = add_weeks(a.from_year, a.from_week, a.duration_weeks as i64);
+            (year, week) >= (a.from_year, a.from_week) && (year, week) < end
+        })
+    }
+
+    pub fn reminder_sent(
+        &self,
+        group_id: &str,
+        year: i32,
+        week: u32,
+        shift: u8,
+        kind: &ReminderKind,
+    ) -> bool {
+        self.sent_reminders.iter().any(|r| {
+            r.group_id == group_id
+                && (r.iso_year, r.iso_week, r.shift) == (year, week, shift)
+                && &r.kind == kind
+        })
+    }
+
+    pub fn mark_reminder_sent(
+        &mut self,
+        group_id: &str,
+        year: i32,
+        week: u32,
+        shift: u8,
+        kind: ReminderKind,
+    ) {
+        self.sent_reminders.push(SentReminder {
+            group_id: group_id.to_owned(),
+            iso_year: year,
+            iso_week: week,
+            shift,
+            kind,
+            sent_at: Some(Utc::now()),
+        });
+    }
+
+    /// Who is responsible for one slot (0 without slots) of one turn: the
+    /// frozen plan first; past its horizon, a preview of the rotation
+    /// (`resolver::preview_slot_assignee`).
+    pub fn slot_assignee(
+        &self,
+        group: &CleaningGroup,
+        slot_index: usize,
+        turn: Turn,
+    ) -> Option<&Person> {
+        if let Some(a) = self.slot_assignments.iter().find(|a| {
+            a.group_id == group.id
+                && a.slot_index == slot_index
+                && (a.iso_year, a.iso_week, a.shift) == (turn.year, turn.week, turn.shift)
+        }) {
+            return a.person_id.as_ref().and_then(|pid| self.person_by_id(pid));
+        }
+        if group.member_ids.is_empty() {
+            return None;
+        }
+        // Swaps accepted before swaps froze their result as an assignment.
+        if let Some(swap) = self.swap_requests.iter().find(|s| {
+            s.group_id == group.id
+                && s.slot_index == slot_index
+                && (s.iso_year, s.iso_week, s.shift) == (turn.year, turn.week, turn.shift)
+                && s.status == SwapStatus::Accepted
+        }) {
+            return self.person_by_matrix_id(&swap.target);
+        }
+        crate::resolver::preview_slot_assignee(self, group, slot_index, turn)
+            .and_then(|pid| self.person_by_id(&pid))
+    }
+
+    /// Every slot of the turn with its assignee.
+    pub fn turn_assignees<'a>(
+        &'a self,
+        group: &CleaningGroup,
+        turn: Turn,
+    ) -> Vec<(usize, Option<&'a Person>)> {
+        Self::slot_indices(group)
+            .map(|i| (i, self.slot_assignee(group, i, turn)))
+            .collect()
+    }
+
+    /// The slots of the turn held by `person_id`.
+    pub fn held_slots(
+        &self,
+        group: &CleaningGroup,
+        person_id: &PersonId,
+        turn: Turn,
+    ) -> Vec<usize> {
+        Self::slot_indices(group)
+            .filter(|&i| {
+                self.slot_assignee(group, i, turn)
+                    .is_some_and(|p| &p.id == person_id)
+            })
+            .collect()
+    }
+
+    /// Test helper: some shift of the week has a record for this slot.
+    #[cfg(test)]
+    pub fn is_slot_completed(
+        &self,
+        group_id: &GroupId,
+        slot_id: &SlotId,
+        year: i32,
+        week: u32,
+    ) -> bool {
+        self.completions.iter().any(|c| {
+            &c.group_id == group_id
+                && c.slot_id.as_deref() == Some(slot_id.as_str())
+                && (c.iso_year, c.iso_week) == (year, week)
+        })
+    }
+
+    pub fn last_completion(&self, group_id: &GroupId) -> Option<&Completion> {
+        self.completions
+            .iter()
+            .filter(|c| &c.group_id == group_id)
+            .max_by_key(|c| c.completed_at)
+    }
+}
+
+// ── Statistics ────────────────────────────────────────────────────────────────
+
+impl State {
+    pub fn tracking_start(&self) -> (i32, u32) {
+        if let Some(dt) = self.created_at {
+            let d = dt.date_naive();
+            return (d.iso_week().year(), d.iso_week().week());
+        }
+        if let Some(c) = self.completions.iter().min_by_key(|c| c.completed_at) {
+            let d = c.completed_at.date_naive();
+            return (d.iso_week().year(), d.iso_week().week());
+        }
+        current_iso_week()
+    }
+
+    /// Turns of the group from the tracking start that are over.
+    pub fn closed_turns(&self, group: &CleaningGroup) -> Vec<Turn> {
+        self.turns_between(group, self.tracking_start(), current_iso_week())
+            .into_iter()
+            .filter(|t| self.turn_over(group, *t))
+            .collect()
+    }
+
+    /// Closed turns in which some slot was neither done nor skipped.
+    pub fn missed_turns(&self, group: &CleaningGroup) -> Vec<Turn> {
+        self.closed_turns(group)
+            .into_iter()
+            .filter(|t| !self.is_turn_done(group, *t))
+            .collect()
+    }
+
+    /// Consecutive most recent turns that were fully cleaned; skipped turns
+    /// neither count nor break it, a running turn only counts once cleaned.
+    pub fn streak_for(&self, group: &CleaningGroup) -> u32 {
+        let mut streak = 0u32;
+        for turn in self
+            .turns_between(group, self.tracking_start(), current_iso_week())
+            .into_iter()
+            .rev()
+        {
+            if self.is_turn_cleaned(group, turn) {
+                streak += 1;
+            } else if self.is_turn_done(group, turn) || !self.turn_over(group, turn) {
+                continue;
+            } else {
+                break;
+            }
+        }
+        streak
+    }
+}
+
+// ── Week arithmetic ───────────────────────────────────────────────────────────
+
+pub fn add_weeks(year: i32, week: u32, n: i64) -> (i32, u32) {
+    let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
+    let d = mon + chrono::Duration::weeks(n);
+    (d.iso_week().year(), d.iso_week().week())
+}
+pub fn weeks_between(from: (i32, u32), to: (i32, u32)) -> i64 {
+    let a = NaiveDate::from_isoywd_opt(from.0, from.1, Weekday::Mon)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(from.0, 1, 4).unwrap());
+    let b = NaiveDate::from_isoywd_opt(to.0, to.1, Weekday::Mon)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(to.0, 1, 4).unwrap());
+    (b - a).num_weeks()
+}
+/// The configured wall-clock timezone (`schedule.timezone`), set once at
+/// startup by `main` before any command runs. Everything that decides "what
+/// week is it" (`!done`, `!plan skip`, materialize, the scheduler tick, etc.)
+/// goes through `current_iso_week()`, so this is the single place that needs
+/// to know about local time rather than threading `Config` through every
+/// call site. Falls back to UTC when unset (e.g. in unit tests), which keeps
+/// existing UTC-based test expectations valid.
+static TIMEZONE: OnceLock<chrono_tz::Tz> = OnceLock::new();
+
+/// Must be called at most once, before the first `current_iso_week()` call
+/// that should observe it (i.e. very early in `main`, right after the config
+/// is parsed). Later calls are ignored: matches the "set once at startup"
+/// contract.
+pub fn set_timezone(tz: chrono_tz::Tz) {
+    let _ = TIMEZONE.set(tz);
+}
+
+/// The ISO week for "now", in the configured local timezone rather than raw
+/// UTC. This matters right around the weekly rollover: for a UTC+1/+2
+/// timezone like Europe/Berlin, local midnight Monday is still Sunday
+/// evening in UTC, so a naive `Utc::now()`-based week would consider the
+/// week not yet rolled over for up to two hours after users already
+/// experience it as the new week (including across a bot restart timed
+/// exactly then).
+pub fn current_iso_week() -> (i32, u32) {
+    let tz = TIMEZONE.get().copied().unwrap_or(chrono_tz::UTC);
+    iso_week_at(Utc::now(), tz)
+}
+
+/// Today's date in the configured local timezone (see `current_iso_week`).
+pub fn local_time(at: DateTime<Utc>) -> DateTime<chrono_tz::Tz> {
+    at.with_timezone(&TIMEZONE.get().copied().unwrap_or(chrono_tz::UTC))
+}
+
+pub fn today() -> NaiveDate {
+    let tz = TIMEZONE.get().copied().unwrap_or(chrono_tz::UTC);
+    Utc::now().with_timezone(&tz).date_naive()
+}
+
+/// Pure helper behind `current_iso_week()`, split out so the timezone
+/// behaviour is unit-testable without touching the process-global
+/// `TIMEZONE` (which, being a `OnceLock`, can only ever be set once per test
+/// binary run and would otherwise leak into every other test).
+fn iso_week_at(now: DateTime<Utc>, tz: chrono_tz::Tz) -> (i32, u32) {
+    let d = now.with_timezone(&tz).date_naive();
+    (d.iso_week().year(), d.iso_week().week())
+}
+pub fn week_dates(year: i32, week: u32) -> String {
+    let mon = NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 4).unwrap());
+    let sun = mon + chrono::Duration::days(6);
+    if mon.month() == sun.month() {
+        format!(
+            "{} – {} {}",
+            mon.format("%-d"),
+            sun.format("%-d"),
+            mon.format("%b")
+        )
+    } else {
+        format!("{} – {}", mon.format("%-d %b"), sun.format("%-d %b"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_ids_forget_the_oldest_and_read_the_old_set_format() {
+        let mut ids: RecentIds = serde_json::from_str(r#"["$a", "$b"]"#).unwrap();
+        assert!(ids.contains("$a"));
+        assert!(!ids.insert("$b".into()));
+        for n in 0..RecentIds::CAP {
+            ids.insert(format!("${n}"));
+        }
+        assert!(!ids.contains("$a") && !ids.contains("$b"));
+        assert!(ids.contains("$0") && ids.contains(&format!("${}", RecentIds::CAP - 1)));
+        let json = serde_json::to_value(&ids).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), RecentIds::CAP);
+    }
+
+    #[test]
+    fn iso_week_follows_local_midnight_not_utc_midnight() {
+        // Sunday 23:30 UTC in January is already Monday 00:30 CET in
+        // Europe/Berlin (UTC+1). A new ISO week for anyone actually living
+        // there, even though UTC itself hasn't rolled over yet. Before this
+        // fix, `current_iso_week()` always used raw UTC, so for up to two
+        // hours (CEST in summer) around every weekly rollover, `!done`,
+        // `!takeover`, materialize, and a bot restart landing in that window
+        // would all disagree with what week users experience locally.
+        let sunday_2330_utc: DateTime<Utc> = "2024-01-14T23:30:00Z".parse().unwrap();
+        assert_eq!(
+            iso_week_at(sunday_2330_utc, chrono_tz::UTC),
+            (2024, 2),
+            "still week 2 in UTC itself"
+        );
+        assert_eq!(
+            iso_week_at(sunday_2330_utc, chrono_tz::Europe::Berlin),
+            (2024, 3),
+            "already week 3 in Europe/Berlin"
+        );
+    }
+
+    #[test]
+    fn a_group_stays_in_its_weekly_plan_once_done_and_follows_its_rhythm() {
+        // A completed group must stay visible (as done) in the pinned plan,
+        // and a group cleaned every second week only belongs to its weeks.
+        let mut state = State::default();
+        state.created_at = Some("2024-03-04T12:00:00Z".parse().unwrap()); // week 10
+        let mut group = CleaningGroup::new("Hall");
+        let (year, week) = (2024, 10);
+        state.cleaning_groups.push(group.clone());
+        assert!(state.belongs_in_weekly_plan(&group, year, week));
+
+        state.completions.push(Completion {
+            completed_on: None,
+            group_id: group.id.clone(),
+            slot_id: None,
+            completed_by_id: "p1".into(),
+            responsible_person_ids: vec!["p1".into()],
+            iso_year: year,
+            iso_week: week,
+            shift: 0,
+            completed_at: Utc::now(),
+            skipped: false,
+        });
+        assert!(state.is_completed(&group.id, year, week));
+        assert!(state.belongs_in_weekly_plan(&group, year, week));
+
+        group.rhythm.every_weeks = Some(2);
+        assert!(state.belongs_in_weekly_plan(&group, year, week));
+        assert!(!state.belongs_in_weekly_plan(&group, year, week + 1));
+        assert!(state.belongs_in_weekly_plan(&group, year, week + 2));
+        assert_eq!(
+            state.next_due_week(&group, (year, week + 1)),
+            (year, week + 2)
+        );
+    }
+}

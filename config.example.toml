@@ -1,0 +1,165 @@
+[matrix]
+homeserver    = "https://matrix.example.org"
+user_id       = "@cleaningbot:example.org"
+# Secrets may instead come from MATRIX_ACCESS_TOKEN / MATRIX_RECOVERY_KEY.
+access_token  = "syt_REPLACE_ME"
+device_id     = "REPLACE_ME"
+# recovery_key = "OPTIONAL RECOVERY KEY"
+
+[security]
+# Users allowed to invite the bot ("all" = anyone, [] = nobody).
+# Configured admins may always open a direct chat with the bot.
+# Residents who want to use the bot privately (!next, !mygroups, !ical in
+# an encrypted direct chat) must be allowed here, or the bot won't join.
+allowed_inviters = ["@admin:example.org"]
+# Rooms the bot may join: room IDs, [] for none, or "all" for every room.
+# Required: without it the bot refuses to start.
+allowed_rooms = ["!REPLACE_ME:example.org"]
+# Members of these rooms may also open a private chat with the bot.
+# dm_rooms = ["!REPLACE_ME:example.org"]
+# Only these users may run admin commands, also privately in a direct chat
+# with the bot (!groups add, !member add, …).
+admin_users = ["@admin:example.org"]
+# encryption_strategy = "identity_based"  # AllDevices | IdentityBased (default) | OnlyTrusted
+# Whose devices count: "cross_signed" = every device you signed with your
+# own identity (a new identity is accepted), "verified" = only after
+# !admin verify (a new identity needs !reset-trust and a new verification).
+trust = "cross_signed"
+
+[schedule]
+# Matrix room where all reminders and bot replies are posted.
+room_id = "!REPLACE_ME:example.org"
+
+# Default rhythm for new groups: cleaned every N weeks. Each group's rhythm
+# is set in the bot with `!groups rhythm <group> …` (e.g. `2x` = two shifts
+# per week, Mon–Tue and Thu–Fri, each with its own person; `every 2`).
+interval_weeks = 1
+
+# Day of week the weekly plan is posted and pinned: 0 = Monday … 6 = Sunday.
+# If the bot is down that day, it posts the plan later in the same week.
+# A shift starting later in the week gets its own reminder that day.
+reminder_weekday = 0          # Monday
+
+# Day of week for the last "still open" reminder of whole-week turns
+# (missed that day: the next day). Saturday leaves a weekend day to clean.
+# Shifts get theirs on their own last day.
+final_reminder_weekday = 5    # Saturday
+
+# Local time (HH:MM) from which the plan and reminders are sent each day.
+reminder_time = "09:00"
+
+# IANA timezone used for weekdays, dates and reminder times.
+timezone = "Europe/Berlin"
+
+# How many due weeks per group are planned ahead (1–104). Planned weeks are
+# fixed: later joins and leaves don't reshuffle them.
+materialize_weeks = 26
+
+# Only "round_robin" is implemented (the default).
+# fill_strategy = "round_robin"
+
+# ── The house directory (optional) ────────────────────────────────────────────
+# Who lives here, their Matrix accounts and groups, from the house's directory
+# (Authentik), read every refresh_minutes with a read-only token (view users and
+# groups) from the environment variable token_env. One resident, one person in the
+# plan, whichever of their accounts writes: their house account
+# @<login>:<server_name> (default: the bot's own server; or the localpart in
+# localpart_attribute) and the Matrix IDs in matrix_ids_attribute (entered by an
+# admin or proved with a link code). Their chosen account (matrix_preferred)
+# becomes their address. Admins are [security] admin_users only, never another
+# account of theirs. An account two people claim counts for neither.
+#
+# residents_group: who lives here, one group or a list of groups: living here is
+# being in ANY of them (the full members, "residents", and people who live here
+# for a while, "subtenants", who have a kitchen of their own). Who is in none of
+# them (moved out, deactivated) leaves every cleaning group, after two reads in a
+# row; a kitchen takes in only its members who live here. Off ("" or []) unless
+# set: switch it on once the first reads have linked everyone. Every group named
+# must exist in the directory, and someone must be in one of them, or nobody
+# leaves. Kitchens follow a group with !groups directory <group> kitchen-floor-1.
+# More departures from one group at once than max(2, 20 % of its people) wait for
+# !directory confirm <digest>, and so do all of the first ones after following
+# began (or after residents_group was switched on or lost a group; adding a group
+# needs no new review). A read older than stale_after_minutes changes nothing.
+# Without this section every account is a person of its own.
+#
+# [directory]
+# provider    = "authentik"
+# api_url     = "https://login.example.org/api/v3"
+# server_name = "example.org"
+# localpart_attribute  = "matrix_localpart"
+# matrix_ids_attribute = "matrix_ids"
+# token_env       = "DIRECTORY_TOKEN"
+# refresh_minutes = 15
+# stale_after_minutes = 60
+# residents_group = ["residents", "subtenants"]   # or one name: "residents"
+
+# ── Calendars in Nextcloud (optional) ─────────────────────────────────────────
+# With this section and [directory], every resident with a house account (in the
+# directory: their login is their Nextcloud user) gets a calendar of their own,
+# "Cleaning: <name>", owned by the bot's Nextcloud account and shared read-only
+# with them alone. It holds their turns, follows every change within a minute,
+# and is compared in full every refresh_minutes. Someone who moves out (no longer
+# in the directory, or in no group) loses it. Residents without a house account
+# get their turns from !ical as a file. The app password comes from the environment variable
+# password_env, never from this file.
+#
+# [nextcloud]
+# account_url     = "https://cloud.example.org/remote.php/dav/calendars/cleaning-bot/"
+# username        = "cleaning-bot"
+# password_env    = "CALDAV_PASSWORD"
+# refresh_minutes = 15
+# weeks           = 26
+
+# ── The website (optional) ────────────────────────────────────────────────────
+# The plan in a browser for residents on the house network, read only (README "The
+# website"). Only behind the reverse proxy with the house's login (forward auth), which
+# sets X-House-User / X-House-Groups / X-House-Name / X-House-Matrix-Ids and the secret
+# header X-Cleaning-Proxy-Secret: the value of the environment variable
+# CLEANING_PROXY_SECRET (at least 32 characters; required when enabled).
+#
+# [web]
+# enabled    = true
+# bind_addr  = "0.0.0.0:8081"
+# public_url = "https://putzplan.example.org"
+# allowed_groups = ["residents"]   # X-House-Groups that may see it; [] = nobody logged in
+#                                   (who lives here: e.g. ["residents", "subtenants"])
+# Without a login, see the plan as a guest (no own turns): only for a proxy that asks for
+# the login just from outside the house, as Caddy's forward_auth_skip_internal does. Its
+# "Log in" link goes to /login, where the proxy asks for the login from everywhere too.
+# guests = true
+# The house bar's link home ("⌂ Example"); unset: public_url's parent domain and its name.
+# home_url  = "https://example.org/"
+# home_name = "Example"
+
+# ── Groups and members ─────────────────────────────────────────────────────────
+# Groups and members are managed at runtime via bot commands, not in this file.
+#
+# To set up groups after starting the bot, use:
+#   !groups add <name>: create a cleaning group
+#   !member add <@user:server | name> <group>: add a Matrix user (or a person without Matrix)
+#   !member remove <@user:server | name> <group>: remove them again
+#   !groups: all groups and their members
+#
+# Run !help (everyone) and !help admin in the bot room for all commands.
+
+[security.verification]
+# Users allowed to complete first-time verification. If omitted or empty,
+# an explicit allowed_inviters list is used as the fallback.
+allowed_users = ["@you:matrix.org"]
+# Also allow first-time verification for users sharing a joined room with the bot.
+allow_users_from_joined_rooms = false
+# SAS-only verification limits.
+flow_timeout_secs = 300
+grant_ttl_secs = 600
+max_concurrent = 8
+
+[security.admin_dm]
+# Admins can open a direct chat with the bot and manage it there:
+#   !admin status | verify | settings | set <key> <value> | unset <key>
+# `!admin verify` starts mutual emoji (SAS) verification with you.
+enabled = true
+# Only accept admin commands in end-to-end encrypted direct chats.
+require_encryption = true
+# Only accept admin commands from a device that counts under `trust` above.
+require_verified_device = false

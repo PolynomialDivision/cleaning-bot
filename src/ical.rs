@@ -1,0 +1,316 @@
+//! ICS (iCalendar) rendering.
+//!
+//! `render_ics` is a pure function over a `ScheduleSnapshot`.
+//! It performs no state access, no scheduling logic, no mutations.
+//!
+//! Determinism guarantee: identical snapshot + identical person_id → identical bytes.
+
+use crate::{
+    domain::PersonId,
+    schedule::{AssignmentInstance, ScheduleSnapshot},
+};
+
+/// Render an RFC 5545–compliant `.ics` string for a specific person.
+///
+/// Returns only the events where `person_id` is the assigned person.
+/// Each event uses the assignment's pre-computed deterministic UID.
+/// DTSTAMP is the snapshot's `state_timestamp` (stable for unchanged state).
+/// `me_link`: the web plan's personal page, a line in every event's description.
+pub fn render_ics(
+    snapshot: &ScheduleSnapshot,
+    person_id: &PersonId,
+    me_link: Option<&str>,
+) -> String {
+    let assignments = snapshot.for_person(person_id);
+
+    let dtstamp = snapshot
+        .state_timestamp
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string();
+
+    let person_name = assignments
+        .first()
+        .and_then(|a| a.assignee.as_ref())
+        .map(|p| p.name.as_str())
+        .unwrap_or("?");
+
+    let mut events = String::new();
+    for a in &assignments {
+        push_event(&mut events, snapshot, a, person_id, &dtstamp, me_link);
+    }
+
+    let mut out = String::new();
+    out.push_str("BEGIN:VCALENDAR\r\n");
+    prop(&mut out, "VERSION", "2.0");
+    prop(&mut out, "PRODID", "-//Cleaning Bot//EN");
+    prop(&mut out, "CALSCALE", "GREGORIAN");
+    prop(&mut out, "METHOD", "PUBLISH");
+    prop(
+        &mut out,
+        "X-WR-CALNAME",
+        &ical_text(&format!("Cleaning – {person_name}")),
+    );
+    out.push_str(&events);
+    out.push_str("END:VCALENDAR\r\n");
+    out
+}
+
+/// One turn of `person_id` as a VEVENT (its UID the turn's, stable), into `events`.
+fn push_event(
+    events: &mut String,
+    snapshot: &ScheduleSnapshot,
+    a: &AssignmentInstance,
+    person_id: &PersonId,
+    dtstamp: &str,
+    me_link: Option<&str>,
+) {
+    let dtstart = a.start.format("%Y%m%d").to_string();
+    let dtend = (a.end + chrono::Duration::days(1))
+        .format("%Y%m%d")
+        .to_string();
+    let summary = ical_text(&match &a.shift_label {
+        Some(shift) => format!("🧹 {} ({shift})", a.group_name),
+        None => format!("🧹 {}", a.group_name),
+    });
+
+    let mut desc_parts = vec![a.period_label.clone()];
+    if let Some(place) = &a.place {
+        desc_parts.push(format!("Task: {place}"));
+    }
+    let crew: Vec<&str> = snapshot
+        .crew(a)
+        .iter()
+        .filter_map(|b| b.assignee.as_ref())
+        .map(|p| p.name.as_str())
+        .collect();
+    if !crew.is_empty() {
+        desc_parts.push(format!("Together with: {}", crew.join(", ")));
+    }
+    if a.is_skipped {
+        desc_parts.push("Skipped: no cleaning required".into());
+    }
+    if let Some(date) = a.completed_at {
+        desc_parts.push(format!("Completed: {date}"));
+    }
+    if !a.room_names.is_empty() {
+        desc_parts.push(format!("Rooms: {}", a.room_names.join(", ")));
+    }
+    // Show other assignees of the same group and turn (siblings in snapshot).
+    let others: Vec<&str> = snapshot
+        .assignments
+        .iter()
+        .filter(|b| {
+            b.group_id == a.group_id
+                && b.iso_year == a.iso_year
+                && b.iso_week == a.iso_week
+                && b.shift == a.shift
+                && b.assignee
+                    .as_ref()
+                    .map(|p| &p.id != person_id)
+                    .unwrap_or(false)
+        })
+        .filter_map(|b| b.assignee.as_ref().map(|p| p.name.as_str()))
+        .collect();
+    if !others.is_empty() {
+        desc_parts.push(format!("Others: {}", others.join(", ")));
+    }
+    if a.is_completed && !a.is_skipped {
+        if let Some(by) = &a.completed_by {
+            desc_parts.push(format!("✓ Done by {by}"));
+        } else {
+            desc_parts.push("✓ Done".to_owned());
+        }
+    }
+    if let Some(link) = me_link {
+        desc_parts.push(format!("Your turns: {link}"));
+    }
+    let description = ical_text(&desc_parts.join("\n"));
+
+    events.push_str("BEGIN:VEVENT\r\n");
+    prop(events, "UID", &a.uid);
+    prop(events, "DTSTAMP", dtstamp);
+    prop(events, "DTSTART;VALUE=DATE", &dtstart);
+    prop(events, "DTEND;VALUE=DATE", &dtend);
+    prop(events, "SUMMARY", &summary);
+    prop(events, "DESCRIPTION", &description);
+    prop(
+        events,
+        "STATUS",
+        if a.is_skipped {
+            "CANCELLED"
+        } else {
+            "CONFIRMED"
+        },
+    );
+    prop(events, "LAST-MODIFIED", dtstamp);
+    prop(events, "TRANSP", "TRANSPARENT");
+    events.push_str("END:VEVENT\r\n");
+}
+
+/// One turn as a CalDAV calendar object: a VCALENDAR with only that VEVENT (no METHOD, which
+/// a stored object must not carry). `dtstamp` as `YYYYMMDDTHHMMSSZ`.
+pub fn render_event(
+    snapshot: &ScheduleSnapshot,
+    a: &AssignmentInstance,
+    person_id: &PersonId,
+    dtstamp: &str,
+    me_link: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("BEGIN:VCALENDAR\r\n");
+    prop(&mut out, "VERSION", "2.0");
+    prop(&mut out, "PRODID", "-//Cleaning Bot//EN");
+    prop(&mut out, "CALSCALE", "GREGORIAN");
+    push_event(&mut out, snapshot, a, person_id, dtstamp, me_link);
+    out.push_str("END:VCALENDAR\r\n");
+    out
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn ical_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace('\n', "\\n")
+        .replace('\r', "")
+}
+
+fn prop(out: &mut String, name: &str, value: &str) {
+    fold_line(out, &format!("{name}:{value}"));
+}
+
+fn fold_line(out: &mut String, line: &str) {
+    if line.len() <= 75 {
+        out.push_str(line);
+        out.push_str("\r\n");
+        return;
+    }
+    let first = char_boundary(line, 75);
+    out.push_str(&line[..first]);
+    out.push_str("\r\n");
+    let mut rest = &line[first..];
+    while !rest.is_empty() {
+        let cut = char_boundary(rest, 74);
+        out.push(' ');
+        out.push_str(&rest[..cut]);
+        out.push_str("\r\n");
+        rest = &rest[cut..];
+    }
+}
+
+fn char_boundary(s: &str, max: usize) -> usize {
+    let n = max.min(s.len());
+    (0..=n).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        domain::{CleaningGroup, Person},
+        schedule::build_schedule,
+        state::State,
+    };
+    use chrono::Utc;
+
+    fn make_state() -> State {
+        let mut st = State::default();
+        st.created_at = Some(Utc::now());
+        st.last_modified = st.created_at;
+        let p = Person::new_matrix("@alice:example.org");
+        let id = p.id.clone();
+        st.persons.push(p);
+        let mut g = CleaningGroup::new("Kitchen");
+        g.member_ids.push(id);
+        st.cleaning_groups.push(g);
+        st
+    }
+
+    #[test]
+    fn ics_output_is_deterministic() {
+        let st = make_state();
+        let sn1 = build_schedule(&st, 4);
+        let sn2 = build_schedule(&st, 4);
+        let id = &st.persons[0].id;
+        assert_eq!(render_ics(&sn1, id, None), render_ics(&sn2, id, None));
+    }
+
+    #[test]
+    fn ics_contains_stable_uids() {
+        let st = make_state();
+        let sn1 = build_schedule(&st, 2);
+        let sn2 = build_schedule(&st, 2);
+        let id = &st.persons[0].id;
+        let body1 = render_ics(&sn1, id, None);
+        let body2 = render_ics(&sn2, id, None);
+        // Extract all UID lines and compare.
+        let uids1: Vec<&str> = body1.lines().filter(|l| l.starts_with("UID:")).collect();
+        let uids2: Vec<&str> = body2.lines().filter(|l| l.starts_with("UID:")).collect();
+        assert_eq!(uids1, uids2, "UIDs must be stable");
+        assert!(!uids1.is_empty(), "should have at least one VEVENT");
+    }
+
+    #[test]
+    fn ics_empty_for_unknown_person() {
+        let st = make_state();
+        let sn = build_schedule(&st, 4);
+        let ics = render_ics(&sn, &"not-a-real-uuid".to_owned(), None);
+        assert!(
+            !ics.contains("BEGIN:VEVENT"),
+            "no events for unknown person"
+        );
+    }
+
+    #[test]
+    fn every_event_links_the_web_plan_when_there_is_one() {
+        let st = make_state();
+        let sn = build_schedule(&st, 2);
+        let id = &st.persons[0].id;
+        let link = "https://putzplan.example.org/me";
+        let unfold = |ics: String| ics.replace("\r\n ", "");
+        let with = unfold(render_ics(&sn, id, Some(link)));
+        let events = with.matches("BEGIN:VEVENT").count();
+        assert!(events > 0);
+        assert_eq!(
+            with.lines()
+                .filter(|l| l.starts_with("DESCRIPTION:")
+                    && l.ends_with("\\nYour turns: https://putzplan.example.org/me"))
+                .count(),
+            events,
+            "{with}"
+        );
+        // The same every time; without the website no line at all.
+        assert_eq!(with, unfold(render_ics(&sn, id, Some(link))));
+        assert!(!render_ics(&sn, id, None).contains("Your turns"));
+        let one = &sn.for_person(id)[0];
+        assert!(
+            unfold(render_event(&sn, one, id, "20260101T000000Z", Some(link)))
+                .contains("Your turns: https://putzplan.example.org/me")
+        );
+    }
+
+    #[test]
+    fn fold_short_line_unchanged() {
+        let mut out = String::new();
+        fold_line(&mut out, "SUMMARY:Hello");
+        assert_eq!(out, "SUMMARY:Hello\r\n");
+    }
+
+    #[test]
+    fn fold_long_line_wraps() {
+        let long = format!("DESCRIPTION:{}", "x".repeat(100));
+        let mut out = String::new();
+        fold_line(&mut out, &long);
+        for physical in out.split("\r\n").filter(|l| !l.is_empty()) {
+            assert!(physical.len() <= 75, "line too long: {physical:?}");
+        }
+    }
+
+    #[test]
+    fn ical_text_escapes() {
+        assert_eq!(ical_text("a,b;c\\d\ne"), "a\\,b\\;c\\\\d\\ne");
+    }
+}
