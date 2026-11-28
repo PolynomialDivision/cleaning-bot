@@ -213,7 +213,9 @@ pub(crate) fn notice_text(state: &State, changes: &[Change]) -> Option<(String, 
 
 /// After a notice: its people count as told, unless something else told
 /// about a slot meanwhile (its record moved on). A new slot had no record.
+/// The next notice gets a transaction ID of its own ([`notice_txn`]).
 pub(crate) fn record_sent(state: &mut State, changes: &[Change]) {
+    state.notices_sent += 1;
     for c in changes {
         let key = slot_key(&c.group_id, c.slot_index, c.turn);
         if state.told_holders.get(&key).cloned().flatten() == c.was {
@@ -222,9 +224,16 @@ pub(crate) fn record_sent(state: &mut State, changes: &[Change]) {
     }
 }
 
-/// The transaction ID of the notice for `changes`: the same changes give the
-/// same ID, so a notice sent again after a crash shows only once.
-fn txn_id(changes: &[Change]) -> OwnedTransactionId {
+/// The transaction ID of the next notice for `changes`: the count of notices sent so far and
+/// the changes. Sent again after a crash (nothing recorded yet), it is the same ID and shows
+/// once; the same changes told again later (Alice ➡️ Bob, back, and again) are another notice,
+/// which the homeserver would otherwise answer with the first one's event and not post.
+fn notice_txn(state: &State, changes: &[Change]) -> OwnedTransactionId {
+    format!("{}-{}", txn_id(changes), state.notices_sent).into()
+}
+
+/// The part of [`notice_txn`] from `changes`.
+fn txn_id(changes: &[Change]) -> String {
     let content: Vec<String> = changes
         .iter()
         .map(|c| {
@@ -237,7 +246,7 @@ fn txn_id(changes: &[Change]) -> OwnedTransactionId {
         })
         .collect();
     let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, content.join(",").as_bytes());
-    format!("notice-{id}").into()
+    format!("notice-{id}")
 }
 
 /// Record the slots seen for the first time, and tell the changes when the
@@ -253,7 +262,7 @@ pub(crate) async fn run(
         local_now.minute(),
         &ctx.config.schedule.reminder_time,
     );
-    let (changes, text, mxids) = {
+    let (changes, text, mxids, txn) = {
         let mut state = ctx.state.lock().await;
         let scan = scan(&state, today);
         for c in &scan.first_seen {
@@ -268,10 +277,11 @@ pub(crate) async fn run(
         let Some((text, mxids)) = notice_text(&state, &scan.changes) else {
             return Ok(());
         };
-        (scan.changes, text, mxids)
+        let txn = notice_txn(&state, &scan.changes);
+        (scan.changes, text, mxids, txn)
     };
     let content = crate::scheduler::mention_message(ctx, &text, &mxids, room).await;
-    mxbot_common::send::send_with_retry_txn(room, content, &txn_id(&changes))
+    mxbot_common::send::send_with_retry_txn(room, content, &txn)
         .await
         .map_err(|e| anyhow::anyhow!("send failed: {e}"))?;
     let mut state = ctx.state.lock().await;
@@ -590,5 +600,39 @@ mod tests {
         let entering = scan(&state, later);
         assert!(entering.changes.is_empty(), "{:?}", entering.changes);
         assert_eq!(entering.first_seen.len(), 4);
+    }
+
+    #[test]
+    fn a_change_told_again_later_gets_a_notice_of_its_own() {
+        let today = wednesday();
+        let mut state = house(today);
+        let seen = scan(&state, today);
+        record(&mut state, &seen);
+        let turn = crate::rhythm::Turn {
+            year: 2026,
+            week: 42,
+            shift: 0,
+        };
+        // Kitchen next week: Alice ➡️ Bob, told
+        reassign(&mut state, 0, 0, turn, Some(1));
+        let first = scan(&state, today).changes;
+        assert_eq!(first.len(), 1);
+        let told = notice_txn(&state, &first);
+        // not sent yet (a crash): the same notice, the same ID
+        assert_eq!(notice_txn(&state, &first), told);
+        record_sent(&mut state, &first);
+
+        // back to Alice, told, then to Bob once more: the same change as the first
+        reassign(&mut state, 0, 0, turn, Some(0));
+        let back = scan(&state, today).changes;
+        record_sent(&mut state, &back);
+        reassign(&mut state, 0, 0, turn, Some(1));
+        let again = scan(&state, today).changes;
+        assert_eq!(again, first);
+        assert_ne!(
+            notice_txn(&state, &again),
+            told,
+            "the homeserver would answer with the first notice and post nothing"
+        );
     }
 }

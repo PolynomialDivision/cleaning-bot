@@ -626,6 +626,10 @@ pub struct State {
     /// swap) records it here, so the change notices don't tell them again.
     #[serde(default)]
     pub told_holders: std::collections::BTreeMap<String, Option<PersonId>>,
+    /// Change notices sent so far (`notices`): part of each notice's transaction ID, so a
+    /// change told again later is a new message, not the first one's ID again.
+    #[serde(default)]
+    pub notices_sent: u64,
     /// Departures of the last hour, for an undo by coming back
     /// (`commands::RESTORE_WINDOW_MINUTES`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
